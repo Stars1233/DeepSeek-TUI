@@ -311,6 +311,9 @@ interfaces, and extension points.
 
 ## Usage
 
+All examples use `codewhale`. The short form `codew` works everywhere —
+it's a silent alias that forwards to `codewhale`.
+
 ```bash
 codewhale                                         # interactive TUI
 codewhale "explain this function"                 # one-shot prompt

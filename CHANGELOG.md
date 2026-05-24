@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`codew` convenience alias.** `codew` is a short-form command that silently
+  forwards to `codewhale`. Six fewer keystrokes, same binary. Ships with the
+  Rust `codewhale-cli` crate and the npm `codewhale` package (#2013).
+
+### Changed
+
+- **App state migrates to `~/.codewhale/`.** New installs write product-owned
+  state (config, sessions, tasks, skills, logs, etc.) under `~/.codewhale/`.
+  `~/.deepseek/` continues to work as a compatibility fallback — no data loss,
+  no forced migration. `CODEWHALE_HOME` and `CODEWHALE_CONFIG_PATH` env vars
+  are now supported alongside existing `DEEPSEEK_*` vars (#2011).
+- **Project config overlay prefers `.codewhale/config.toml`** before
+  `.deepseek/config.toml`. Both are read; the CodeWhale root takes precedence.
+- **Doctor reports active state root** and whether legacy `~/.deepseek/`
+  state is also present.
+
+### Fixed
+
+- **`/save` no longer creates repo-local `session_*.json`.** Default saves
+  now go to the managed sessions directory instead of the current workspace.
+  Explicit `/save path/to/file.json` exports still work as before (#2010).
+- **Boot-time session prune** caps managed sessions at 50 on every startup,
+  preventing unbounded growth of `~/.codewhale/sessions/`.
+- **Checkpoint path resolution** no longer hardcodes `~/.deepseek/` — uses
+  the resolved session directory instead.
+
 ## [0.8.43] - 2026-05-24
 
 ### Fixed
