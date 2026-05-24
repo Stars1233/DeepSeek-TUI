@@ -916,12 +916,24 @@ pub(super) fn apply_reasoning_effort(
             }
         },
         "low" | "minimal" | "medium" | "mid" | "high" | "" => match provider {
+            // DeepSeek compatibility: low/medium both map to high
             ApiProvider::Deepseek
             | ApiProvider::DeepseekCN
-            | ApiProvider::Openrouter
-            | ApiProvider::Novita
             | ApiProvider::Sglang => {
                 body["reasoning_effort"] = json!("high");
+                body["thinking"] = json!({ "type": "enabled" });
+            }
+            // OpenRouter/Novita: pass through the actual user-chosen value.
+            // OpenRouter's unified scale is none/minimal/low/medium/high/xhigh;
+            // DeepSeek models hosted there accept those directly.
+            ApiProvider::Openrouter
+            | ApiProvider::Novita => {
+                let value = match normalized.as_str() {
+                    "low" | "minimal" => "low",
+                    "medium" | "mid" => "medium",
+                    _ => "high",
+                };
+                body["reasoning_effort"] = json!(value);
                 body["thinking"] = json!({ "type": "enabled" });
             }
             ApiProvider::Fireworks => {
@@ -1940,6 +1952,32 @@ mod tests {
             body.get("thinking").is_none(),
             "Fireworks strict-validates OpenAI-compatible requests and rejects top-level thinking"
         );
+    }
+
+    #[test]
+    fn reasoning_effort_maps_openrouter_scale_without_deepseek_max_label() {
+        for (input, expected) in [
+            ("low", "low"),
+            ("minimal", "low"),
+            ("medium", "medium"),
+            ("mid", "medium"),
+            ("high", "high"),
+            ("max", "xhigh"),
+            ("xhigh", "xhigh"),
+        ] {
+            let mut body = json!({});
+            apply_reasoning_effort(&mut body, Some(input), ApiProvider::Openrouter);
+
+            assert_eq!(
+                body.get("reasoning_effort").and_then(Value::as_str),
+                Some(expected),
+                "OpenRouter effort mapping for {input}"
+            );
+            assert_eq!(
+                body.pointer("/thinking/type").and_then(Value::as_str),
+                Some("enabled")
+            );
+        }
     }
 
     #[test]
