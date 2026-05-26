@@ -462,6 +462,13 @@ impl ConfigToml {
             "providers.fireworks.http_headers" => {
                 serialize_http_headers(&self.providers.fireworks.http_headers)
             }
+            "providers.moonshot.api_key" => self.providers.moonshot.api_key.clone(),
+            "providers.moonshot.base_url" => self.providers.moonshot.base_url.clone(),
+            "providers.moonshot.model" => self.providers.moonshot.model.clone(),
+            "providers.moonshot.auth_mode" => self.providers.moonshot.auth_mode.clone(),
+            "providers.moonshot.http_headers" => {
+                serialize_http_headers(&self.providers.moonshot.http_headers)
+            }
             "providers.sglang.api_key" => self.providers.sglang.api_key.clone(),
             "providers.sglang.base_url" => self.providers.sglang.base_url.clone(),
             "providers.sglang.model" => self.providers.sglang.model.clone(),
@@ -612,6 +619,21 @@ impl ConfigToml {
             "providers.fireworks.http_headers" => {
                 self.providers.fireworks.http_headers = parse_http_headers(value)?;
             }
+            "providers.moonshot.api_key" => {
+                self.providers.moonshot.api_key = Some(value.to_string());
+            }
+            "providers.moonshot.base_url" => {
+                self.providers.moonshot.base_url = Some(value.to_string());
+            }
+            "providers.moonshot.model" => {
+                self.providers.moonshot.model = Some(value.to_string());
+            }
+            "providers.moonshot.auth_mode" => {
+                self.providers.moonshot.auth_mode = Some(value.to_string());
+            }
+            "providers.moonshot.http_headers" => {
+                self.providers.moonshot.http_headers = parse_http_headers(value)?;
+            }
             "providers.sglang.api_key" => {
                 self.providers.sglang.api_key = Some(value.to_string());
             }
@@ -716,6 +738,11 @@ impl ConfigToml {
             "providers.fireworks.base_url" => self.providers.fireworks.base_url = None,
             "providers.fireworks.model" => self.providers.fireworks.model = None,
             "providers.fireworks.http_headers" => self.providers.fireworks.http_headers.clear(),
+            "providers.moonshot.api_key" => self.providers.moonshot.api_key = None,
+            "providers.moonshot.base_url" => self.providers.moonshot.base_url = None,
+            "providers.moonshot.model" => self.providers.moonshot.model = None,
+            "providers.moonshot.auth_mode" => self.providers.moonshot.auth_mode = None,
+            "providers.moonshot.http_headers" => self.providers.moonshot.http_headers.clear(),
             "providers.sglang.api_key" => self.providers.sglang.api_key = None,
             "providers.sglang.base_url" => self.providers.sglang.base_url = None,
             "providers.sglang.model" => self.providers.sglang.model = None,
@@ -868,6 +895,21 @@ impl ConfigToml {
         }
         if let Some(v) = serialize_http_headers(&self.providers.fireworks.http_headers) {
             out.insert("providers.fireworks.http_headers".to_string(), v);
+        }
+        if let Some(v) = self.providers.moonshot.api_key.as_ref() {
+            out.insert("providers.moonshot.api_key".to_string(), redact_secret(v));
+        }
+        if let Some(v) = self.providers.moonshot.base_url.as_ref() {
+            out.insert("providers.moonshot.base_url".to_string(), v.clone());
+        }
+        if let Some(v) = self.providers.moonshot.model.as_ref() {
+            out.insert("providers.moonshot.model".to_string(), v.clone());
+        }
+        if let Some(v) = self.providers.moonshot.auth_mode.as_ref() {
+            out.insert("providers.moonshot.auth_mode".to_string(), v.clone());
+        }
+        if let Some(v) = serialize_http_headers(&self.providers.moonshot.http_headers) {
+            out.insert("providers.moonshot.http_headers".to_string(), v);
         }
         if let Some(v) = self.providers.sglang.api_key.as_ref() {
             out.insert("providers.sglang.api_key".to_string(), redact_secret(v));
@@ -1028,7 +1070,8 @@ impl ConfigToml {
             .or_else(|| self.model.clone())
             .unwrap_or_else(|| {
                 if provider == ProviderKind::Moonshot
-                    && auth_mode.as_deref().is_some_and(auth_mode_uses_kimi_oauth)
+                    && (auth_mode.as_deref().is_some_and(auth_mode_uses_kimi_oauth)
+                        || moonshot_base_url_uses_kimi_code(&base_url))
                 {
                     DEFAULT_KIMI_CODE_MODEL.to_string()
                 } else {
@@ -1255,6 +1298,13 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Vllm => DEFAULT_VLLM_BASE_URL,
         ProviderKind::Ollama => DEFAULT_OLLAMA_BASE_URL,
     }
+}
+
+fn moonshot_base_url_uses_kimi_code(base_url: &str) -> bool {
+    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
+    normalized == DEFAULT_KIMI_CODE_BASE_URL
+        || normalized == "https://api.kimi.com/coding"
+        || normalized.starts_with("https://api.kimi.com/coding/")
 }
 
 fn base_url_is_custom_for_provider(provider: ProviderKind, base_url: &str) -> bool {
@@ -2359,6 +2409,52 @@ mod tests {
     }
 
     #[test]
+    fn moonshot_provider_config_values_round_trip() -> Result<()> {
+        let mut config = ConfigToml::default();
+
+        config.set_value("providers.moonshot.api_key", "moonshot-secret-value")?;
+        config.set_value("providers.moonshot.base_url", DEFAULT_KIMI_CODE_BASE_URL)?;
+        config.set_value("providers.moonshot.model", DEFAULT_KIMI_CODE_MODEL)?;
+        config.set_value("providers.moonshot.auth_mode", "api_key")?;
+        config.set_value("providers.moonshot.http_headers", "X-Test=ok")?;
+
+        assert_eq!(
+            config
+                .get_display_value("providers.moonshot.api_key")
+                .as_deref(),
+            Some("moon***alue")
+        );
+        assert_eq!(
+            config.get_value("providers.moonshot.base_url").as_deref(),
+            Some(DEFAULT_KIMI_CODE_BASE_URL)
+        );
+        assert_eq!(
+            config.get_value("providers.moonshot.model").as_deref(),
+            Some(DEFAULT_KIMI_CODE_MODEL)
+        );
+        assert_eq!(
+            config.get_value("providers.moonshot.auth_mode").as_deref(),
+            Some("api_key")
+        );
+        assert_eq!(
+            config
+                .list_values()
+                .get("providers.moonshot.api_key")
+                .map(String::as_str),
+            Some("moon***alue")
+        );
+
+        config.unset_value("providers.moonshot.auth_mode")?;
+        config.unset_value("providers.moonshot.base_url")?;
+        config.unset_value("providers.moonshot.model")?;
+
+        assert_eq!(config.get_value("providers.moonshot.auth_mode"), None);
+        assert_eq!(config.get_value("providers.moonshot.base_url"), None);
+        assert_eq!(config.get_value("providers.moonshot.model"), None);
+        Ok(())
+    }
+
+    #[test]
     fn project_merge_denies_credentials_endpoints_and_provider_selection() {
         let mut base = ConfigToml {
             provider: ProviderKind::Deepseek,
@@ -2635,6 +2731,30 @@ mod tests {
         assert_eq!(resolved.model, DEFAULT_KIMI_CODE_MODEL);
         assert_eq!(resolved.api_key, None);
         assert_eq!(resolved.api_key_source, None);
+    }
+
+    #[test]
+    fn moonshot_kimi_code_api_key_endpoint_defaults_to_kimi_for_coding() {
+        let _lock = env_lock();
+        let _env = EnvGuard::without_deepseek_runtime_overrides();
+        let mut config = ConfigToml {
+            provider: ProviderKind::Moonshot,
+            ..ConfigToml::default()
+        };
+        config.providers.moonshot.api_key = Some("kimi-code-key".to_string());
+        config.providers.moonshot.base_url = Some(DEFAULT_KIMI_CODE_BASE_URL.to_string());
+
+        let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+
+        assert_eq!(resolved.provider, ProviderKind::Moonshot);
+        assert_eq!(resolved.auth_mode, None);
+        assert_eq!(resolved.base_url, DEFAULT_KIMI_CODE_BASE_URL);
+        assert_eq!(resolved.model, DEFAULT_KIMI_CODE_MODEL);
+        assert_eq!(resolved.api_key.as_deref(), Some("kimi-code-key"));
+        assert_eq!(
+            resolved.api_key_source,
+            Some(RuntimeApiKeySource::ConfigFile)
+        );
     }
 
     #[test]

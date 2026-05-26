@@ -314,15 +314,23 @@ codewhale --provider novita --model deepseek/deepseek-v4-pro
 codewhale auth set --provider fireworks --api-key "YOUR_FIREWORKS_API_KEY"
 codewhale --provider fireworks --model deepseek-v4-pro
 
-# Moonshot/Kimi
-codewhale auth set --provider moonshot --api-key "YOUR_MOONSHOT_OR_KIMI_API_KEY"
-codewhale --provider moonshot --model kimi-k2.6
+# Kimi Code plan API key
+codewhale auth set --provider moonshot --api-key "YOUR_KIMI_CODE_API_KEY"
+codewhale config set providers.moonshot.auth_mode api_key
+codewhale config set providers.moonshot.base_url https://api.kimi.com/coding/v1
+codewhale config set providers.moonshot.model kimi-for-coding
+codewhale --provider moonshot
 
-# Moonshot/Kimi with Kimi CLI OAuth
-kimi login
-mkdir -p ~/.deepseek
-printf 'provider = "moonshot"\n\n[providers.moonshot]\nauth_mode = "kimi_oauth"\n' >> ~/.deepseek/config.toml
-codewhale --provider moonshot --model kimi-for-coding
+# Kimi/Moonshot Platform API key
+codewhale auth set --provider moonshot --api-key "YOUR_MOONSHOT_OR_KIMI_API_KEY"
+codewhale config set providers.moonshot.auth_mode api_key
+codewhale config set providers.moonshot.base_url https://api.moonshot.ai/v1
+codewhale config set providers.moonshot.model kimi-k2.6
+codewhale --provider moonshot
+
+# Kimi through OpenRouter's catalog
+codewhale auth set --provider openrouter --api-key "YOUR_OPENROUTER_API_KEY"
+codewhale --provider openrouter --model moonshotai/kimi-k2.6
 
 # Self-hosted SGLang
 SGLANG_BASE_URL="http://localhost:30000/v1" codewhale --provider sglang --model deepseek-v4-flash
@@ -512,7 +520,7 @@ Key environment variables:
 | `OPENAI_BASE_URL` / `OPENAI_MODEL` | Generic OpenAI-compatible endpoint and model ID |
 | `ATLASCLOUD_BASE_URL` / `ATLASCLOUD_MODEL` | AtlasCloud endpoint and model override |
 | `WANJIE_ARK_BASE_URL` / `WANJIE_BASE_URL` / `WANJIE_MAAS_BASE_URL` / `WANJIE_ARK_MODEL` / `WANJIE_MODEL` / `WANJIE_MAAS_MODEL` | Wanjie Ark endpoint and model override |
-| `MOONSHOT_BASE_URL` / `KIMI_BASE_URL` / `MOONSHOT_MODEL` / `KIMI_MODEL_NAME` / `KIMI_MODEL` | Moonshot/Kimi endpoint and model override |
+| `MOONSHOT_BASE_URL` / `KIMI_BASE_URL` / `MOONSHOT_MODEL` / `KIMI_MODEL_NAME` / `KIMI_MODEL` | Moonshot/Kimi endpoint and model override. For a Kimi Code plan API key, use `KIMI_BASE_URL=https://api.kimi.com/coding/v1` and `KIMI_MODEL=kimi-for-coding`. |
 | `OPENROUTER_BASE_URL` | OpenRouter endpoint override |
 | `NOVITA_BASE_URL` | Novita endpoint override |
 | `FIREWORKS_BASE_URL` | Fireworks endpoint override |

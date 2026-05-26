@@ -1570,11 +1570,17 @@ impl Config {
         {
             return model_for_provider(provider, normalized);
         }
-        if provider == ApiProvider::Moonshot
-            && self
-                .provider_config()
-                .is_some_and(provider_config_uses_kimi_oauth)
-        {
+        let moonshot_config = (provider == ApiProvider::Moonshot)
+            .then(|| self.provider_config())
+            .flatten();
+        let moonshot_uses_kimi_code = moonshot_config.is_some_and(|config| {
+            provider_config_uses_kimi_oauth(config)
+                || config
+                    .base_url
+                    .as_deref()
+                    .is_some_and(moonshot_base_url_uses_kimi_code)
+        });
+        if moonshot_uses_kimi_code {
             return DEFAULT_KIMI_CODE_MODEL.to_string();
         }
 
@@ -1771,8 +1777,9 @@ impl Config {
             ),
             ApiProvider::Moonshot => anyhow::bail!(
                 "Moonshot/Kimi API key not found. Run 'codewhale auth set --provider moonshot', \
-                 set MOONSHOT_API_KEY/KIMI_API_KEY, add [providers.moonshot] api_key, \
-                 or run `kimi login` and set [providers.moonshot] auth_mode = \"kimi_oauth\"."
+                 set MOONSHOT_API_KEY/KIMI_API_KEY, or add [providers.moonshot] api_key. \
+                 For a Kimi Code plan key, set [providers.moonshot] base_url = \
+                 \"https://api.kimi.com/coding/v1\" and model = \"kimi-for-coding\"."
             ),
             // Self-hosted deployments commonly run without auth on localhost.
             // Return an empty key and let the client omit the Authorization header.
@@ -2878,6 +2885,13 @@ fn base_url_is_custom_for_provider(provider: ApiProvider, base_url: &str) -> boo
 
 fn provider_preserves_custom_base_url_model(provider: ApiProvider, base_url: &str) -> bool {
     base_url_is_custom_for_provider(provider, base_url)
+}
+
+fn moonshot_base_url_uses_kimi_code(base_url: &str) -> bool {
+    let normalized = normalize_base_url(base_url).to_ascii_lowercase();
+    normalized == DEFAULT_KIMI_CODE_BASE_URL
+        || normalized == "https://api.kimi.com/coding"
+        || normalized.starts_with("https://api.kimi.com/coding/")
 }
 
 fn provider_config_uses_kimi_oauth(config: &ProviderConfig) -> bool {
@@ -6430,6 +6444,42 @@ api_key = "stale-api-key"
         assert_eq!(config.deepseek_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
         assert_eq!(config.default_model(), DEFAULT_KIMI_CODE_MODEL);
         assert_eq!(config.deepseek_api_key()?, "fresh-oauth-token");
+        assert!(has_api_key_for(&config, ApiProvider::Moonshot));
+        Ok(())
+    }
+
+    #[test]
+    fn moonshot_kimi_code_api_key_uses_coding_model() -> Result<()> {
+        let _lock = lock_test_env();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-kimi-code-key-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&temp_root)?;
+        let _guard = EnvGuard::new(&temp_root);
+
+        let config_path = temp_root.join(".deepseek").join("config.toml");
+        ensure_parent_dir(&config_path)?;
+        fs::write(
+            &config_path,
+            r#"provider = "moonshot"
+
+[providers.moonshot]
+api_key = "kimi-code-key"
+base_url = "https://api.kimi.com/coding/v1"
+"#,
+        )?;
+
+        let config = Config::load(None, None)?;
+        assert_eq!(config.api_provider(), ApiProvider::Moonshot);
+        assert_eq!(config.deepseek_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
+        assert_eq!(config.default_model(), DEFAULT_KIMI_CODE_MODEL);
+        assert_eq!(config.deepseek_api_key()?, "kimi-code-key");
         assert!(has_api_key_for(&config, ApiProvider::Moonshot));
         Ok(())
     }

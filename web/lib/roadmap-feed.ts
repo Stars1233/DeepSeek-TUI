@@ -58,7 +58,7 @@ interface GhIssue { number: number; title: string; html_url: string; body: strin
 const FALLBACK_SHIPPED: RoadmapItem[] = [
   {
     title: "v0.8.45",
-    note: "Moonshot/Kimi OAuth, provider-surface sync, and current Windows install/runtime guidance",
+    note: "Moonshot/Kimi provider support, API-key setup guidance, provider-surface sync, and current Windows install/runtime guidance",
     href: "https://github.com/Hmbown/CodeWhale/releases/tag/v0.8.45",
   },
 ];

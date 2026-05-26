@@ -267,6 +267,11 @@ command = "~/.deepseek/hooks/pre.sh"         # / message_submit / mode_change / 
                 <p className="mt-5 text-ink-soft leading-[1.9] tracking-wide">
                   开放模型平台方向：CodeWhale 保持 DeepSeek 优先，同时内置 Moonshot/Kimi、OpenRouter、NVIDIA NIM、
                   AtlasCloud、Wanjie Ark、Novita、Fireworks 和自托管 SGLang/vLLM/Ollama 路径。
+                  Kimi Code 会员 API Key 使用 <code className="inline">providers.moonshot.base_url</code>
+                  指向 <code className="inline">https://api.kimi.com/coding/v1</code>，模型为
+                  <code className="inline">kimi-for-coding</code>；Kimi/Moonshot 平台 API Key 继续使用
+                  <code className="inline">https://api.moonshot.ai/v1</code> 和
+                  <code className="inline">kimi-k2.6</code>。
                 </p>
               </section>
 
@@ -515,6 +520,11 @@ command = "~/.deepseek/hooks/pre.sh"         # / message_submit / mode_change / 
                   Open-model platform direction: CodeWhale stays DeepSeek-first while shipping Moonshot/Kimi,
                   OpenRouter, NVIDIA NIM, AtlasCloud, Wanjie Ark, Novita, Fireworks, and self-hosted
                   SGLang/vLLM/Ollama paths.
+                  Kimi Code membership API keys use <code className="inline">providers.moonshot.base_url</code>
+                  set to <code className="inline">https://api.kimi.com/coding/v1</code> with
+                  <code className="inline">kimi-for-coding</code>; Kimi/Moonshot Platform API keys use
+                  <code className="inline">https://api.moonshot.ai/v1</code> with
+                  <code className="inline">kimi-k2.6</code>.
                 </p>
               </section>
 

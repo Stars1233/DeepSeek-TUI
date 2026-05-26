@@ -31,7 +31,7 @@ const tracksEn = [
       { title: "Bidirectional MCP", note: "Consume tools from external servers; expose as server via `codewhale mcp`; ~/.deepseek/mcp.json" },
       { title: "Skills + unified slash palette", note: "~/.deepseek/skills/ auto-loading; /help, /mode, /status, /config, /trust, /feedback" },
       { title: "v0.8.45 provider surface", note: "DeepSeek, NVIDIA NIM, OpenAI-compatible, AtlasCloud, Wanjie Ark, OpenRouter, Novita, Fireworks, Moonshot/Kimi, SGLang, vLLM, and Ollama" },
-      { title: "Moonshot/Kimi OAuth", note: "Kimi CLI OAuth reuse plus API-key mode for Moonshot/Kimi sessions" },
+      { title: "Moonshot/Kimi API-key setup", note: "Kimi Code plan and Kimi/Moonshot Platform API-key paths for Moonshot/Kimi sessions" },
     ],
   },
   {
@@ -97,7 +97,7 @@ const tracksZh = [
       { title: "双向 MCP 协议", note: "消费外部服务器工具；通过 `codewhale mcp` 暴露为服务器；~/.deepseek/mcp.json" },
       { title: "技能 + 统一命令面板", note: "~/.deepseek/skills/ 自动加载；/help、/mode、/status、/config、/trust、/feedback" },
       { title: "v0.8.45 提供商表面", note: "DeepSeek、NVIDIA NIM、OpenAI 兼容、AtlasCloud、Wanjie Ark、OpenRouter、Novita、Fireworks、Moonshot/Kimi、SGLang、vLLM、Ollama" },
-      { title: "Moonshot/Kimi OAuth", note: "复用 Kimi CLI OAuth，也支持 Moonshot/Kimi API key 模式" },
+      { title: "Moonshot/Kimi API-key 设置", note: "Kimi Code 会员与 Kimi/Moonshot 平台 API key 路径" },
     ],
   },
   {

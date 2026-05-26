@@ -112,7 +112,7 @@ codewhale doctor         # full connectivity check`}
         <p className="mb-2">CodeWhale ships with these built-in providers:</p>
         <ul className="list-disc pl-5 space-y-1 text-sm text-ink-soft mb-3">
           <li><strong>DeepSeek</strong> — first-class, native API. Reasoning streaming, cache metrics, thinking effort control.</li>
-          <li><strong>Moonshot/Kimi</strong> — Kimi API key mode or local Kimi CLI OAuth reuse.</li>
+          <li><strong>Moonshot/Kimi</strong> — Kimi Code and Kimi/Moonshot Platform API-key modes.</li>
           <li><strong>OpenRouter</strong> — unified API for DeepSeek models and more.</li>
           <li><strong>OpenAI-compatible</strong>, <strong>NVIDIA NIM</strong>, <strong>AtlasCloud</strong>, <strong>Wanjie Ark</strong>, <strong>Novita</strong>, <strong>Fireworks</strong>, <strong>SGLang</strong>, <strong>vLLM</strong>, <strong>Ollama</strong></li>
         </ul>
@@ -425,7 +425,7 @@ codewhale doctor         # 完整连接检查`}
         <p className="mb-2">CodeWhale 内建以下提供商：</p>
         <ul className="list-disc pl-5 space-y-1 text-sm text-ink-soft mb-3">
           <li><strong>DeepSeek</strong> — 一级支持，原生 API。推理流、缓存指标、思考力度控制。</li>
-          <li><strong>Moonshot/Kimi</strong> — Kimi API key 模式或复用本地 Kimi CLI OAuth。</li>
+          <li><strong>Moonshot/Kimi</strong> — Kimi Code 与 Kimi/Moonshot 平台 API key 模式。</li>
           <li><strong>OpenRouter</strong> — 统一 API，可访问 DeepSeek 等模型。</li>
           <li><strong>OpenAI 兼容</strong>、<strong>NVIDIA NIM</strong>、<strong>AtlasCloud</strong>、<strong>Wanjie Ark</strong>、<strong>Novita</strong>、<strong>Fireworks</strong>、<strong>SGLang</strong>、<strong>vLLM</strong>、<strong>Ollama</strong></li>
         </ul>

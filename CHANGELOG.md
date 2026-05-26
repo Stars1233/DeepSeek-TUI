@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Kimi Code API-key setup.** `codewhale config set providers.moonshot.*`
+  now writes the Moonshot/Kimi provider table, and Kimi Code API-key
+  endpoints default to `kimi-for-coding` without using the Kimi CLI OAuth path.
+
 ## [0.8.45] - 2026-05-25
 
 ### Added
@@ -17,9 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Command palette voice input.** The command palette can launch a configured
   speech-to-text helper and show footer status while transcription runs
   (#2047).
-- **Moonshot/Kimi OAuth provider.** Moonshot/Kimi is now a first-class
-  provider, including Kimi CLI OAuth reuse, secure refresh writes, model
-  completion, CLI auth, and secret-store integration.
+- **Moonshot/Kimi provider.** Moonshot/Kimi is now a first-class provider,
+  including API-key auth, model completion, CLI auth, secret-store
+  integration, and optional Kimi CLI credential reuse.
 - **Deterministic whale-species sub-agent names.** Sub-agents now get stable,
   human-readable whale-species nicknames (e.g. "Beluga", "Orca") while
   preserving the raw agent ID in the popup (#2035, #2016).
