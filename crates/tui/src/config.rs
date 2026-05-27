@@ -467,6 +467,28 @@ pub struct RetryConfig {
     pub exponential_base: Option<f64>,
 }
 
+/// Deserialize `status_items` tolerantly: skip keys unknown to this build
+/// instead of erroring with "unknown variant".  This lets a dev build write
+/// `"balance"` (or any future item) while the stable build still parses the
+/// config file successfully.
+fn deser_status_items<'de, D>(deserializer: D) -> Result<Option<Vec<StatusItem>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<Vec<String>> = Option::deserialize(deserializer)?;
+    Ok(raw.map(|strings| {
+        strings
+            .into_iter()
+            .filter_map(|s| {
+                StatusItem::from_key(&s).or_else(|| {
+                    tracing::warn!("ignoring unknown status item {s:?} in config");
+                    None
+                })
+            })
+            .collect()
+    }))
+}
+
 /// UI configuration loaded from config files.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TuiConfig {
@@ -481,6 +503,7 @@ pub struct TuiConfig {
     ///
     /// Edited interactively via `/statusline`; persisted to `tui.status_items`
     /// in `~/.deepseek/config.toml`.
+    #[serde(deserialize_with = "deser_status_items")]
     pub status_items: Option<Vec<StatusItem>>,
     /// Emit OSC 8 hyperlink escape sequences around URLs in the transcript so
     /// supporting terminals (iTerm2, Terminal.app 13+, Ghostty, Kitty,
@@ -822,6 +845,31 @@ impl StatusItem {
             StatusItem::RateLimit => "rate_limit",
             StatusItem::Tokens => "tokens",
             StatusItem::Balance => "balance",
+        }
+    }
+
+    /// Reverse of [`key`](Self::key): parse a config string back to a variant.
+    /// Returns `None` for unknown keys so the config parser can silently skip
+    /// items added by newer versions rather than crashing with "unknown variant".
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "mode" => Some(Self::Mode),
+            "model" => Some(Self::Model),
+            "cost" => Some(Self::Cost),
+            "status" => Some(Self::Status),
+            "coherence" => Some(Self::Coherence),
+            "agents" => Some(Self::Agents),
+            "reasoning_replay" => Some(Self::ReasoningReplay),
+            "prefix_stability" => Some(Self::PrefixStability),
+            "cache" => Some(Self::Cache),
+            "context_percent" => Some(Self::ContextPercent),
+            "git_branch" => Some(Self::GitBranch),
+            "last_tool_elapsed" => Some(Self::LastToolElapsed),
+            "rate_limit" => Some(Self::RateLimit),
+            "tokens" => Some(Self::Tokens),
+            "balance" => Some(Self::Balance),
+            _ => None,
         }
     }
 
@@ -7576,5 +7624,23 @@ model = "deepseek-ai/deepseek-v4-pro"
         assert!(!StatusItem::Balance.is_available_for(ApiProvider::Atlascloud));
         // Other StatusItem variants should be available everywhere.
         assert!(StatusItem::Mode.is_available_for(ApiProvider::Ollama));
+    }
+
+    #[test]
+    fn status_items_deser_ignores_unknown_variants() {
+        // Simulate a stable build reading config written by a dev build that
+        // knows about items the stable build doesn't (e.g. "balance" or a
+        // future "cost_saving" chip).
+        let toml_str = r#"
+            alternate_screen = "auto"
+            status_items = ["mode", "model", "unknown_future_item", "cost", "another_unknown", "status"]
+        "#;
+        let tui: TuiConfig = toml::from_str(toml_str).expect("should parse without error");
+        let items = tui.status_items.expect("status_items should be Some");
+        assert_eq!(items.len(), 4, "unknown items should be silently dropped");
+        assert_eq!(items[0], StatusItem::Mode);
+        assert_eq!(items[1], StatusItem::Model);
+        assert_eq!(items[2], StatusItem::Cost);
+        assert_eq!(items[3], StatusItem::Status);
     }
 }
