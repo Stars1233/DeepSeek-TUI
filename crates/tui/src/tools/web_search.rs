@@ -692,7 +692,6 @@ impl WebSearchTool {
 
         let resp = client
             .post(BAIDU_ENDPOINT)
-            .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {api_key}"))
             .json(&payload)
             .send()

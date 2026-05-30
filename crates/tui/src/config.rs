@@ -2855,6 +2855,14 @@ fn apply_env_overrides(config: &mut Config) {
     if let Ok(value) = std::env::var("DEEPSEEK_MANAGED_CONFIG_PATH") {
         config.managed_config_path = Some(value);
     }
+    if let Ok(value) = std::env::var("DEEPSEEK_SEARCH_API_KEY")
+        && !value.trim().is_empty()
+    {
+        config
+            .search
+            .get_or_insert_with(SearchConfig::default)
+            .api_key = Some(value);
+    }
     if let Ok(value) = std::env::var("DEEPSEEK_REQUIREMENTS_PATH") {
         config.requirements_path = Some(value);
     }
@@ -4390,6 +4398,22 @@ mod tests {
         unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", prev) };
         assert_eq!(resolution.provider, SearchProvider::Baidu);
         assert_eq!(resolution.source, SearchProviderSource::EnvOverride);
+    }
+
+    #[test]
+    fn apply_env_overrides_sets_search_api_key() {
+        let _guard = lock_test_env();
+        let prev = env::var_os("DEEPSEEK_SEARCH_API_KEY");
+        unsafe { env::set_var("DEEPSEEK_SEARCH_API_KEY", "search-env-key") };
+        let mut config = Config::default();
+
+        apply_env_overrides(&mut config);
+
+        unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_API_KEY", prev) };
+        assert_eq!(
+            config.search.and_then(|search| search.api_key),
+            Some("search-env-key".to_string())
+        );
     }
 
     #[test]
