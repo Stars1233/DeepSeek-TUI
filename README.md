@@ -705,6 +705,17 @@ This project ships with help from a growing community of contributors:
 - **[hongqitai](https://github.com/hongqitai)** — state schema parent-entry support and clippy/fmt cleanup (#2308, #2432)
 - **[BryonGo](https://github.com/BryonGo)** — effective-model compaction budgeting fix (#2437)
 
+Reports, repros, and verification that shaped v0.8.48 also deserve visible
+credit: **[@buko](https://github.com/buko)**, **[@yyyCode](https://github.com/yyyCode)**,
+**[@gaslebinh-glitch](https://github.com/gaslebinh-glitch)**, **[@Dr3259](https://github.com/Dr3259)**,
+**[@lpeng1711694086-lang](https://github.com/lpeng1711694086-lang)**, **[@VerrPower](https://github.com/VerrPower)**,
+**[@yan-zay](https://github.com/yan-zay)**, **[@jretz](https://github.com/jretz)**,
+**[@Neo-millunnium](https://github.com/Neo-millunnium)**, **[@caeserchen](https://github.com/caeserchen)**,
+**[@T-Phuong-Nguyen](https://github.com/T-Phuong-Nguyen)**, **[@zhyuzhyu](https://github.com/zhyuzhyu)**,
+**[@0gl20shk0sbt36](https://github.com/0gl20shk0sbt36)**, **[@hatakes](https://github.com/hatakes)**,
+**[@goodvecn-dev](https://github.com/goodvecn-dev)**, **[@bevis-wong](https://github.com/bevis-wong)**,
+**[@PurplePulse](https://github.com/PurplePulse)**, and **[@nbiish](https://github.com/nbiish)**.
+
 ---
 
 ## Contributing

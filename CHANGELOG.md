@@ -112,6 +112,14 @@ Thanks to contributors whose PRs landed or were harvested in this release:
 **@hoclaptrinh33** (#2358),
 and **@BryonGo** (#2437).
 
+Thanks also to reporters and verification helpers whose issues, patches,
+screenshots, logs, or retest requests shaped this release: **@buko** (#2359,
+#2360, #2369, #2469), **@yyyCode**, **@gaslebinh-glitch**, **@Dr3259**,
+**@lpeng1711694086-lang**, **@VerrPower**, **@yan-zay**, **@jretz**,
+**@Neo-millunnium**, **@caeserchen**, **@T-Phuong-Nguyen**, **@zhyuzhyu**,
+**@0gl20shk0sbt36**, **@hatakes**, **@goodvecn-dev**, **@bevis-wong**,
+**@PurplePulse**, and **@nbiish**.
+
 ## [0.8.47] - 2026-05-26
 
 ### Added
