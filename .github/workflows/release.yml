@@ -506,10 +506,11 @@ jobs:
           body: |
             > This release renames the project to **CodeWhale**. The legacy
             > `deepseek` and `deepseek-tui` binaries continue to ship as
-            > deprecation shims for one release cycle; they print a one-line
-            > warning and forward to `codewhale` / `codewhale-tui`. They will
-            > be removed in v0.9.0. See `docs/REBRAND.md` for the full
-            > migration story.
+            > compatibility-only deprecation shims during v0.8.x; they print a
+            > one-line warning and forward to `codewhale` / `codewhale-tui`.
+            > They will be removed in v0.9.0. The legacy npm package
+            > `deepseek-tui` is deprecated and receives no further releases.
+            > See `docs/REBRAND.md` for the full migration story.
 
             ## Install
 
@@ -568,7 +569,7 @@ jobs:
 
             The **portable** Windows archive skips the install script — extract and run from any directory.
 
-            Individual binaries are also attached below for scripting and the npm wrapper. Legacy `deepseek-*` and `deepseek-tui-*` assets ship for one release cycle so that existing `deepseek update` invocations on v0.8.40 keep working; they install the deprecation shims, which forward to the canonical binaries.
+            Individual binaries are also attached below for scripting and the npm wrapper. Legacy `deepseek-*` and `deepseek-tui-*` assets are compatibility-only deprecation shims for v0.8.x so that existing `deepseek update` invocations on v0.8.40 keep working; they forward to the canonical binaries. The legacy npm package `deepseek-tui` is deprecated and is not republished.
 
             ### Verify (recommended)
 

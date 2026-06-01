@@ -56,8 +56,9 @@ npm install -g codewhale
 cargo install codewhale-cli --locked
 cargo install codewhale-tui --locked
 
-# Homebrew
-# The tap/formula name is legacy; it installs codewhale and codewhale-tui.
+# Homebrew, legacy installs only
+# The tap/formula still uses the old deepseek-tui name. Prefer npm, Cargo,
+# Docker, or direct downloads for new installs until the formula is renamed.
 brew tap Hmbown/deepseek-tui
 brew install deepseek-tui
 ```

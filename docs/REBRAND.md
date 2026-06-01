@@ -14,9 +14,9 @@ npm uninstall -g deepseek-tui      # or cargo uninstall deepseek-tui-cli deepsee
 
 # 2. Install under the new name.
 npm install -g codewhale            # or cargo install codewhale-cli codewhale-tui --locked
-                                    # or brew install deepseek-tui (Homebrew tap still
-                                    #     uses the legacy name during the transition;
-                                    #     it installs the new binaries underneath.)
+                                    # legacy Homebrew installs may still use
+                                    # brew install deepseek-tui until the tap
+                                    # formula is renamed.
 
 # 3. Run with the new command.
 codewhale doctor
@@ -57,9 +57,10 @@ Anything that targets the DeepSeek provider API stays exactly as it was:
   and audit log.
 - **GitHub repository URL**: `https://github.com/Hmbown/CodeWhale`.
   The old `Hmbown/DeepSeek-TUI` URL redirects there during the transition.
-- **Homebrew tap and formula** (`Hmbown/homebrew-deepseek-tui`): still
-  installs by the legacy name during the transition. The tap's formula
-  will be flipped to the new names in a follow-up.
+- **Homebrew tap and formula** (`Hmbown/homebrew-deepseek-tui`): still uses
+  the legacy formula name for existing installs. Treat it as compatibility-only
+  until the tap is renamed; new install docs prefer `codewhale` npm, Cargo,
+  Docker, or direct downloads.
 - **Docker image**: `ghcr.io/hmbown/codewhale`.
 
 ## Deprecation shims (through v0.8.x)
@@ -70,8 +71,8 @@ v0.8.41 and later v0.8.x releases ship **deprecation shims**:
 - A `deepseek` binary that prints a one-line warning to stderr and forwards
   argv to `codewhale`.
 - A `deepseek-tui` binary that does the same for `codewhale-tui`.
-- An `npm` package at `deepseek-tui@0.8.x` with no `bin` and a postinstall
-  that prints a clear rename notice.
+- The legacy `deepseek-tui` npm package is deprecated and no longer receives
+  new releases. Install the `codewhale` npm package instead.
 
 These shims will be removed in **v0.9.0**. Please migrate before then.
 
@@ -100,10 +101,10 @@ cargo install --path crates/tui --locked --force
 
 ### Homebrew
 
-The tap formula still installs `deepseek-tui` during the transition.
-Existing `brew install deepseek-tui` invocations continue to work and land
-the new binaries underneath the legacy formula name. The formula and tap
-repo will follow up with their own rename.
+The tap formula still installs through the legacy `deepseek-tui` name for
+existing Homebrew users. Keep using `brew upgrade deepseek-tui` only for that
+compatibility path. New installs should prefer npm, Cargo, Docker, or direct
+downloads until the formula and tap repo are renamed.
 
 ### Manual / GitHub Releases
 

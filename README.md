@@ -11,8 +11,8 @@
 
 `codewhale` installs as a matched pair of self-contained Rust release binaries:
 the `codewhale` dispatcher command and the sibling `codewhale-tui` runtime it
-launches for interactive sessions. npm, Homebrew, and Docker install both for
-you; Cargo and manual installs must put both binaries in the same directory
+launches for interactive sessions. npm and Docker install both for you; Cargo
+and manual installs must put both binaries in the same directory
 (normally a directory on your `PATH`). The npm package is only an
 installer/wrapper for those release binaries; the agent does not run on Node.
 
@@ -27,8 +27,9 @@ npm install -g codewhale
 cargo install codewhale-cli --locked   # `codewhale` (entry point)
 cargo install codewhale-tui     --locked   # `codewhale-tui` (TUI binary)
 
-# 3. Homebrew — macOS package manager.
-#    The tap/formula name is legacy; it installs codewhale and codewhale-tui.
+# 3. Homebrew — legacy compatibility only.
+#    The tap/formula still uses the old deepseek-tui name. Prefer npm, Cargo,
+#    Docker, or direct downloads for new installs until the formula is renamed.
 brew tap Hmbown/deepseek-tui
 brew install deepseek-tui
 
@@ -61,7 +62,7 @@ Already installed? Use the updater that matches the install path:
 ```bash
 codewhale update                         # release-binary updater
 npm install -g codewhale@latest      # npm wrapper
-brew update && brew upgrade deepseek-tui
+brew update && brew upgrade deepseek-tui  # legacy Homebrew installs only
 cargo install codewhale-cli --locked --force
 cargo install codewhale-tui     --locked --force
 ```
