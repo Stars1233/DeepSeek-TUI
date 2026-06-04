@@ -596,6 +596,7 @@ pub struct UpdateThreadRequest {
     pub mode: Option<String>,
     pub title: Option<String>,
     pub system_prompt: Option<String>,
+    pub workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1089,6 +1090,7 @@ impl RuntimeThreadManager {
             && req.mode.is_none()
             && req.title.is_none()
             && req.system_prompt.is_none()
+            && req.workspace.is_none()
         {
             bail!("At least one thread field is required");
         }
@@ -1102,6 +1104,11 @@ impl RuntimeThreadManager {
             && mode.trim().is_empty()
         {
             bail!("mode must not be empty");
+        }
+        if let Some(workspace) = req.workspace.as_ref()
+            && workspace.as_os_str().is_empty()
+        {
+            bail!("workspace must not be empty");
         }
 
         let mut thread = self.get_thread(id).await?;
@@ -1166,10 +1173,24 @@ impl RuntimeThreadManager {
                 changes.insert("system_prompt".to_string(), json!(new_sys));
             }
         }
+        if let Some(workspace) = req.workspace
+            && thread.workspace != workspace
+        {
+            changes.insert("workspace".to_string(), json!(workspace));
+            thread.workspace = workspace;
+        }
 
         if !changes.is_empty() {
+            let workspace_changed = changes.contains_key("workspace");
+            if workspace_changed {
+                self.ensure_thread_has_no_active_turn(&thread.id).await?;
+            }
+
             thread.updated_at = Utc::now();
             self.store.save_thread(&thread)?;
+            if workspace_changed {
+                self.evict_cached_engine(&thread.id).await;
+            }
             self.emit_event(
                 &thread.id,
                 None,
@@ -1184,6 +1205,30 @@ impl RuntimeThreadManager {
         }
 
         Ok(thread)
+    }
+
+    async fn ensure_thread_has_no_active_turn(&self, thread_id: &str) -> Result<()> {
+        let active = self.active.lock().await;
+        if active
+            .engines
+            .get(thread_id)
+            .and_then(|state| state.active_turn.as_ref())
+            .is_some()
+        {
+            bail!("workspace cannot be changed while the thread has an active turn");
+        }
+        Ok(())
+    }
+
+    async fn evict_cached_engine(&self, thread_id: &str) {
+        let engine = {
+            let mut active = self.active.lock().await;
+            active.lru.retain(|id| id != thread_id);
+            active.engines.remove(thread_id).map(|state| state.engine)
+        };
+        if let Some(engine) = engine {
+            let _ = engine.send(Op::Shutdown).await;
+        }
     }
 
     pub async fn get_thread_detail(&self, id: &str) -> Result<ThreadDetail> {
@@ -3774,6 +3819,169 @@ mod tests {
 
         assert!(!thread.auto_approve);
         assert_eq!(thread.coherence_state, CoherenceState::Healthy);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_thread_workspace_persists_event_and_evicts_idle_engine() -> Result<()> {
+        let manager = test_manager(test_runtime_dir())?;
+        let old_workspace = std::env::temp_dir().join("codewhale-runtime-old-workspace");
+        let new_workspace = std::env::temp_dir().join("codewhale-runtime-new-workspace");
+        let thread = manager
+            .create_thread(CreateThreadRequest {
+                model: None,
+                workspace: Some(old_workspace.clone()),
+                mode: None,
+                allow_shell: None,
+                trust_mode: None,
+                auto_approve: None,
+                archived: false,
+                system_prompt: None,
+                task_id: None,
+            })
+            .await?;
+
+        let harness = install_mock_engine(&manager, &thread.id).await;
+        let mut rx_op = harness.rx_op;
+
+        let updated = manager
+            .update_thread(
+                &thread.id,
+                UpdateThreadRequest {
+                    workspace: Some(new_workspace.clone()),
+                    ..UpdateThreadRequest::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(updated.workspace, new_workspace);
+        assert_eq!(
+            manager.store.load_thread(&thread.id)?.workspace,
+            new_workspace
+        );
+        {
+            let active = manager.active.lock().await;
+            assert!(
+                !active.engines.contains_key(&thread.id),
+                "workspace changes must evict the stale cached engine"
+            );
+            assert!(!active.lru.iter().any(|id| id == &thread.id));
+        }
+
+        match tokio::time::timeout(Duration::from_secs(1), rx_op.recv()).await {
+            Ok(Some(Op::Shutdown)) => {}
+            other => panic!("expected cached engine shutdown, got {other:?}"),
+        }
+
+        let events = manager.events_since(&thread.id, None)?;
+        let event = events
+            .iter()
+            .rev()
+            .find(|event| event.event == "thread.updated")
+            .expect("thread.updated event");
+        let workspace_value = serde_json::to_value(&updated.workspace)?;
+        assert_eq!(
+            event
+                .payload
+                .get("changes")
+                .and_then(|changes| changes.get("workspace")),
+            Some(&workspace_value)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_thread_workspace_rejects_empty_path() -> Result<()> {
+        let manager = test_manager(test_runtime_dir())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest {
+                model: None,
+                workspace: None,
+                mode: None,
+                allow_shell: None,
+                trust_mode: None,
+                auto_approve: None,
+                archived: false,
+                system_prompt: None,
+                task_id: None,
+            })
+            .await?;
+
+        let err = manager
+            .update_thread(
+                &thread.id,
+                UpdateThreadRequest {
+                    workspace: Some(PathBuf::new()),
+                    ..UpdateThreadRequest::default()
+                },
+            )
+            .await
+            .expect_err("empty workspace must be rejected");
+        assert!(format!("{err:#}").contains("workspace must not be empty"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_thread_workspace_rejects_active_turn() -> Result<()> {
+        let manager = test_manager(test_runtime_dir())?;
+        let old_workspace = std::env::temp_dir().join("codewhale-runtime-active-old");
+        let new_workspace = std::env::temp_dir().join("codewhale-runtime-active-new");
+        let thread = manager
+            .create_thread(CreateThreadRequest {
+                model: None,
+                workspace: Some(old_workspace.clone()),
+                mode: None,
+                allow_shell: None,
+                trust_mode: None,
+                auto_approve: None,
+                archived: false,
+                system_prompt: None,
+                task_id: None,
+            })
+            .await?;
+
+        let harness = install_mock_engine(&manager, &thread.id).await;
+        let mut rx_op = harness.rx_op;
+        {
+            let mut active = manager.active.lock().await;
+            let state = active.engines.get_mut(&thread.id).expect("mock engine");
+            state.active_turn = Some(ActiveTurnState {
+                turn_id: "turn_live".to_string(),
+                interrupt_requested: false,
+                auto_approve: false,
+                trust_mode: false,
+            });
+        }
+
+        let err = manager
+            .update_thread(
+                &thread.id,
+                UpdateThreadRequest {
+                    workspace: Some(new_workspace),
+                    ..UpdateThreadRequest::default()
+                },
+            )
+            .await
+            .expect_err("workspace update during active turn must fail");
+
+        assert!(format!("{err:#}").contains("active turn"));
+        assert_eq!(
+            manager.store.load_thread(&thread.id)?.workspace,
+            old_workspace
+        );
+        {
+            let active = manager.active.lock().await;
+            assert!(
+                active.engines.contains_key(&thread.id),
+                "active engine should stay cached after rejected update"
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx_op.recv())
+                .await
+                .is_err(),
+            "rejected workspace update must not shut down the active engine"
+        );
         Ok(())
     }
 

@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/config` now reports the canonical `~/.codewhale/settings.toml` path for TUI
   settings while still reading legacy DeepSeek-branded settings fallbacks and
   migrating them into the CodeWhale home on load.
+- `PATCH /v1/threads/{id}` can now update a thread's persisted workspace for
+  GUI/runtime clients. Workspace changes reject active turns and evict idle
+  cached engines so the next turn starts in the new workspace.
 - Split `web_run` session/page cache state so cached page reads use shared
   page handles and do not serialize through the mutation path. The harvest also
   adds panic-safe state write-back and serializes cache-mutating unit tests so
@@ -54,7 +57,8 @@ Thanks to **@cyq1017** for the restore-listing implementation (#2513) and
 **@wywsoor** for the broader macOS/iTerm rollback UX report (#2494), and
 **@HUQIANTAO** for the `web_run` lock-splitting work (#2502) and turn-metadata
 prefix-cache stability work (#2517), **@xyuai** for canonical CodeWhale
-settings-path migration work (#2730), and **@shenjackyuanjie** for the
+settings-path migration work (#2730), **@gaord** for the runtime thread
+workspace update API (#2640), and **@shenjackyuanjie** for the
 HarmonyOS/OpenHarmony port and MatePad Edge validation trail (#2634).
 
 ## [0.8.53] - 2026-06-03
