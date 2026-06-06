@@ -37,6 +37,7 @@ use crate::tui::approval::ApprovalMode;
 use crate::tui::clipboard::{ClipboardContent, ClipboardHandler};
 use crate::tui::file_mention::ContextReference;
 use crate::tui::history::{HistoryCell, TranscriptRenderOptions};
+use crate::tui::hotbar::HotbarActionRegistry;
 use crate::tui::paste_burst::{FlushResult, PasteBurst};
 use crate::tui::scrolling::{MouseScrollState, TranscriptLineMeta, TranscriptScroll};
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelection};
@@ -1231,6 +1232,9 @@ pub(crate) struct PendingProviderSwitch {
 #[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub mode: AppMode,
+    /// Registered hotbar actions available for future slot config/render layers.
+    #[allow(dead_code)]
+    pub hotbar_actions: HotbarActionRegistry,
     /// Composer sub-state (input, cursor, history, menus).
     pub composer: ComposerState,
     /// Viewport sub-state (scroll, cache, selection).
@@ -2049,6 +2053,7 @@ impl App {
                 .unwrap_or(0);
         Self {
             mode: initial_mode,
+            hotbar_actions: HotbarActionRegistry::with_builtins(),
             composer: ComposerState {
                 input: initial_input_text,
                 cursor_position: initial_input_cursor,
