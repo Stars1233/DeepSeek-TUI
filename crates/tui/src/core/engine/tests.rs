@@ -2512,7 +2512,6 @@ fn turn_metadata_includes_auto_model_route() {
 
     let user_msg = engine.user_text_message_with_turn_metadata_for_route(
         "debug this regression".to_string(),
-        AppMode::Agent,
         "deepseek-v4-pro",
         true,
         Some("max"),
@@ -2530,7 +2529,7 @@ fn turn_metadata_includes_auto_model_route() {
 }
 
 #[test]
-fn turn_metadata_includes_current_mode() {
+fn turn_metadata_omits_mode_policy() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -2540,7 +2539,6 @@ fn turn_metadata_includes_current_mode() {
 
     let user_msg = engine.user_text_message_with_turn_metadata_for_route(
         "test mode metadata".to_string(),
-        AppMode::Yolo,
         "deepseek-v4-flash",
         false,
         None,
@@ -2555,13 +2553,13 @@ fn turn_metadata_includes_current_mode() {
     };
 
     assert!(
-        text.contains("Current mode: YOLO mode - full tool access without approvals"),
-        "turn metadata should include the current mode label, got: {text}"
+        !text.contains("Current mode:"),
+        "turn metadata should leave mode policy to <runtime_prompt>, got: {text}"
     );
 }
 
 #[test]
-fn turn_metadata_mode_updates_with_change_mode_op() {
+fn runtime_prompt_mode_updates_with_change_mode_op() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -2569,28 +2567,30 @@ fn turn_metadata_mode_updates_with_change_mode_op() {
     };
     let (mut engine, _handle) = Engine::new(config, &Config::default());
 
-    // In agent mode by default. The turn_meta block now sits at the
-    // *tail* of the user message (see #2517) so we read `content.last()`.
-    let msg = engine.user_text_message_with_turn_metadata("hello".to_string());
-    let last_block = msg.content.last().expect("turn metadata block");
-    let ContentBlock::Text { text, .. } = last_block else {
-        panic!("expected text metadata block");
+    let agent_msg = engine.runtime_prompt_message();
+    let ContentBlock::Text {
+        text: agent_text, ..
+    } = agent_msg.content.first().expect("runtime prompt block")
+    else {
+        panic!("expected text runtime prompt");
     };
     assert!(
-        text.contains("Agent mode"),
-        "initial mode should be Agent, got: {text}"
+        agent_text.contains("mode=\"agent\""),
+        "initial mode should be Agent, got: {agent_text}"
     );
 
-    // Switch to YOLO — user_text_message_with_turn_metadata should reflect the new mode
+    // Switch to YOLO — runtime_prompt_message should reflect the new mode.
     engine.current_mode = AppMode::Yolo;
-    let msg = engine.user_text_message_with_turn_metadata("hello again".to_string());
-    let last_block = msg.content.last().expect("turn metadata block");
-    let ContentBlock::Text { text, .. } = last_block else {
-        panic!("expected text metadata block");
+    let yolo_msg = engine.runtime_prompt_message();
+    let ContentBlock::Text {
+        text: yolo_text, ..
+    } = yolo_msg.content.first().expect("runtime prompt block")
+    else {
+        panic!("expected text runtime prompt");
     };
     assert!(
-        text.contains("YOLO mode"),
-        "mode after change should be YOLO, got: {text}"
+        yolo_text.contains("mode=\"yolo\""),
+        "mode after change should be YOLO, got: {yolo_text}"
     );
 }
 
