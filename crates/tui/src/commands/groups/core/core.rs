@@ -177,6 +177,17 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             };
             model_id
         };
+        // Reject a model that is incompatible with the active provider locally,
+        // before it can be persisted or sent and bounced as `400 Unknown Model`
+        // (#3227). The route stays atomic: provider unchanged, model unchanged.
+        // Skip the strict check when the app accepts custom model ids (a
+        // pass-through provider or a custom DeepSeek-compatible base URL), where
+        // any id is a deliberate choice and the upstream is the authority.
+        if !app.accepts_custom_model_ids()
+            && let Err(reason) = crate::config::validate_route(app.api_provider, &model_id)
+        {
+            return CommandResult::error(reason);
+        }
         let old_model = app.model_display_label();
         let model_changed = app.auto_model || app.model != model_id;
         app.set_model_selection(model_id.clone());
@@ -795,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn model_command_persists_active_provider_model() {
+    fn model_command_persists_active_provider_model_scoped() {
         let _settings = SettingsPathGuard::new();
         let mut app = create_test_app();
 
@@ -807,8 +818,10 @@ mod tests {
             Some("deepseek-v4-flash")
         );
         let settings = crate::settings::Settings::load().expect("load settings");
-        assert_eq!(settings.default_provider.as_deref(), Some("deepseek"));
-        assert_eq!(settings.default_model.as_deref(), Some("deepseek-v4-flash"));
+        // #3227: `/model` is session-local. It records the model under the
+        // provider-scoped entry only; it must NOT rewrite the shared global
+        // `default_provider`/`default_model` that other terminals read on
+        // startup.
         assert_eq!(
             settings
                 .provider_models
@@ -817,6 +830,119 @@ mod tests {
                 .map(String::as_str),
             Some("deepseek-v4-flash")
         );
+        assert_eq!(settings.default_provider.as_deref(), None);
+        assert_eq!(settings.default_model.as_deref(), None);
+    }
+
+    #[test]
+    fn model_command_does_not_mutate_shared_default_provider() {
+        // Regression for #3227: a `/model` change on a non-default provider
+        // must not drag the global `default_provider` onto it. Here the saved
+        // default is DeepSeek; selecting a model while the session is on Z.ai
+        // changes only Z.ai's scoped model.
+        let _settings = SettingsPathGuard::new();
+        {
+            let mut seed = crate::settings::Settings::default();
+            seed.default_provider = Some("deepseek".to_string());
+            seed.save().expect("seed settings");
+        }
+        let mut app = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Zai;
+        app.model_ids_passthrough = false;
+        app.model = crate::config::DEFAULT_ZAI_MODEL.to_string();
+        app.auto_model = false;
+
+        let result = model(&mut app, Some("GLM-5.2"));
+        assert!(result.message.is_some(), "expected a model-changed message");
+        assert!(!result.is_error, "GLM-5.2 is valid on Z.ai");
+
+        let settings = crate::settings::Settings::load().expect("load settings");
+        // The shared default provider is untouched.
+        assert_eq!(settings.default_provider.as_deref(), Some("deepseek"));
+        // Only Z.ai's scoped entry changed.
+        assert_eq!(
+            settings
+                .provider_models
+                .as_ref()
+                .and_then(|models| models.get("zai"))
+                .map(String::as_str),
+            Some("GLM-5.2")
+        );
+    }
+
+    #[test]
+    fn two_sessions_keep_independent_provider_model_routes() {
+        // #3227: two App instances sharing one settings/config path. A is on
+        // Z.ai/GLM; B switches to DeepSeek and picks a DeepSeek model. B must
+        // build a DeepSeek route (not Z.ai + a DeepSeek model), A must stay on
+        // Z.ai/GLM, and neither session's `/model` may flip the shared global
+        // default provider out from under the other.
+        let _settings = SettingsPathGuard::new();
+
+        // Terminal A: Z.ai / GLM.
+        let mut app_a = create_test_app();
+        app_a.api_provider = crate::config::ApiProvider::Zai;
+        app_a.model_ids_passthrough = false;
+        app_a.model = crate::config::DEFAULT_ZAI_MODEL.to_string();
+        app_a.auto_model = false;
+        let result_a = model(&mut app_a, Some("GLM-5.2"));
+        assert!(!result_a.is_error, "GLM-5.2 is valid on Z.ai");
+        assert_eq!(app_a.api_provider, crate::config::ApiProvider::Zai);
+        assert_eq!(app_a.model, "GLM-5.2");
+
+        // Terminal B: DeepSeek / deepseek-v4-flash.
+        let mut app_b = create_test_app();
+        app_b.api_provider = crate::config::ApiProvider::Deepseek;
+        app_b.model_ids_passthrough = false;
+        app_b.model = "deepseek-v4-pro".to_string();
+        app_b.auto_model = false;
+        let result_b = model(&mut app_b, Some("deepseek-v4-flash"));
+        assert!(!result_b.is_error, "deepseek-v4-flash is valid on DeepSeek");
+
+        // B's route is a coherent DeepSeek route — never Z.ai + a DeepSeek model.
+        assert_eq!(app_b.api_provider, crate::config::ApiProvider::Deepseek);
+        assert_eq!(app_b.model, "deepseek-v4-flash");
+
+        // A is untouched by B's selection — still Z.ai / GLM.
+        assert_eq!(app_a.api_provider, crate::config::ApiProvider::Zai);
+        assert_eq!(app_a.model, "GLM-5.2");
+
+        // Shared settings: per-provider scoped models recorded for both, and
+        // the global default provider was never flipped by either `/model`.
+        let settings = crate::settings::Settings::load().expect("load settings");
+        assert_eq!(settings.default_provider.as_deref(), None);
+        let provider_models = settings.provider_models.expect("provider_models");
+        assert_eq!(
+            provider_models.get("zai").map(String::as_str),
+            Some("GLM-5.2")
+        );
+        assert_eq!(
+            provider_models.get("deepseek").map(String::as_str),
+            Some("deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn model_command_rejects_model_foreign_to_active_provider() {
+        // #3227: a DeepSeek model id requested while the session is on Z.ai is
+        // rejected locally with a precise diagnostic, before any network call.
+        let _settings = SettingsPathGuard::new();
+        let mut app = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Zai;
+        app.model_ids_passthrough = false;
+        app.model = crate::config::DEFAULT_ZAI_MODEL.to_string();
+        app.auto_model = false;
+        app.provider_models.clear();
+
+        let result = model(&mut app, Some("deepseek-v4-pro"));
+
+        assert!(result.is_error, "expected a local rejection");
+        let msg = result.message.expect("error message");
+        assert!(msg.contains("deepseek-v4-pro"), "names the model: {msg}");
+        assert!(msg.contains("zai"), "names the provider: {msg}");
+        // The session route is unchanged — still Z.ai / GLM.
+        assert_eq!(app.api_provider, crate::config::ApiProvider::Zai);
+        assert_eq!(app.model, crate::config::DEFAULT_ZAI_MODEL);
     }
 
     #[test]

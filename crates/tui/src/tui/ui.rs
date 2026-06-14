@@ -6014,6 +6014,21 @@ async fn apply_model_picker_choice(
         return;
     }
 
+    // Reject a model that does not belong to the active provider before we
+    // mutate session state or persist it (#3227). The picker can surface
+    // cross-provider saved models, so this is the in-session safety net for
+    // the same-provider path; cross-provider picks go through
+    // `switch_provider`, which validates the route atomically. Skip the strict
+    // check when the app accepts custom ids (pass-through provider or custom
+    // DeepSeek-compatible base URL) — the upstream is the authority there.
+    if model_changed
+        && !app.accepts_custom_model_ids()
+        && let Err(reason) = crate::config::validate_route(app.api_provider, &model)
+    {
+        app.status_message = Some(reason);
+        return;
+    }
+
     if model_changed {
         app.set_model_selection(model.clone());
         app.provider_models
@@ -6194,6 +6209,32 @@ async fn switch_provider(
     }
 
     let new_model = config.default_model();
+    // Validate the resolved (provider, model) tuple as one atomic unit before
+    // we tear down the engine or persist anything (#3227). This catches a
+    // contaminated route — e.g. provider `zai` paired with `deepseek-v4-pro` —
+    // locally with a precise diagnostic instead of a `400 Unknown Model`. On
+    // failure we leave the provider, model, and config exactly as they were.
+    // Pass-through routes (OpenAI-compatible, custom DeepSeek base URLs, …)
+    // skip the strict check; the upstream service is the authority there.
+    if !config.model_ids_pass_through()
+        && let Err(reason) = crate::config::validate_route(target, &new_model)
+    {
+        app.pending_provider_switch = None;
+        *config = previous_config;
+        app.add_message(HistoryCell::System {
+            content: format!(
+                "Cannot switch to {}: {reason}\nProvider unchanged ({}).",
+                target.as_str(),
+                previous_provider.as_str()
+            ),
+        });
+        app.status_message = Some(format!(
+            "Route rejected: {} is not compatible with {}.",
+            new_model,
+            target.as_str()
+        ));
+        return;
+    }
     let new_base_url = config.deepseek_base_url();
     let new_endpoint = display_base_url_host(&new_base_url);
     let cache_scope_changed = previous_provider != target || previous_model != new_model;

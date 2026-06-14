@@ -624,6 +624,71 @@ pub fn requested_model_for_provider(provider: ApiProvider, model: &str) -> Optio
     }
 }
 
+/// Reject a provider/model tuple that we can be confident is invalid *before*
+/// it reaches the network (#3227).
+///
+/// The route-isolation bug paired a model picked under one provider with a
+/// different provider's route (model chip `deepseek-v4-pro`, provider badge
+/// `Z.ai`), producing a `400 Unknown Model` from the upstream. This guard
+/// catches that locally and names the incompatible pair instead.
+///
+/// We only reject tuples that are *known* to be wrong so legitimate custom
+/// routing (self-hosted endpoints, OpenAI-compatible aggregators that proxy
+/// DeepSeek weights, etc.) keeps working:
+///
+/// 1. A DeepSeek-native provider (`deepseek` / `deepseek-cn`) accepts only
+///    DeepSeek model IDs or `auto` — same gate as [`normalize_model_name`].
+/// 2. A non-DeepSeek *native* provider (e.g. Z.ai, which serves GLM) must not
+///    be handed a DeepSeek-only model ID. This reuses the same
+///    "foreign to a direct provider" classification the model resolver uses,
+///    so DeepSeek aggregators (NVIDIA NIM, OpenRouter, Fireworks, …) stay
+///    permissive.
+///
+/// Returns `Ok(())` for any tuple we cannot confidently reject (the provider
+/// API remains the final authority for those).
+pub fn validate_route(provider: ApiProvider, model: &str) -> Result<(), String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "No model selected for provider '{}'.",
+            provider.as_str()
+        ));
+    }
+    if trimmed.eq_ignore_ascii_case("auto") {
+        return Ok(());
+    }
+
+    // Providers whose model id is passed through verbatim (OpenAI-compatible,
+    // Ollama tags, custom base URLs, …) are validated by the upstream service.
+    if provider_passes_model_through(provider) {
+        return Ok(());
+    }
+
+    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+        if normalize_model_name(trimmed).is_some() {
+            return Ok(());
+        }
+        return Err(format!(
+            "Model '{trimmed}' is not a DeepSeek model, but the active provider is '{}'. \
+             Use a DeepSeek model id (for example {}) or switch providers together with the model.",
+            provider.as_str(),
+            COMMON_DEEPSEEK_MODELS.join(", ")
+        ));
+    }
+
+    // A non-DeepSeek native provider was handed a DeepSeek-only model id: this
+    // is the exact contamination from #3227 (Z.ai + deepseek-v4-pro).
+    if root_deepseek_model_is_foreign_to_direct_provider(provider, trimmed) {
+        return Err(format!(
+            "Model '{trimmed}' is a DeepSeek model and is not compatible with provider '{}'. \
+             Switch the provider and model together, or pick a model this provider serves.",
+            provider.as_str()
+        ));
+    }
+
+    Ok(())
+}
+
 fn canonical_official_deepseek_model_id(model: &str) -> Option<&'static str> {
     match model.trim().to_ascii_lowercase().as_str() {
         "deepseek-v4-pro"
@@ -8407,6 +8472,33 @@ api_key = "old-openrouter-key"
             requested_model_for_provider(ApiProvider::Deepseek, "deepseek-v4-pro").as_deref(),
             Some("deepseek-v4-pro")
         );
+    }
+
+    #[test]
+    fn validate_route_rejects_mismatched_provider_model_tuple() {
+        // #3227: the exact contamination — Z.ai provider paired with a
+        // DeepSeek model — is rejected locally with a diagnostic that names
+        // the incompatible pair, before any network call.
+        let err = validate_route(ApiProvider::Zai, "deepseek-v4-pro")
+            .expect_err("zai + deepseek model must be rejected");
+        assert!(err.contains("deepseek-v4-pro"), "names the model: {err}");
+        assert!(err.contains("zai"), "names the provider: {err}");
+
+        // A DeepSeek-native provider rejects a non-DeepSeek model id.
+        let err = validate_route(ApiProvider::Deepseek, "GLM-5.2")
+            .expect_err("deepseek + GLM must be rejected");
+        assert!(err.contains("GLM-5.2"), "names the model: {err}");
+
+        // Coherent routes pass.
+        assert!(validate_route(ApiProvider::Zai, "GLM-5.2").is_ok());
+        assert!(validate_route(ApiProvider::Deepseek, "deepseek-v4-pro").is_ok());
+        // `auto` is always acceptable; the per-turn router resolves it.
+        assert!(validate_route(ApiProvider::Zai, "auto").is_ok());
+        // Pass-through / aggregator providers stay permissive — the upstream
+        // API remains the authority for them.
+        assert!(validate_route(ApiProvider::Openai, "deepseek-v4-pro").is_ok());
+        assert!(validate_route(ApiProvider::Openrouter, "deepseek-v4-pro").is_ok());
+        assert!(validate_route(ApiProvider::NvidiaNim, "deepseek-v4-pro").is_ok());
     }
 
     #[test]
