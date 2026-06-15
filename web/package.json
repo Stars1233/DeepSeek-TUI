@@ -37,6 +37,7 @@
   },
   "overrides": {
     "esbuild": "0.28.1",
-    "postcss": "^8.5.14"
+    "postcss": "^8.5.14",
+    "ws": "8.21.0"
   }
 }
