@@ -6299,6 +6299,56 @@ unix_socket_path = "/tmp/cw-hooks.sock"
     }
 
     #[test]
+    fn merge_and_preserve_comments_returns_err_on_invalid_serialized() {
+        let err = merge_and_preserve_comments("{{{ not toml", "model = 1\n")
+            .expect_err("invalid serialized should fail");
+        assert!(
+            format!("{err:#}").contains("failed to parse serialized"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_and_preserve_comments_returns_err_on_invalid_original() {
+        let err = merge_and_preserve_comments("model = 1\n", "{{{ not toml")
+            .expect_err("invalid original should fail");
+        assert!(
+            format!("{err:#}").contains("failed to parse original"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn config_store_save_falls_back_when_comment_merge_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(CONFIG_FILE_NAME);
+        // Valid TOML so load succeeds, but the raw is corrupt so the merge
+        // will fail inside save() — save must still succeed and write the
+        // plain serialized config.
+        fs::write(&config_path, "model = \"deepseek-v4-flash\"\n").expect("write config");
+
+        // Bypass ConfigStore::load to inject a deliberately broken original_raw.
+        let store = ConfigStore {
+            path: config_path.clone(),
+            config: ConfigToml {
+                model: Some("deepseek-v4-pro".to_string()),
+                ..ConfigToml::default()
+            },
+            permissions: PermissionsToml::default(),
+            original_raw: Some("{ broken".to_string()),
+        };
+        store
+            .save()
+            .expect("save should succeed even when merge fails");
+
+        let body = fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            body.contains("deepseek-v4-pro"),
+            "config should be written: {body}"
+        );
+    }
+
+    #[test]
     fn provider_kind_parses_openrouter_and_novita_aliases() {
         assert_eq!(
             ProviderKind::parse("openrouter"),
