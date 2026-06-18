@@ -2483,6 +2483,7 @@ enum ApiKeySource {
 }
 
 fn resolve_api_key_source(config: &Config) -> ApiKeySource {
+    let provider = config.api_provider();
     if std::env::var("DEEPSEEK_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
@@ -2495,24 +2496,54 @@ fn resolve_api_key_source(config: &Config) -> ApiKeySource {
         }
     }
 
-    if config
+    let provider_config_key = config
+        .provider_config()
+        .and_then(|entry| entry.api_key.as_ref())
+        .is_some_and(|k| !k.trim().is_empty());
+    let root_deepseek_key = matches!(
+        provider,
+        crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
+    ) && config
         .api_key
         .as_ref()
-        .is_some_and(|k| !k.trim().is_empty())
-        || config
-            .provider_config()
-            .and_then(|entry| entry.api_key.as_ref())
-            .is_some_and(|k| !k.trim().is_empty())
-    {
+        .is_some_and(|k| !k.trim().is_empty());
+
+    if provider_config_key || root_deepseek_key {
         ApiKeySource::Config
-    } else if std::env::var("DEEPSEEK_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-        .is_some()
-    {
+    } else if provider_env_key_source(provider).is_some() {
         ApiKeySource::Env
     } else {
         ApiKeySource::Missing
+    }
+}
+
+fn provider_env_key_source(provider: crate::config::ApiProvider) -> Option<&'static str> {
+    provider
+        .env_vars()
+        .iter()
+        .copied()
+        .find(|var| std::env::var(var).is_ok_and(|value| !value.trim().is_empty()))
+}
+
+fn provider_env_vars_label(provider: crate::config::ApiProvider) -> String {
+    provider.env_vars_label()
+}
+
+fn provider_config_table_key(provider: crate::config::ApiProvider) -> &'static str {
+    provider
+        .metadata()
+        .map(|metadata| metadata.provider_config_key())
+        .unwrap_or("deepseek_cn")
+}
+
+fn provider_auth_hint(provider: crate::config::ApiProvider) -> String {
+    if provider == crate::config::ApiProvider::OpenaiCodex {
+        "see docs/PROVIDERS.md for ChatGPT/Codex OAuth setup".to_string()
+    } else {
+        format!(
+            "codewhale auth set --provider {} --api-key \"...\"",
+            provider.as_str()
+        )
     }
 }
 
@@ -2545,10 +2576,15 @@ fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
     println!("workspace: {}", workspace.display());
 
     match resolve_api_key_source(config) {
-        ApiKeySource::Env => println!(
-            "  {} api_key: set via DEEPSEEK_API_KEY",
-            "✓".truecolor(aqua_r, aqua_g, aqua_b)
-        ),
+        ApiKeySource::Env => {
+            let env_vars = provider_env_key_source(config.api_provider())
+                .map(str::to_string)
+                .unwrap_or_else(|| provider_env_vars_label(config.api_provider()));
+            println!(
+                "  {} api_key: set via {env_vars}",
+                "✓".truecolor(aqua_r, aqua_g, aqua_b)
+            );
+        }
         ApiKeySource::Keyring => println!(
             "  {} api_key: set via OS keyring",
             "✓".truecolor(aqua_r, aqua_g, aqua_b)
@@ -2558,134 +2594,13 @@ fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
             "✓".truecolor(aqua_r, aqua_g, aqua_b)
         ),
         ApiKeySource::Missing => {
-            let (env_var, login_hint) = match config.api_provider() {
-                crate::config::ApiProvider::NvidiaNim => (
-                    "NVIDIA_API_KEY",
-                    "codewhale auth set --provider nvidia-nim --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Openai => (
-                    "OPENAI_API_KEY",
-                    "codewhale auth set --provider openai --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Anthropic => (
-                    "ANTHROPIC_API_KEY",
-                    "codewhale auth set --provider anthropic --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Atlascloud => (
-                    "ATLASCLOUD_API_KEY",
-                    "codewhale auth set --provider atlascloud --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::WanjieArk => (
-                    "WANJIE_ARK_API_KEY",
-                    "codewhale auth set --provider wanjie-ark --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Openrouter => (
-                    "OPENROUTER_API_KEY",
-                    "codewhale auth set --provider openrouter --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::XiaomiMimo => (
-                    "XIAOMI_MIMO_API_KEY/XIAOMI_API_KEY/MIMO_API_KEY",
-                    "codewhale auth set --provider xiaomi-mimo --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Novita => (
-                    "NOVITA_API_KEY",
-                    "codewhale auth set --provider novita --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Fireworks => (
-                    "FIREWORKS_API_KEY",
-                    "codewhale auth set --provider fireworks --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Siliconflow
-                | crate::config::ApiProvider::SiliconflowCn => (
-                    "SILICONFLOW_API_KEY",
-                    "codewhale auth set --provider siliconflow --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Arcee => (
-                    "ARCEE_API_KEY",
-                    "codewhale auth set --provider arcee --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Moonshot => (
-                    "MOONSHOT_API_KEY/KIMI_API_KEY",
-                    "codewhale auth set --provider moonshot --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Sglang => (
-                    "SGLANG_API_KEY",
-                    "codewhale auth set --provider sglang --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Vllm => (
-                    "VLLM_API_KEY",
-                    "codewhale auth set --provider vllm --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Ollama => {
-                    ("OLLAMA_API_KEY", "codewhale auth set --provider ollama")
-                }
-                crate::config::ApiProvider::Volcengine => (
-                    "VOLCENGINE_API_KEY",
-                    "codewhale auth set --provider volcengine",
-                ),
-                crate::config::ApiProvider::Huggingface => (
-                    "HUGGINGFACE_API_KEY/HF_TOKEN",
-                    "codewhale auth set --provider huggingface",
-                ),
-                crate::config::ApiProvider::Deepinfra => (
-                    "DEEPINFRA_API_KEY/DEEPINFRA_TOKEN",
-                    "codewhale auth set --provider deepinfra --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Together => (
-                    "TOGETHER_API_KEY",
-                    "codewhale auth set --provider together --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::OpenaiCodex => (
-                    "OPENAI_CODEX_ACCESS_TOKEN/CODEX_ACCESS_TOKEN",
-                    "see docs/PROVIDERS.md for ChatGPT/Codex OAuth setup",
-                ),
-                crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN => {
-                    ("DEEPSEEK_API_KEY", "codewhale auth set --provider deepseek")
-                }
-                crate::config::ApiProvider::Zai => (
-                    "ZAI_API_KEY/Z_AI_API_KEY",
-                    "codewhale auth set --provider zai --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Stepfun => (
-                    "STEPFUN_API_KEY/STEP_API_KEY",
-                    "codewhale auth set --provider stepfun --api-key \"...\"",
-                ),
-                crate::config::ApiProvider::Minimax => (
-                    "MINIMAX_API_KEY",
-                    "codewhale auth set --provider minimax --api-key \"...\"",
-                ),
-            };
+            let provider = config.api_provider();
+            let env_var = provider_env_vars_label(provider);
+            let login_hint = provider_auth_hint(provider);
+            let table_key = provider_config_table_key(provider);
             println!(
-                "  {} api_key: missing  (set {env_var} or `[providers.{}].api_key` in ~/.codewhale/config.toml; or run `{login_hint}`)",
+                "  {} api_key: missing  (set {env_var} or `[providers.{table_key}].api_key` in ~/.codewhale/config.toml; or run `{login_hint}`)",
                 "✗".truecolor(red_r, red_g, red_b),
-                match config.api_provider() {
-                    crate::config::ApiProvider::NvidiaNim => "nvidia_nim",
-                    crate::config::ApiProvider::Openai => "openai",
-                    crate::config::ApiProvider::Anthropic => "anthropic",
-                    crate::config::ApiProvider::Atlascloud => "atlascloud",
-                    crate::config::ApiProvider::WanjieArk => "wanjie_ark",
-                    crate::config::ApiProvider::Volcengine => "volcengine",
-                    crate::config::ApiProvider::Openrouter => "openrouter",
-                    crate::config::ApiProvider::XiaomiMimo => "xiaomi_mimo",
-                    crate::config::ApiProvider::Novita => "novita",
-                    crate::config::ApiProvider::Fireworks => "fireworks",
-                    crate::config::ApiProvider::Siliconflow
-                    | crate::config::ApiProvider::SiliconflowCn => "siliconflow",
-                    crate::config::ApiProvider::Arcee => "arcee",
-                    crate::config::ApiProvider::Moonshot => "moonshot",
-                    crate::config::ApiProvider::Sglang => "sglang",
-                    crate::config::ApiProvider::Vllm => "vllm",
-                    crate::config::ApiProvider::Ollama => "ollama",
-                    crate::config::ApiProvider::Huggingface => "huggingface",
-                    crate::config::ApiProvider::Deepinfra => "deepinfra",
-                    crate::config::ApiProvider::Together => "together",
-                    crate::config::ApiProvider::OpenaiCodex => "openai_codex",
-                    crate::config::ApiProvider::Deepseek
-                    | crate::config::ApiProvider::DeepseekCN => "deepseek",
-                    crate::config::ApiProvider::Zai => "zai",
-                    crate::config::ApiProvider::Stepfun => "stepfun",
-                    crate::config::ApiProvider::Minimax => "minimax",
-                }
             );
         }
     }
@@ -2957,84 +2872,10 @@ async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Opt
     // Per-provider state: env + config file only (no values printed).
     // Keep doctor/status prompt-free even for unsigned rebuilt binaries.
     let dispatcher_api_key_source = std::env::var("DEEPSEEK_API_KEY_SOURCE").ok();
-    for (provider, slot, env_names) in [
-        (
-            crate::config::ApiProvider::Deepseek,
-            "deepseek",
-            &["DEEPSEEK_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::NvidiaNim,
-            "nvidia-nim",
-            &["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Openai,
-            "openai",
-            &["OPENAI_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Atlascloud,
-            "atlascloud",
-            &["ATLASCLOUD_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::WanjieArk,
-            "wanjie-ark",
-            &[
-                "WANJIE_ARK_API_KEY",
-                "WANJIE_API_KEY",
-                "WANJIE_MAAS_API_KEY",
-            ][..],
-        ),
-        (
-            crate::config::ApiProvider::Openrouter,
-            "openrouter",
-            &["OPENROUTER_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::XiaomiMimo,
-            "xiaomi-mimo",
-            &["XIAOMI_MIMO_API_KEY", "XIAOMI_API_KEY", "MIMO_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Novita,
-            "novita",
-            &["NOVITA_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Fireworks,
-            "fireworks",
-            &["FIREWORKS_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Siliconflow,
-            "siliconflow",
-            &["SILICONFLOW_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Moonshot,
-            "moonshot",
-            &["MOONSHOT_API_KEY", "KIMI_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Sglang,
-            "sglang",
-            &["SGLANG_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Vllm,
-            "vllm",
-            &["VLLM_API_KEY"][..],
-        ),
-        (
-            crate::config::ApiProvider::Ollama,
-            "ollama",
-            &["OLLAMA_API_KEY"][..],
-        ),
-    ] {
-        let in_env = env_names.iter().any(|n| {
-            std::env::var(n)
+    for provider in crate::config::ApiProvider::all().iter().copied() {
+        let slot = provider.as_str();
+        let in_env = provider.env_vars().iter().any(|var| {
+            std::env::var(var)
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .is_some()
@@ -8975,6 +8816,59 @@ mod setup_helper_tests {
             None => unsafe { std::env::remove_var("DEEPSEEK_API_KEY_SOURCE") },
         }
         assert_eq!(source, ApiKeySource::Config);
+    }
+
+    #[test]
+    fn resolve_api_key_source_reports_active_provider_env_from_metadata() {
+        let _guard = crate::test_support::lock_test_env();
+        let _deepseek_key = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+        let _deepseek_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+        let _anthropic_key =
+            crate::test_support::EnvVarGuard::set("ANTHROPIC_API_KEY", "test-anthropic-key");
+        let cfg = Config {
+            provider: Some("anthropic".to_string()),
+            ..Config::default()
+        };
+
+        let source = resolve_api_key_source(&cfg);
+
+        assert_eq!(source, ApiKeySource::Env);
+    }
+
+    #[test]
+    fn resolve_api_key_source_ignores_root_deepseek_key_for_other_provider() {
+        let _guard = crate::test_support::lock_test_env();
+        let _deepseek_key = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+        let _deepseek_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+        let _openrouter_key = crate::test_support::EnvVarGuard::remove("OPENROUTER_API_KEY");
+        let cfg = Config {
+            provider: Some("openrouter".to_string()),
+            api_key: Some("legacy-deepseek-root-key".to_string()),
+            ..Config::default()
+        };
+
+        let source = resolve_api_key_source(&cfg);
+
+        assert_eq!(source, ApiKeySource::Missing);
+    }
+
+    #[test]
+    fn provider_status_helpers_use_provider_metadata() {
+        assert_eq!(
+            provider_env_vars_label(crate::config::ApiProvider::NvidiaNim),
+            "NVIDIA_API_KEY / NVIDIA_NIM_API_KEY / DEEPSEEK_API_KEY"
+        );
+        assert_eq!(
+            provider_config_table_key(crate::config::ApiProvider::Anthropic),
+            "anthropic"
+        );
+        assert_eq!(
+            provider_config_table_key(crate::config::ApiProvider::SiliconflowCn),
+            "siliconflow_cn"
+        );
+        assert!(
+            provider_auth_hint(crate::config::ApiProvider::OpenaiCodex).contains("PROVIDERS.md")
+        );
     }
 
     #[test]
