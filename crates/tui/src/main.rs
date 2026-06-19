@@ -6338,6 +6338,7 @@ async fn run_exec_agent(
         show_thinking: settings.show_thinking,
         max_steps: max_turns,
         max_subagents,
+        max_admitted_subagents: execution_config.max_admitted_subagents(),
         launch_concurrency: execution_config.launch_concurrency(),
         subagents_enabled: execution_config.subagents_enabled(),
         features: execution_config.features(),

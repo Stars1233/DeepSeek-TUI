@@ -276,6 +276,8 @@ pub struct EngineConfig {
     pub max_steps: u32,
     /// Maximum number of concurrently active subagents.
     pub max_subagents: usize,
+    /// Maximum queued + running sub-agents admitted for this engine session.
+    pub max_admitted_subagents: usize,
     /// Number of direct (depth-1) sub-agents that may execute concurrently
     /// before further launches queue for a launch slot (#3095).
     /// Resolved from `[subagents] launch_concurrency`.
@@ -409,6 +411,7 @@ impl Default for EngineConfig {
             show_thinking: true,
             max_steps: 100,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
+            max_admitted_subagents: DEFAULT_MAX_SUBAGENTS,
             launch_concurrency: DEFAULT_MAX_SUBAGENTS,
             subagents_enabled: true,
             features: Features::with_defaults(),
@@ -832,6 +835,7 @@ impl Engine {
         let subagent_manager = new_shared_subagent_manager_with_timeout(
             config.workspace.clone(),
             config.max_subagents,
+            config.max_admitted_subagents,
             config.subagent_heartbeat_timeout,
             config.launch_concurrency,
             config.subagent_token_budget,
@@ -1480,6 +1484,7 @@ impl Engine {
                             let mut manager = self.subagent_manager.write().await;
                             manager.update_runtime_limits(
                                 self.config.max_subagents,
+                                self.config.max_admitted_subagents,
                                 self.config.subagent_heartbeat_timeout,
                                 self.config.launch_concurrency,
                                 self.config.subagent_token_budget,

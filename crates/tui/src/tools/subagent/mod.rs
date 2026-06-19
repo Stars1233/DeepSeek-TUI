@@ -1832,6 +1832,7 @@ pub struct SubAgentManager {
     state_path: Option<PathBuf>,
     max_steps: u32,
     max_agents: usize,
+    max_admitted_agents: usize,
     default_token_budget: Option<u64>,
     running_heartbeat_timeout: Duration,
     /// Stable id assigned at manager construction (#405). Stamped on
@@ -1869,6 +1870,7 @@ impl SubAgentManager {
             state_path: None,
             max_steps: DEFAULT_MAX_STEPS,
             max_agents,
+            max_admitted_agents: max_agents,
             default_token_budget: None,
             running_heartbeat_timeout: Duration::from_secs(
                 crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
@@ -1889,6 +1891,15 @@ impl SubAgentManager {
     #[must_use]
     pub fn with_launch_concurrency(mut self, limit: usize) -> Self {
         self.launch_gate = Arc::new(Semaphore::new(limit.clamp(1, self.max_agents)));
+        self
+    }
+
+    /// Set the total queued + running admission ceiling for this manager.
+    /// The value is always at least the instantaneous concurrency cap.
+    #[must_use]
+    pub fn with_admission_limit(mut self, max_admitted: usize) -> Self {
+        self.max_admitted_agents =
+            max_admitted.clamp(self.max_agents, crate::config::MAX_SUBAGENT_ADMISSION);
         self
     }
 
@@ -1937,11 +1948,14 @@ impl SubAgentManager {
     pub fn update_runtime_limits(
         &mut self,
         max_agents: usize,
+        max_admitted_agents: usize,
         running_heartbeat_timeout: Duration,
         launch_concurrency: usize,
         default_token_budget: Option<u64>,
     ) -> bool {
         self.max_agents = max_agents.clamp(1, crate::config::MAX_SUBAGENTS);
+        self.max_admitted_agents =
+            max_admitted_agents.clamp(self.max_agents, crate::config::MAX_SUBAGENT_ADMISSION);
         self.default_token_budget = positive_token_budget(default_token_budget);
         self.running_heartbeat_timeout = if running_heartbeat_timeout.is_zero() {
             Duration::from_secs(crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS)
@@ -2449,6 +2463,12 @@ impl SubAgentManager {
 
     /// Count running agents.
     pub fn running_count(&self) -> usize {
+        self.admitted_count()
+    }
+
+    /// Count live sub-agents that have been admitted, including queued
+    /// workers waiting on the launch gate.
+    pub fn admitted_count(&self) -> usize {
         self.agents
             .values()
             .filter(|agent| {
@@ -2466,6 +2486,41 @@ impl SubAgentManager {
                 !self.running_heartbeat_timed_out(agent)
             })
             .count()
+    }
+
+    /// Count admitted workers that are currently waiting for the launch gate.
+    pub fn queued_count(&self) -> usize {
+        self.agents
+            .values()
+            .filter(|agent| {
+                agent.status == SubAgentStatus::Running
+                    && agent.task_handle.is_some()
+                    && !self.running_heartbeat_timed_out(agent)
+                    && self
+                        .worker_records
+                        .get(&agent.id)
+                        .is_some_and(|record| record.status == AgentWorkerStatus::Queued)
+            })
+            .count()
+    }
+
+    /// Count admitted workers not currently in the queued launch state.
+    pub fn active_count(&self) -> usize {
+        self.admitted_count().saturating_sub(self.queued_count())
+    }
+
+    fn check_admission_capacity(&self) -> Result<()> {
+        let admitted = self.admitted_count();
+        if admitted >= self.max_admitted_agents {
+            return Err(anyhow!(
+                "Sub-agent admission limit reached (max_admitted {}, admitted {}, running {}, queued {}). Wait for queued/running agents to finish, cancel unneeded agents, or raise [subagents] max_admitted for this Workflow.",
+                self.max_admitted_agents,
+                admitted,
+                self.active_count(),
+                self.queued_count()
+            ));
+        }
+        Ok(())
     }
 
     fn running_heartbeat_timed_out(&self, agent: &SubAgent) -> bool {
@@ -2540,13 +2595,7 @@ impl SubAgentManager {
     ) -> Result<SubAgentResult> {
         self.cleanup(COMPLETED_AGENT_RETENTION);
 
-        if self.running_count() >= self.max_agents {
-            return Err(anyhow!(
-                "Sub-agent limit reached (max {}, running {}). Cancel, close, or wait for an existing agent to finish. Consider issuing multiple tool calls in one turn (the dispatcher runs them in parallel) for parallel one-shot work.",
-                self.max_agents,
-                self.running_count()
-            ));
-        }
+        self.check_admission_capacity()?;
 
         if let Some(model) = options.model.as_deref() {
             runtime.model = model.to_string();
@@ -3223,6 +3272,7 @@ pub fn new_shared_subagent_manager(workspace: PathBuf, max_agents: usize) -> Sha
     new_shared_subagent_manager_with_timeout(
         workspace,
         max_agents,
+        max_agents,
         Duration::from_secs(crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS),
         max_agents,
         None,
@@ -3235,6 +3285,7 @@ pub fn new_shared_subagent_manager(workspace: PathBuf, max_agents: usize) -> Sha
 pub fn new_shared_subagent_manager_with_timeout(
     workspace: PathBuf,
     max_agents: usize,
+    max_admitted_agents: usize,
     running_heartbeat_timeout: Duration,
     launch_concurrency: usize,
     default_token_budget: Option<u64>,
@@ -3242,6 +3293,7 @@ pub fn new_shared_subagent_manager_with_timeout(
     let max_agents = max_agents.clamp(1, MAX_SUBAGENTS);
     let state_path = default_state_path(&workspace);
     let mut manager = SubAgentManager::new(workspace, max_agents)
+        .with_admission_limit(max_admitted_agents)
         .with_running_heartbeat_timeout(running_heartbeat_timeout)
         .with_launch_concurrency(launch_concurrency)
         .with_default_token_budget(default_token_budget)

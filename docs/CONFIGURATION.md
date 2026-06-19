@@ -121,7 +121,7 @@ Supported keys in the project overlay (top-level fields only):
 | `sandbox_mode` | `"read-only"` / `"workspace-write"` / `"danger-full-access"` |
 | `mcp_config_path` | per-repo MCP server set |
 | `notes_path` | keep notes in-repo |
-| `max_subagents` | clamp concurrency for a constrained repo (clamped to 1..=20) |
+| `max_subagents` | clamp sub-agent concurrency for a constrained repo (clamped to 1..=20) |
 | `allow_shell` | gate shell tool access on `false` |
 
 The overlay is intentionally narrow — it covers the fields a repo
@@ -985,21 +985,25 @@ If you are upgrading from older releases:
   Explicit tool `model` values win, then role/type
   overrides, then the parent runtime model. Supported convenience keys are
   `default_model`, `worker_model`, `explorer_model`, `awaiter_model`,
-  `review_model`, `custom_model`, `max_concurrent`, `launch_concurrency`,
-  `token_budget`, `api_timeout_secs`, and `heartbeat_timeout_secs`. The
-  `[subagents] max_concurrent` value overrides top-level `max_subagents` and is
-  also clamped to `1..=20`. `[subagents] launch_concurrency` sets how many
-  direct children start at once before the rest queue for a launch slot; it
-  defaults to the resolved `max_subagents` cap and is clamped to
-  `1..=max_subagents` (the deprecated `interactive_max_launch` key is accepted
-  as an alias, with the new key winning when both are set). `[subagents]
-  token_budget` is an optional aggregate token ceiling for each root `agent`
-  run and its descendants; unset or `0` preserves unlimited legacy behavior.
-  `[subagents] api_timeout_secs` controls the per-step API timeout for
-  sub-agent model calls and is clamped to `1..=1800`, with `0` or unset
-  preserving the legacy 120 second default. `[subagents] heartbeat_timeout_secs`
-  controls stale running agent cleanup, defaults to `300`, and is clamped to
-  `30..=3600` while staying above the resolved API timeout.
+  `review_model`, `custom_model`, `max_concurrent`, `max_admitted`,
+  `launch_concurrency`, `token_budget`, `api_timeout_secs`, and
+  `heartbeat_timeout_secs`. The `[subagents] max_concurrent` value overrides
+  top-level `max_subagents` and is also clamped to `1..=20`. `[subagents]
+  max_admitted` (aliases: `max_total`, `admission_limit`) is the bounded total
+  of queued plus running sub-agents; it defaults to the resolved concurrency cap
+  for compatibility and is clamped to `max_concurrent..=200`. `[subagents]
+  launch_concurrency` sets how many direct children start at once before the
+  rest queue for a launch slot; it defaults to the resolved `max_subagents` cap
+  and is clamped to `1..=max_subagents` (the deprecated
+  `interactive_max_launch` key is accepted as an alias, with the new key
+  winning when both are set). `[subagents] token_budget` is an optional
+  aggregate token ceiling for each root `agent` run and its descendants; unset
+  or `0` preserves unlimited legacy behavior. `[subagents] api_timeout_secs`
+  controls the per-step API timeout for sub-agent model calls and is clamped to
+  `1..=1800`, with `0` or unset preserving the legacy 120 second default.
+  `[subagents] heartbeat_timeout_secs` controls stale running agent cleanup,
+  defaults to `300`, and is clamped to `30..=3600` while staying above the
+  resolved API timeout.
   `[subagents.models]` accepts lower-case role or type keys such as `worker`,
   `explorer`, `general`, `explore`, `plan`, and `review`. Values must normalize
   to a supported DeepSeek model id before an agent is spawned.

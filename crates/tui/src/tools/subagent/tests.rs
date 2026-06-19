@@ -2005,6 +2005,76 @@ async fn test_running_count_counts_running_agents_until_status_reconciles() {
 }
 
 #[tokio::test]
+async fn admission_limit_counts_queued_and_running_workers_separately() {
+    let mut manager = SubAgentManager::new(PathBuf::from("."), 2).with_admission_limit(4);
+    let mut handles = Vec::new();
+
+    for (agent_id, queued) in [
+        ("agent_admit_a", false),
+        ("agent_admit_b", false),
+        ("agent_admit_c", true),
+        ("agent_admit_d", true),
+    ] {
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let mut agent = SubAgent::new(
+            agent_id.to_string(),
+            SubAgentType::Explore,
+            "prompt".to_string(),
+            make_assignment(),
+            "deepseek-v4-flash".to_string(),
+            Some("Blue".to_string()),
+            Some(vec!["read_file".to_string()]),
+            input_tx,
+            PathBuf::from("."),
+            "boot_test".to_string(),
+        );
+        agent.status = SubAgentStatus::Running;
+        agent.task_handle = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }));
+        handles.push(agent_id.to_string());
+        manager.agents.insert(agent_id.to_string(), agent);
+        manager.register_worker(make_worker_spec(agent_id, PathBuf::from(".")));
+        if queued {
+            manager.record_worker_event(
+                agent_id,
+                AgentWorkerStatus::Queued,
+                Some(SUBAGENT_QUEUED_LAUNCH_REASON.to_string()),
+                None,
+                None,
+            );
+        }
+
+        if manager.admitted_count() < 4 {
+            manager
+                .check_admission_capacity()
+                .expect("admission remains below total ceiling");
+        }
+    }
+
+    assert_eq!(manager.admitted_count(), 4);
+    assert_eq!(manager.active_count(), 2);
+    assert_eq!(manager.queued_count(), 2);
+    let err = manager
+        .check_admission_capacity()
+        .expect_err("admission ceiling rejects fifth worker");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("max_admitted 4") && msg.contains("running 2") && msg.contains("queued 2"),
+        "error distinguishes running vs queued counts: {msg}"
+    );
+
+    for agent_id in handles {
+        manager
+            .agents
+            .get_mut(&agent_id)
+            .and_then(|agent| agent.task_handle.take())
+            .expect("live task handle")
+            .abort();
+    }
+}
+
+#[tokio::test]
 async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1)
         .with_running_heartbeat_timeout(Duration::from_millis(1));

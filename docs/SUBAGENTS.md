@@ -181,11 +181,11 @@ the next turn.
 
 ## Concurrency cap
 
-Up to **20** sub-agents run concurrently by default (configurable via
+Up to **20** sub-agents are admitted by default (configurable via
 `[subagents].max_concurrent` in `~/.codewhale/config.toml`; the default equals
-the hard ceiling of 20). When the parent hits the cap, `agent` returns an error
-with the cap value; the parent should wait for background completion events
-before opening more agents, or ask the user.
+the hard instantaneous-concurrency ceiling of 20). Existing configs keep the
+old behavior: once admitted workers reach that resolved cap, `agent` returns an
+error with the cap value.
 
 By default every admitted child may start immediately — there is no artificial
 throttle. If you want gentler fan-out, lower `[subagents].launch_concurrency`
@@ -194,10 +194,13 @@ for a launch slot rather than bursting. `launch_concurrency` defaults to the
 resolved `max_subagents` cap. (The pre-v0.8.61 `interactive_max_launch` key is
 still accepted as a deprecated alias; the new key wins when both are set.)
 
-The cap counts only **running** agents — completed / failed /
-cancelled records persist for inspection but don't occupy a slot.
-Agents that lost their `task_handle` (e.g. across a process
-restart) also don't count against the cap.
+High-fanout Workflows can opt into a larger bounded population with
+`[subagents].max_admitted` (aliases: `max_total`, `admission_limit`). That
+total ceiling counts both **running** and **queued** agents, while
+`launch_concurrency` keeps instantaneous execution bounded. Completed / failed
+/ cancelled records persist for inspection but don't occupy an admission slot.
+Agents that lost their `task_handle` (e.g. across a process restart) also don't
+count against the cap.
 
 ## Token budget governor
 

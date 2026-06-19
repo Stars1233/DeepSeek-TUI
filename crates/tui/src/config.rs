@@ -21,6 +21,10 @@ use crate::hooks::HooksConfig;
 
 pub const DEFAULT_MAX_SUBAGENTS: usize = 20;
 pub const MAX_SUBAGENTS: usize = 20;
+/// Upper bound for queued + running sub-agent admissions. This is deliberately
+/// higher than the instantaneous concurrency cap so Workflow-style fanout can
+/// opt into large bounded populations without unbounded queue growth.
+pub const MAX_SUBAGENT_ADMISSION: usize = 200;
 /// Default per-step DeepSeek API timeout for sub-agent requests, in seconds.
 /// Matches the legacy hardcoded value so existing configs keep their old
 /// behavior when `[subagents] api_timeout_secs` is unset (#1806, #1808).
@@ -1800,6 +1804,12 @@ pub struct SubagentsConfig {
     /// throttle); explicit values are clamped to [1, max_subagents].
     #[serde(default)]
     pub launch_concurrency: Option<usize>,
+    /// Maximum queued + running sub-agents admitted for one session. Defaults
+    /// to the resolved concurrency cap for backward compatibility, and can be
+    /// raised for high-fanout Workflow runs while `launch_concurrency` keeps
+    /// instantaneous execution bounded.
+    #[serde(default, alias = "max_total", alias = "admission_limit")]
+    pub max_admitted: Option<usize>,
     /// Optional aggregate token budget shared by a root `agent` run and its
     /// descendants. When unset or 0, sub-agents keep legacy unlimited spend
     /// behavior unless an individual `agent` call supplies a per-run override.
@@ -3239,6 +3249,22 @@ impl Config {
             .and_then(|cfg| cfg.launch_concurrency.or(cfg.interactive_max_launch_legacy))
             .unwrap_or(max)
             .clamp(1, max)
+    }
+
+    /// Maximum queued + running sub-agents admitted for the session.
+    ///
+    /// Defaults to the resolved concurrency cap so existing configs keep the
+    /// old "cap reached means reject" behavior. Set `[subagents]
+    /// max_admitted` above `max_concurrent` to let fanout queue and drain
+    /// through `launch_concurrency`.
+    #[must_use]
+    pub fn max_admitted_subagents(&self) -> usize {
+        let max_concurrent = self.max_subagents();
+        self.subagents
+            .as_ref()
+            .and_then(|cfg| cfg.max_admitted)
+            .unwrap_or(max_concurrent)
+            .clamp(max_concurrent, MAX_SUBAGENT_ADMISSION)
     }
 
     /// Optional aggregate token budget for each root `agent` run.
@@ -7421,6 +7447,48 @@ action = "session.compact"
             ..Config::default()
         };
         assert_eq!(configured.subagent_token_budget(), Some(50_000));
+    }
+
+    #[test]
+    fn subagent_admission_limit_defaults_and_clamps() {
+        assert_eq!(
+            Config::default().max_admitted_subagents(),
+            Config::default().max_subagents()
+        );
+
+        let configured = Config {
+            subagents: Some(SubagentsConfig {
+                max_concurrent: Some(4),
+                max_admitted: Some(80),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(configured.max_subagents(), 4);
+        assert_eq!(configured.max_admitted_subagents(), 80);
+
+        let low = Config {
+            subagents: Some(SubagentsConfig {
+                max_concurrent: Some(4),
+                max_admitted: Some(1),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(low.max_admitted_subagents(), 4);
+
+        let high = Config {
+            subagents: Some(SubagentsConfig {
+                max_admitted: Some(MAX_SUBAGENT_ADMISSION + 1),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(high.max_admitted_subagents(), MAX_SUBAGENT_ADMISSION);
+
+        let alias_cfg: SubagentsConfig =
+            toml::from_str("admission_limit = 80").expect("parse admission alias");
+        assert_eq!(alias_cfg.max_admitted, Some(80));
     }
 
     #[test]

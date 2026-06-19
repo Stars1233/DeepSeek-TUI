@@ -2406,6 +2406,7 @@ impl RuntimeThreadManager {
             show_thinking: settings.show_thinking,
             max_steps: 100,
             max_subagents: self.config.max_subagents().clamp(1, MAX_SUBAGENTS),
+            max_admitted_subagents: self.config.max_admitted_subagents(),
             launch_concurrency: self.config.launch_concurrency(),
             subagents_enabled: self.config.subagents_enabled(),
             features: self.config.features(),

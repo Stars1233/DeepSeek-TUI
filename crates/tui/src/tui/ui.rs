@@ -1087,6 +1087,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         // human-noticeable; we trust the operator over a hard step cap.
         max_steps: u32::MAX,
         max_subagents: app.max_subagents,
+        max_admitted_subagents: config.max_admitted_subagents(),
         launch_concurrency: config.launch_concurrency(),
         subagents_enabled: config.subagents_enabled(),
         features: config.features(),
