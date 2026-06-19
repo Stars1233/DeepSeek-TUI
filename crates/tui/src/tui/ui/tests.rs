@@ -78,6 +78,11 @@ struct SettingsHomeGuard {
     _tmp: TempDir,
     previous_home: Option<OsString>,
     previous_userprofile: Option<OsString>,
+    previous_codewhale_home: Option<OsString>,
+    previous_deepseek_config_path: Option<OsString>,
+    previous_xdg_config_home: Option<OsString>,
+    previous_appdata: Option<OsString>,
+    previous_localappdata: Option<OsString>,
     _lock: MutexGuard<'static, ()>,
 }
 
@@ -87,15 +92,31 @@ impl SettingsHomeGuard {
         let tmp = TempDir::new().expect("settings tempdir");
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_codewhale_home = std::env::var_os("CODEWHALE_HOME");
+        let previous_deepseek_config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH");
+        let previous_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_appdata = std::env::var_os("APPDATA");
+        let previous_localappdata = std::env::var_os("LOCALAPPDATA");
+        let codewhale_home = tmp.path().join(".codewhale");
         // Safety: test-only environment mutation guarded by a global mutex.
         unsafe {
             std::env::set_var("HOME", tmp.path());
             std::env::set_var("USERPROFILE", tmp.path());
+            std::env::set_var("CODEWHALE_HOME", &codewhale_home);
+            std::env::set_var("DEEPSEEK_CONFIG_PATH", codewhale_home.join("config.toml"));
+            std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("xdg-config"));
+            std::env::set_var("APPDATA", tmp.path().join("appdata"));
+            std::env::set_var("LOCALAPPDATA", tmp.path().join("localappdata"));
         }
         Self {
             _tmp: tmp,
             previous_home,
             previous_userprofile,
+            previous_codewhale_home,
+            previous_deepseek_config_path,
+            previous_xdg_config_home,
+            previous_appdata,
+            previous_localappdata,
             _lock: lock,
         }
     }
@@ -103,17 +124,26 @@ impl SettingsHomeGuard {
 
 impl Drop for SettingsHomeGuard {
     fn drop(&mut self) {
-        // Safety: test-only environment mutation guarded by a global mutex.
-        unsafe {
-            match self.previous_home.take() {
-                Some(previous) => std::env::set_var("HOME", previous),
-                None => std::env::remove_var("HOME"),
-            }
-            match self.previous_userprofile.take() {
-                Some(previous) => std::env::set_var("USERPROFILE", previous),
-                None => std::env::remove_var("USERPROFILE"),
+        fn restore(key: &str, previous: Option<OsString>) {
+            // Safety: test-only environment mutation guarded by a global mutex.
+            unsafe {
+                match previous {
+                    Some(previous) => std::env::set_var(key, previous),
+                    None => std::env::remove_var(key),
+                }
             }
         }
+
+        restore("HOME", self.previous_home.take());
+        restore("USERPROFILE", self.previous_userprofile.take());
+        restore("CODEWHALE_HOME", self.previous_codewhale_home.take());
+        restore(
+            "DEEPSEEK_CONFIG_PATH",
+            self.previous_deepseek_config_path.take(),
+        );
+        restore("XDG_CONFIG_HOME", self.previous_xdg_config_home.take());
+        restore("APPDATA", self.previous_appdata.take());
+        restore("LOCALAPPDATA", self.previous_localappdata.take());
     }
 }
 
@@ -2457,54 +2487,10 @@ fn provider_picker_reselecting_active_provider_preserves_current_model() {
 #[tokio::test]
 async fn provider_switch_clears_turn_cache_history() {
     // `switch_provider` persists the new provider to `Settings`, which
-    // writes through `dirs::data_dir()` (`~/Library/Application
-    // Support/deepseek/settings.toml` on macOS). Without redirecting
-    // HOME / USERPROFILE we would clobber the developer's real
-    // preferences and leave `default_provider = "ollama"` behind —
-    // which then leaks into any subsequent test that constructs an
-    // `App`. Hold the process-wide env lock for the duration so we
-    // serialize with other tests that mutate the same env vars.
-    // Wrap the lock inside a guard struct so clippy's
-    // `await_holding_lock` doesn't fire on the `.await` below; the
-    // pattern matches other tests that guard HOME / USERPROFILE mutations.
-    struct HomeGuard {
-        _tmp: tempfile::TempDir,
-        prev_home: Option<std::ffi::OsString>,
-        prev_userprofile: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: still holding the process-wide env lock.
-            unsafe {
-                match self.prev_home.take() {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-                match self.prev_userprofile.take() {
-                    Some(v) => std::env::set_var("USERPROFILE", v),
-                    None => std::env::remove_var("USERPROFILE"),
-                }
-            }
-        }
-    }
-    let _home = {
-        let lock = crate::test_support::lock_test_env();
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        // SAFETY: serialized by the process-wide test env lock.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-            std::env::set_var("USERPROFILE", tmp.path());
-        }
-        HomeGuard {
-            _tmp: tmp,
-            prev_home,
-            prev_userprofile,
-            _lock: lock,
-        }
-    };
+    // writes through settings path resolution. Without redirecting the
+    // CodeWhale/legacy config homes we would clobber the developer's real
+    // preferences and leave `default_provider = "ollama"` behind.
+    let _home = SettingsHomeGuard::new();
 
     let mut app = create_test_app();
     app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
@@ -8544,6 +8530,60 @@ fn approval_prompt_uses_event_input_after_message_complete_drain() {
     assert!(content.contains("/repo"));
     assert!(!content.contains("stale value from drained list"));
     assert_ne!(content.trim(), "{}");
+}
+
+#[tokio::test]
+async fn approval_decision_persists_ask_rules_to_permissions_file() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let mut app = create_test_app();
+    app.config_path = Some(config_path.clone());
+    let mut config = Config::default();
+    let mut engine = mock_engine_handle();
+    let rule = codewhale_config::ToolAskRule::exec_shell("cargo test");
+
+    apply_approval_decision(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApprovalDecisionEvent {
+            tool_id: "tool-1".to_string(),
+            tool_name: "exec_shell".to_string(),
+            decision: ReviewDecision::Approved,
+            timed_out: false,
+            approval_key: "approval-key".to_string(),
+            approval_grouping_key: "approval-group".to_string(),
+            persistent_ask_rules: vec![rule.clone()],
+        },
+    )
+    .await;
+
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Approved {
+            id: "tool-1".to_string()
+        })
+    );
+    let store = codewhale_config::ConfigStore::load(Some(config_path)).expect("load config store");
+    assert_eq!(store.permissions().rules, vec![rule]);
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Saved 1 ask permission rule"))
+    );
+
+    let decision = config
+        .exec_policy_engine
+        .check(codewhale_execpolicy::ExecPolicyContext {
+            command: "cargo test --workspace",
+            cwd: tmp.path().to_string_lossy().as_ref(),
+            tool: Some("exec_shell"),
+            path: None,
+            ask_for_approval: codewhale_execpolicy::AskForApproval::OnFailure,
+            sandbox_mode: None,
+        })
+        .expect("check persisted runtime policy");
+    assert!(decision.requires_approval);
 }
 
 #[test]

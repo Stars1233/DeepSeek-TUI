@@ -8664,10 +8664,12 @@ async fn handle_view_events(
                 timed_out,
                 approval_key,
                 approval_grouping_key,
+                persistent_ask_rules,
             } => {
                 apply_approval_decision(
                     app,
                     engine_handle,
+                    config,
                     ApprovalDecisionEvent {
                         tool_id,
                         tool_name,
@@ -8675,6 +8677,7 @@ async fn handle_view_events(
                         timed_out,
                         approval_key,
                         approval_grouping_key,
+                        persistent_ask_rules,
                     },
                 )
                 .await;
@@ -9014,11 +9017,13 @@ struct ApprovalDecisionEvent {
     timed_out: bool,
     approval_key: String,
     approval_grouping_key: String,
+    persistent_ask_rules: Vec<codewhale_config::ToolAskRule>,
 }
 
 async fn apply_approval_decision(
     app: &mut App,
     engine_handle: &mut EngineHandle,
+    config: &mut Config,
     event: ApprovalDecisionEvent,
 ) {
     if event.decision == ReviewDecision::ApprovedForSession {
@@ -9029,6 +9034,15 @@ async fn apply_approval_decision(
             .insert(event.tool_name.clone());
         app.approval_session_approved
             .insert(event.approval_grouping_key.clone());
+    }
+
+    if matches!(
+        event.decision,
+        ReviewDecision::Approved | ReviewDecision::ApprovedForSession
+    ) && !event.persistent_ask_rules.is_empty()
+        && !event.timed_out
+    {
+        persist_ask_rules_from_approval(app, config, &event.persistent_ask_rules);
     }
 
     match event.decision {
@@ -9049,6 +9063,35 @@ async fn apply_approval_decision(
             engine_handle.cancel();
             mark_active_turn_cancelled_locally(app);
             app.status_message = Some("Request cancelled".to_string());
+        }
+    }
+}
+
+fn persist_ask_rules_from_approval(
+    app: &mut App,
+    config: &mut Config,
+    rules: &[codewhale_config::ToolAskRule],
+) {
+    match codewhale_config::ConfigStore::load(app.config_path.clone()).and_then(|mut store| {
+        let added = store.append_ask_rules(rules)?;
+        let permissions_path = store.permissions_path();
+        config.exec_policy_engine = store.exec_policy_engine();
+        Ok((added, permissions_path))
+    }) {
+        Ok((added, path)) if added > 0 => {
+            app.status_message = Some(format!(
+                "Saved {added} ask permission rule(s) to {}",
+                path.display()
+            ));
+        }
+        Ok((_added, path)) => {
+            app.status_message = Some(format!(
+                "Ask permission rule already saved in {}",
+                path.display()
+            ));
+        }
+        Err(err) => {
+            app.status_message = Some(format!("Failed to save ask permission rule: {err:#}"));
         }
     }
 }

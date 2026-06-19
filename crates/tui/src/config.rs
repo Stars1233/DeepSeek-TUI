@@ -5525,12 +5525,6 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
         // active_provider_has_env_api_key.
         return crate::oauth::auth_file_path().exists();
     }
-    if matches!(provider, ApiProvider::Huggingface)
-        && std::env::var("HF_TOKEN").is_ok_and(|k| !k.trim().is_empty())
-    {
-        return true;
-    }
-
     if config
         .provider_config_string_with_runtime_fallback(provider, |entry| entry.api_key.clone())
         .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
@@ -5736,6 +5730,17 @@ fn provider_config_table_name(provider: ApiProvider) -> Result<String> {
 }
 
 fn provider_env_api_key(provider: ApiProvider) -> Option<String> {
+    if provider == ApiProvider::Huggingface {
+        return std::env::var("HUGGINGFACE_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("HF_TOKEN")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            });
+    }
+
     provider.env_vars().iter().find_map(|var| {
         std::env::var(var)
             .ok()
