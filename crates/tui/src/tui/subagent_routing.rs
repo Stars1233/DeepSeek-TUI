@@ -168,6 +168,7 @@ fn reconcile_cards_with_snapshots(app: &mut App) {
                 SubAgentStatus::Completed => AgentLifecycle::Completed,
                 SubAgentStatus::Failed(_) => AgentLifecycle::Failed,
                 SubAgentStatus::Cancelled => AgentLifecycle::Cancelled,
+                SubAgentStatus::BudgetExhausted => AgentLifecycle::Failed,
             };
             Some((agent.agent_id.clone(), lifecycle))
         })
@@ -217,6 +218,7 @@ fn subagent_status_rank(status: &SubAgentStatus) -> u8 {
         SubAgentStatus::Failed(_) => 2,
         SubAgentStatus::Completed => 3,
         SubAgentStatus::Cancelled => 4,
+        SubAgentStatus::BudgetExhausted => 2,
     }
 }
 

@@ -1746,6 +1746,7 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 3,
+        token_budget: None,
         input_rx: task_input_rx,
         launch_gate: None,
     };
@@ -3609,6 +3610,7 @@ async fn run_subagent_task_emits_parent_completion_before_terminal_update() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 0,
+        token_budget: None,
         input_rx: task_input_rx,
         launch_gate: None,
     };
@@ -4066,6 +4068,7 @@ async fn launch_gate_queues_extra_direct_children() {
             fork_context: false,
             started_at: Instant::now(),
             max_steps: 1,
+            token_budget: None,
             input_rx,
             launch_gate: gate,
         };
@@ -4129,5 +4132,226 @@ async fn launch_gate_queues_extra_direct_children() {
     assert!(
         started_b > completed_a,
         "queued child must not start until a permit frees: {messages:?}"
+    );
+}
+
+/// Stub chat server that always replies with a final assistant text whose
+/// `usage` reports the given token counts. Returns the client plus a call
+/// counter so tests can assert how many model turns ran before a budget cap
+/// fired. Mirrors `delayed_chat_client` but with configurable usage and no
+/// artificial latency.
+async fn token_heavy_chat_client(
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    response_text: &str,
+) -> (DeepSeekClient, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let response_text = response_text.to_string();
+    let app = Router::new().route(
+        "/{*path}",
+        post({
+            let calls = Arc::clone(&calls);
+            let response_text = response_text.clone();
+            move |Json(_body): Json<Value>| {
+                let calls = Arc::clone(&calls);
+                let response_text = response_text.clone();
+                async move {
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    Json(json!({
+                        "id": format!("chatcmpl-budget-{attempt}"),
+                        "model": "deepseek-v4-flash",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": response_text
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake chat server");
+    let addr = listener.local_addr().expect("fake chat server addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(format!("http://{addr}/v1")),
+        ..crate::config::Config::default()
+    };
+    let client = DeepSeekClient::new(&config).expect("fake chat client");
+    (client, calls)
+}
+
+/// Shared scaffolding for the per-worker token-budget runtime tests: spins up
+/// a general worker against `token_heavy_chat_client` with the given cap and
+/// returns the manager, agent id, call counter, and spawned task handle.
+async fn spawn_budget_capped_worker(
+    workspace: &Path,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    token_budget: Option<u64>,
+    max_steps: u32,
+) -> (
+    Arc<RwLock<SubAgentManager>>,
+    String,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        workspace.to_path_buf(),
+        2,
+    )));
+    let agent_id = "agent_budget_worker".to_string();
+    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "Work within budget".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        Some("Budget".to_string()),
+        Some(vec![]),
+        task_input_tx,
+        workspace.to_path_buf(),
+        "boot_budget".to_string(),
+    );
+    {
+        let mut manager = manager.write().await;
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, workspace.to_path_buf()));
+    }
+
+    let (client, calls) =
+        token_heavy_chat_client(prompt_tokens, completion_tokens, "partial answer").await;
+    let mut runtime = stub_runtime();
+    runtime.client = client;
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(workspace.to_path_buf());
+
+    let task = SubAgentTask {
+        manager_handle: Arc::clone(&manager),
+        runtime: runtime.clone(),
+        agent_id: agent_id.clone(),
+        agent_type: SubAgentType::General,
+        prompt: "Work within budget".to_string(),
+        assignment: make_assignment(),
+        allowed_tools: Some(vec![]),
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps,
+        token_budget,
+        input_rx: task_input_rx,
+        launch_gate: None,
+    };
+    let task_handle = tokio::spawn(run_subagent_task(task));
+    (manager, agent_id, calls, task_handle)
+}
+
+#[tokio::test]
+async fn worker_stops_when_per_worker_token_budget_exceeded() {
+    let tmp = tempdir().expect("tempdir");
+    // 100 tokens/turn (60 in + 40 out) vs a 50-token cap: the worker must
+    // stop with `BudgetExhausted` after its very first model turn instead of
+    // running on to `max_steps`.
+    let (manager, agent_id, calls, task_handle) =
+        spawn_budget_capped_worker(tmp.path(), 60, 40, Some(50), 4).await;
+
+    tokio::time::timeout(Duration::from_secs(5), task_handle)
+        .await
+        .expect("budget-capped worker must terminate")
+        .expect("task should finish");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "worker must stop after the first over-budget turn, not run to max_steps"
+    );
+
+    let result = {
+        let manager = manager.read().await;
+        manager.get_result(&agent_id).expect("agent registered")
+    };
+    assert!(
+        matches!(result.status, SubAgentStatus::BudgetExhausted),
+        "expected BudgetExhausted, got {:?}",
+        result.status
+    );
+}
+
+#[tokio::test]
+async fn worker_without_per_worker_token_budget_runs_to_completion() {
+    let tmp = tempdir().expect("tempdir");
+    // No per-worker cap: a final-text response completes the worker normally
+    // even though each turn reports 100 tokens.
+    let (manager, agent_id, calls, task_handle) =
+        spawn_budget_capped_worker(tmp.path(), 60, 40, None, 4).await;
+
+    tokio::time::timeout(Duration::from_secs(5), task_handle)
+        .await
+        .expect("uncapped worker must terminate")
+        .expect("task should finish");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let result = {
+        let manager = manager.read().await;
+        manager.get_result(&agent_id).expect("agent registered")
+    };
+    assert!(
+        matches!(result.status, SubAgentStatus::Completed),
+        "uncapped worker should complete normally, got {:?}",
+        result.status
+    );
+}
+
+#[tokio::test]
+async fn per_worker_token_budget_does_not_double_count_scope_accounting() {
+    let tmp = tempdir().expect("tempdir");
+    // The per-worker runtime cap stops the worker, but the scope-level
+    // accounting (#3319 `aggregate_budget_spent` sums worker_records'
+    // `total_tokens`) must reflect the tokens actually consumed exactly once
+    // — never inflated by the runtime accumulator that triggered the stop.
+    let (manager, agent_id, calls, task_handle) =
+        spawn_budget_capped_worker(tmp.path(), 60, 40, Some(50), 4).await;
+
+    tokio::time::timeout(Duration::from_secs(5), task_handle)
+        .await
+        .expect("budget-capped worker must terminate")
+        .expect("task should finish");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let (result, worker_record) = {
+        let manager = manager.read().await;
+        (
+            manager.get_result(&agent_id).expect("agent registered"),
+            manager.get_worker_record(&agent_id).expect("worker record"),
+        )
+    };
+    assert!(
+        matches!(result.status, SubAgentStatus::BudgetExhausted),
+        "expected BudgetExhausted, got {:?}",
+        result.status
+    );
+    // One turn of 60 in + 40 out = 100 tokens, counted exactly once.
+    assert_eq!(
+        worker_record.usage.total_tokens,
+        Some(100),
+        "scope accounting must equal the single turn's tokens, not double-count: {:?}",
+        worker_record.usage
     );
 }

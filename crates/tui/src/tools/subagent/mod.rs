@@ -595,6 +595,11 @@ pub enum SubAgentStatus {
     Interrupted(String),
     Failed(String),
     Cancelled,
+    /// Worker stopped because it exceeded its own per-worker token budget.
+    /// Distinct from the scope-level admission gate (#3319): this caps a
+    /// single runaway worker mid-run, while the scope gate bounds total
+    /// fan-out across a root run and its descendants.
+    BudgetExhausted,
 }
 
 /// Structured reason a non-running sub-agent needs parent action.
@@ -2409,6 +2414,7 @@ impl SubAgentManager {
             SubAgentStatus::Failed(err) => Some(err.clone()),
             SubAgentStatus::Interrupted(reason) => Some(reason.clone()),
             SubAgentStatus::Cancelled => Some("cancelled".to_string()),
+            SubAgentStatus::BudgetExhausted => Some("token budget exhausted".to_string()),
             SubAgentStatus::Running => Some("running".to_string()),
         };
         self.record_worker_event(worker_id, status, message, Some(result.steps_taken), None);
@@ -2726,6 +2732,7 @@ impl SubAgentManager {
             fork_context: options.fork_context,
             started_at,
             max_steps,
+            token_budget: options.token_budget,
             input_rx,
             launch_gate,
         };
@@ -3672,6 +3679,12 @@ struct SubAgentTask {
     fork_context: bool,
     started_at: Instant,
     max_steps: u32,
+    /// Per-worker token cap sourced from the spawn request's `token_budget`
+    /// (the explicit `max_tokens`/`tokenBudget` override). `None` means no
+    /// per-worker limit; the worker still obeys the scope admission gate.
+    /// When set, the worker stops with `BudgetExhausted` once its accumulated
+    /// model tokens exceed this value. Independent of the scope budget (#3319).
+    token_budget: Option<u64>,
     input_rx: mpsc::UnboundedReceiver<SubAgentInput>,
     /// Interactive launch gate (#3095). `Some` only for direct (depth-1)
     /// children: the task acquires a permit before its first model step and
@@ -3713,6 +3726,7 @@ async fn run_subagent_task(task: SubAgentTask) {
         task.fork_context,
         task.started_at,
         task.max_steps,
+        task.token_budget,
         task.input_rx,
     )
     .await;
@@ -4106,6 +4120,7 @@ async fn run_subagent(
     fork_context: bool,
     started_at: Instant,
     max_steps: u32,
+    token_budget: Option<u64>,
     mut input_rx: mpsc::UnboundedReceiver<SubAgentInput>,
 ) -> Result<SubAgentResult> {
     let system_prompt = build_subagent_system_prompt(&agent_type, &assignment);
@@ -4157,6 +4172,7 @@ async fn run_subagent(
     let mut pending_inputs: VecDeque<SubAgentInput> = VecDeque::new();
     let mut consecutive_truncated_responses = 0;
     let mut latest_checkpoint: Option<SubAgentCheckpoint> = None;
+    let mut tokens_used: u64 = 0;
 
     for _step in 0..max_steps {
         // Cooperative cancellation: bail if this session's token was cancelled
@@ -4426,6 +4442,87 @@ async fn run_subagent(
         {
             let mut manager = runtime.manager.write().await;
             manager.record_worker_usage(&agent_id, &response.usage);
+        }
+
+        // Per-worker token-budget enforcement (#3321): stop a single runaway
+        // worker once its accumulated model tokens exceed its own cap. This
+        // complements — and does not double-count — the scope-level admission
+        // gate (#3319), which bounds aggregate fan-out across siblings. The
+        // local accumulator mirrors the manager's `record.usage.total_tokens`
+        // (both derive from `response.usage`), so the scope accounting stays
+        // consistent and is never inflated by this check.
+        tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
+        if let Some(budget) = token_budget {
+            if tokens_used > budget {
+                record_agent_progress(
+                    runtime,
+                    &agent_id,
+                    format!(
+                        "{}: token budget exhausted ({tokens_used}/{budget})",
+                        format_step_counter(steps, max_steps)
+                    ),
+                );
+                if let Some(mb) = runtime.mailbox.as_ref() {
+                    let _ = mb.send(MailboxMessage::Cancelled {
+                        agent_id: agent_id.clone(),
+                    });
+                }
+                let status = SubAgentStatus::BudgetExhausted;
+                let duration_ms =
+                    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                latest_checkpoint = Some(
+                    checkpoint_subagent_progress(
+                        runtime,
+                        &agent_id,
+                        "token_budget_exhausted",
+                        &messages,
+                        steps,
+                        true,
+                    )
+                    .await,
+                );
+                insert_subagent_full_transcript_handle(
+                    runtime,
+                    &agent_id,
+                    &agent_type,
+                    &assignment,
+                    &status,
+                    final_result.as_ref(),
+                    latest_checkpoint.as_ref(),
+                    &messages,
+                    steps,
+                    duration_ms,
+                    fork_context_enabled,
+                )
+                .await;
+                return Ok(SubAgentResult {
+                    name: agent_id.clone(),
+                    agent_id: agent_id.clone(),
+                    context_mode: if fork_context_enabled {
+                        "forked"
+                    } else {
+                        "fresh"
+                    }
+                    .to_string(),
+                    fork_context: fork_context_enabled,
+                    workspace: Some(runtime.context.workspace.clone()),
+                    git_branch: current_git_branch(&runtime.context.workspace),
+                    agent_type: agent_type.clone(),
+                    assignment: assignment.clone(),
+                    model: runtime.model.clone(),
+                    nickname: None,
+                    status,
+                    worker_status: None,
+                    parent_run_id: runtime.parent_agent_id.clone(),
+                    spawn_depth: runtime.spawn_depth,
+                    result: final_result.clone(),
+                    steps_taken: steps,
+                    checkpoint: latest_checkpoint.clone(),
+                    needs_input: None,
+                    duration_ms,
+                    from_prior_session: false,
+                });
+            }
         }
 
         for block in &response.content {
@@ -5302,6 +5399,7 @@ fn worker_status_from_subagent_status(status: &SubAgentStatus) -> AgentWorkerSta
         SubAgentStatus::Completed => AgentWorkerStatus::Completed,
         SubAgentStatus::Failed(_) => AgentWorkerStatus::Failed,
         SubAgentStatus::Cancelled => AgentWorkerStatus::Cancelled,
+        SubAgentStatus::BudgetExhausted => AgentWorkerStatus::Failed,
         SubAgentStatus::Interrupted(_) => AgentWorkerStatus::Interrupted,
     }
 }
@@ -5784,6 +5882,7 @@ fn summarize_subagent_result(result: &SubAgentResult) -> String {
         (SubAgentStatus::Completed, None) => "Completed (no output)".to_string(),
         (SubAgentStatus::Interrupted(error), _) => format!("Interrupted: {error}"),
         (SubAgentStatus::Cancelled, _) => "Cancelled".to_string(),
+        (SubAgentStatus::BudgetExhausted, _) => "Token budget exhausted".to_string(),
         (SubAgentStatus::Failed(error), _) => format!("Failed: {error}"),
         (SubAgentStatus::Running, _) => "Running".to_string(),
     }
@@ -5796,6 +5895,7 @@ fn subagent_status_name(status: &SubAgentStatus) -> &'static str {
         SubAgentStatus::Interrupted(_) => "interrupted",
         SubAgentStatus::Failed(_) => "failed",
         SubAgentStatus::Cancelled => "cancelled",
+        SubAgentStatus::BudgetExhausted => "budget_exhausted",
     }
 }
 

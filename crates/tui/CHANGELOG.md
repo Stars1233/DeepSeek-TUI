@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now set `[subagents] max_admitted` to queue and drain more agents than the
   instantaneous concurrency cap, while `[subagents] token_budget` applies a
   shared aggregate token ceiling to a root `agent` run and its descendants.
+- **Per-worker sub-agent token enforcement (#3321).** A `token_budget` /
+  `max_tokens` set on an individual `agent` call now bounds that single worker
+  mid-run: once its accumulated model tokens exceed the cap it stops cleanly
+  with a `budget_exhausted` status instead of running to `max_steps`. This
+  complements the scope-level admission gate (#3319) — the per-worker cap stops
+  one runaway worker, the scope cap bounds total fan-out — without
+  double-counting. Harvested from #3321 by @donglovejava.
 
 ### Fixed
 

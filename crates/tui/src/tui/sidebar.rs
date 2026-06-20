@@ -2382,6 +2382,7 @@ fn subagent_status_text(status: &SubAgentStatus) -> &'static str {
         SubAgentStatus::Interrupted(_) => "interrupted",
         SubAgentStatus::Failed(_) => "failed",
         SubAgentStatus::Cancelled => "canceled",
+        SubAgentStatus::BudgetExhausted => "budget",
     }
 }
 

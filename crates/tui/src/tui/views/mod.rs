@@ -1885,6 +1885,7 @@ impl ModalView for SubAgentsView {
                     SubAgentStatus::Interrupted(_) => interrupted.push(agent),
                     SubAgentStatus::Failed(_) => failed.push(agent),
                     SubAgentStatus::Cancelled => cancelled.push(agent),
+                    SubAgentStatus::BudgetExhausted => failed.push(agent),
                 }
             }
 
@@ -2160,6 +2161,11 @@ fn format_agent_status(
             Some(reason.as_str()),
         ),
         SubAgentStatus::Cancelled => ("cancelled", Style::default().fg(palette::TEXT_MUTED), None),
+        SubAgentStatus::BudgetExhausted => (
+            "budget_exhausted",
+            Style::default().fg(palette::STATUS_WARNING),
+            None,
+        ),
         SubAgentStatus::Failed(reason) => (
             "failed",
             Style::default().fg(palette::DEEPSEEK_RED),
