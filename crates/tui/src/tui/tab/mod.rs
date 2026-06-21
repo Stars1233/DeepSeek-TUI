@@ -12,8 +12,6 @@
 // marked `unused_imports`-tolerated in the meantime.
 #![allow(dead_code, unused_imports)]
 
-#[cfg(test)]
-mod benches;
 mod cross_tab;
 mod delegator;
 pub mod group;
