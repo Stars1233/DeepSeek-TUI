@@ -89,6 +89,17 @@ pub async fn execute_js_execution_tool(
     })?;
     cmd.arg(&script_path).current_dir(workspace);
 
+    // #3273: Node's built-in `fetch` (undici) ignores HTTP(S)_PROXY env vars
+    // unless `NODE_USE_ENV_PROXY` is set (Node >= 24). This child already
+    // inherits CodeWhale's proxy environment, so enabling the flag lets
+    // `js_execution`'s `fetch()` reach the network through the same proxy/VPN
+    // as the rest of the app and honor `NO_PROXY`. Only default it on when the
+    // user hasn't chosen a value, so an explicit opt-out (`NODE_USE_ENV_PROXY=0`)
+    // still wins. No-op on Node < 24, which ignores the unknown variable.
+    if std::env::var_os("NODE_USE_ENV_PROXY").is_none() {
+        cmd.env("NODE_USE_ENV_PROXY", "1");
+    }
+
     let output = tokio::time::timeout(Duration::from_secs(120), cmd.output())
         .await
         .map_err(|_| ToolError::Timeout { seconds: 120 })
@@ -183,6 +194,31 @@ mod tests {
         assert!(
             result.content.contains("intentional fail"),
             "stderr payload must surface the error message; got {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_js_enables_env_proxy_so_fetch_honors_proxy_vars() {
+        if !node_present() {
+            return;
+        }
+        // The tool defers to an explicit caller choice; only assert the
+        // default-on behavior when the surrounding env hasn't set it.
+        if std::env::var_os("NODE_USE_ENV_PROXY").is_some() {
+            return;
+        }
+        let tmp = tempdir().expect("tempdir");
+        let result = execute_js_execution_tool(
+            &json!({ "code": "process.stdout.write(String(process.env.NODE_USE_ENV_PROXY))" }),
+            tmp.path(),
+        )
+        .await
+        .expect("execute");
+        assert!(
+            result.content.contains("\"stdout\":\"1\""),
+            "#3273: js_execution must default NODE_USE_ENV_PROXY=1 so Node's fetch \
+             routes through HTTP(S)_PROXY; got {}",
             result.content
         );
     }
