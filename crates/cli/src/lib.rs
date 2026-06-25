@@ -779,7 +779,7 @@ fn run() -> Result<()> {
                 let _ = args;
                 bail!("self-update is not supported on HarmonyOS/OpenHarmony yet");
             }
-        },
+        }
         None => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             let forwarded = root_tui_passthrough(&cli)?;

@@ -29,7 +29,6 @@ const UPDATE_HTTP_RETRY_DELAY_MS: u64 = 100;
 ///
 /// OpenHarmony (HarmonyOS) won't compile this file, so no need to handle
 pub fn run_update(beta: bool, check_only: bool, proxy_arg: Option<String>) -> Result<()> {
-
     let current_exe =
         std::env::current_exe().context("failed to determine current executable path")?;
     let legacy_binary = is_legacy_binary(&current_exe);
