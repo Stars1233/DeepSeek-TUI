@@ -2558,6 +2558,69 @@ mod tests {
     }
 
     #[test]
+    fn mode_prompts_remain_small_deltas_not_base_policy_copies() {
+        for (name, prompt) in [
+            ("agent", AGENT_MODE),
+            ("plan", PLAN_MODE),
+            ("yolo", YOLO_MODE),
+        ] {
+            let word_count = prompt.split_whitespace().count();
+            let estimated_tokens = crate::compaction::estimate_text_tokens_conservative(prompt);
+
+            assert!(
+                word_count <= 350,
+                "{name} mode prompt should remain a delta, got {word_count} words"
+            );
+            assert!(
+                estimated_tokens <= 700,
+                "{name} mode prompt should remain compact, got {estimated_tokens} estimated tokens"
+            );
+            for forbidden in [
+                "## CONSTITUTION OF CODEWHALE",
+                "## STATUTES (Tier 2)",
+                "## REGULATIONS (Tier 3)",
+                "## EVIDENCE (Tier 6)",
+                "## Context Management",
+                "## Runtime Policy Reference",
+            ] {
+                assert!(
+                    !prompt.contains(forbidden),
+                    "{name} mode prompt duplicated shared base section {forbidden:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mode_prompts_do_not_inline_full_approval_policy_overlays() {
+        for (name, mode_prompt) in [
+            ("agent", AGENT_MODE),
+            ("plan", PLAN_MODE),
+            ("yolo", YOLO_MODE),
+        ] {
+            for (approval_name, approval_prompt) in [
+                ("auto", AUTO_APPROVAL),
+                ("suggest", SUGGEST_APPROVAL),
+                ("never", NEVER_APPROVAL),
+            ] {
+                assert!(
+                    !mode_prompt.contains(approval_prompt.trim()),
+                    "{name} mode prompt must not inline the full {approval_name} approval overlay"
+                );
+            }
+        }
+
+        assert!(
+            PLAN_MODE.contains("All writes and patches are blocked"),
+            "Plan may summarize the user-facing mode delta"
+        );
+        assert!(
+            NEVER_APPROVAL.contains("This approval policy is a Tier 2 Statute"),
+            "the approval overlay keeps the policy authority explanation"
+        );
+    }
+
+    #[test]
     fn approval_policy_no_longer_inlined_in_base_prompt() {
         let prompt = compose_prompt(Personality::Calm);
         assert!(!prompt.contains("Mode: Agent"));
