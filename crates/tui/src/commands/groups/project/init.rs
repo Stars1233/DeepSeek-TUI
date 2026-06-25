@@ -17,7 +17,7 @@ use crate::commands::CommandResult;
 
 /// Generate an AGENTS.md file for the current project by gathering context and
 /// delegating content generation to the LLM agent.
-pub fn init(app: &mut App) -> CommandResult {
+fn init(app: &mut App) -> CommandResult {
     let workspace = &app.workspace;
 
     // Ensure .deepseek/ is gitignored if we're inside a git repo.

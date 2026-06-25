@@ -31,7 +31,7 @@ impl RegisterCommand for NetworkCmd {
     }
 }
 
-pub fn network(_app: &mut App, arg: Option<&str>) -> CommandResult {
+fn network(_app: &mut App, arg: Option<&str>) -> CommandResult {
     match network_inner(arg) {
         Ok(message) => CommandResult::message(message),
         Err(err) => CommandResult::error(err.to_string()),

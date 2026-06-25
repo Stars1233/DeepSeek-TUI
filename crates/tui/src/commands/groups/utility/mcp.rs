@@ -25,7 +25,7 @@ impl RegisterCommand for McpCmd {
     }
 }
 
-pub fn mcp(_app: &mut App, args: Option<&str>) -> CommandResult {
+fn mcp(_app: &mut App, args: Option<&str>) -> CommandResult {
     let raw = args.unwrap_or("").trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("status") || raw.eq_ignore_ascii_case("list") {
         return CommandResult::action(AppAction::Mcp(McpUiAction::Show));

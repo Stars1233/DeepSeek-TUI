@@ -10,7 +10,7 @@ use crate::commands::CommandResult;
 const USAGE: &str = "/note <text> | /note add <text> | /note list | /note show <n> | /note edit <n> <text> | /note remove <n> | /note clear | /note path";
 
 /// Manage the persistent workspace notes file.
-pub fn note(app: &mut App, content: Option<&str>) -> CommandResult {
+fn note(app: &mut App, content: Option<&str>) -> CommandResult {
     let input = match content {
         Some(c) => c.trim(),
         None => {

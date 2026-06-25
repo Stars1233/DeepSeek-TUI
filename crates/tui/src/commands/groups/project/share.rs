@@ -18,7 +18,7 @@ use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction};
 
 /// Share the current session as a web URL.
-pub fn share(app: &mut App, arg: Option<&str>) -> CommandResult {
+fn share(app: &mut App, arg: Option<&str>) -> CommandResult {
     let raw = arg.map(str::trim).unwrap_or("");
 
     match raw {

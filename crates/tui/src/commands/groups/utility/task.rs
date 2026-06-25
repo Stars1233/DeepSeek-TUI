@@ -25,7 +25,7 @@ impl RegisterCommand for TaskCmd {
     }
 }
 
-pub fn task(_app: &mut App, args: Option<&str>) -> CommandResult {
+fn task(_app: &mut App, args: Option<&str>) -> CommandResult {
     let raw = args.unwrap_or("").trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("list") {
         return CommandResult::action(AppAction::TaskList);

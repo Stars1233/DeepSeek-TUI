@@ -25,7 +25,7 @@ impl RegisterCommand for JobsCmd {
     }
 }
 
-pub fn jobs(_app: &mut App, args: Option<&str>) -> CommandResult {
+fn jobs(_app: &mut App, args: Option<&str>) -> CommandResult {
     let raw = args.unwrap_or("").trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("list") {
         return CommandResult::action(AppAction::ShellJob(ShellJobAction::List));

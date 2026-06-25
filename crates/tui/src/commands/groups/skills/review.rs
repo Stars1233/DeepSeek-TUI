@@ -14,7 +14,7 @@ fn warnings_suffix(registry: &SkillRegistry) -> String {
     format!("\n\nWarnings:\n- {}", registry.warnings().join("\n- "))
 }
 
-pub fn review(app: &mut App, args: Option<&str>) -> CommandResult {
+fn review(app: &mut App, args: Option<&str>) -> CommandResult {
     let target = args.unwrap_or("").trim();
     if target.is_empty() {
         return CommandResult::error("Usage: /review <target>");

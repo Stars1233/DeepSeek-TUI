@@ -18,7 +18,7 @@ const MAX_LIST_LIMIT: usize = 100;
 const MAX_RESTORE_INDEX: usize = 1000;
 
 /// Entry point for `/restore [N|list [N]]`.
-pub fn restore(app: &mut App, arg: Option<&str>) -> CommandResult {
+fn restore(app: &mut App, arg: Option<&str>) -> CommandResult {
     let workspace = app.workspace.clone();
     let repo = match SnapshotRepo::open_or_init(&workspace) {
         Ok(r) => r,

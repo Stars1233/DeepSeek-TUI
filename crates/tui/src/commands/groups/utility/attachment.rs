@@ -26,7 +26,7 @@ impl RegisterCommand for AttachCmd {
     }
 }
 
-pub fn attach(app: &mut App, arg: Option<&str>) -> CommandResult {
+fn attach(app: &mut App, arg: Option<&str>) -> CommandResult {
     let Some(raw_path) = arg.map(str::trim).filter(|value| !value.is_empty()) else {
         return CommandResult::error("Usage: /attach <image-or-video-path>");
     };

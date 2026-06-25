@@ -10,7 +10,7 @@ use crate::tui::app::{App, AppAction, HuntVerdict};
 use crate::commands::CommandResult;
 
 /// Declare, show, pause, resume, or close a goal.
-pub fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
+fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
     match arg {
         Some("clear") | Some("reset") => {
             app.hunt.quarry = None;

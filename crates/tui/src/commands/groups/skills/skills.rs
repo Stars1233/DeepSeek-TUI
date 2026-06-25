@@ -67,7 +67,7 @@ fn render_skill_warnings(registry: &SkillRegistry) -> String {
 /// curated registry instead of scanning the local skills directory.
 /// Pass `sync` to pull the registry index and download all skills to the
 /// local cache (`~/.codewhale/cache/skills/`).
-pub fn list_skills(app: &mut App, arg: Option<&str>) -> CommandResult {
+fn list_skills(app: &mut App, arg: Option<&str>) -> CommandResult {
     let mut prefix: Option<String> = None;
     if let Some(arg) = arg {
         let trimmed = arg.trim();
@@ -213,7 +213,7 @@ pub fn list_skills(app: &mut App, arg: Option<&str>) -> CommandResult {
 /// dispatches a sub-command (`install`, `update`, `uninstall`, `trust`).
 /// Try to run a skill by exact name (used for unified slash-command namespace, #435).
 /// Returns None when no skill with that name exists, so the caller can try other sources.
-pub fn run_skill_by_name(app: &mut App, name: &str, _arg: Option<&str>) -> Option<CommandResult> {
+pub(in crate::commands) fn run_skill_by_name(app: &mut App, name: &str, _arg: Option<&str>) -> Option<CommandResult> {
     let registry = discover_visible_skills(app);
     if registry.get(name).is_some() {
         Some(activate_skill(app, name))
@@ -222,7 +222,7 @@ pub fn run_skill_by_name(app: &mut App, name: &str, _arg: Option<&str>) -> Optio
     }
 }
 
-pub fn run_skill(app: &mut App, name: Option<&str>) -> CommandResult {
+fn run_skill(app: &mut App, name: Option<&str>) -> CommandResult {
     let raw = match name {
         Some(n) => n.trim(),
         None => {
@@ -400,7 +400,7 @@ fn trust_skill(app: &mut App, name: &str) -> CommandResult {
 // ─── /skills --remote ──────────────────────────────────────────────────────
 
 /// List skills available in the configured curated registry.
-pub fn list_remote_skills(app: &mut App) -> CommandResult {
+fn list_remote_skills(app: &mut App) -> CommandResult {
     let (network, _max_size, registry_url) = installer_settings(app);
     let registry = run_async(async move { install::fetch_registry(&network, &registry_url).await });
     match registry {
