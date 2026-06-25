@@ -161,7 +161,7 @@ impl AcpServer {
     }
 
     fn list_providers(&self) -> Value {
-        let providers = ApiProvider::sorted_for_display()
+        let mut providers = ApiProvider::sorted_for_display()
             .into_iter()
             .map(|provider| {
                 json!({
@@ -172,12 +172,33 @@ impl AcpServer {
             })
             .collect::<Vec<_>>();
 
+        // Include user-defined `[providers.<name>]` custom entries so ACP
+        // clients can discover and round-trip the provider names that
+        // `session/selectModel` now accepts (#1519).
+        if let Some(custom) = self.config.providers.as_ref().map(|p| &p.custom) {
+            let mut names = custom.keys().collect::<Vec<_>>();
+            names.sort();
+            for name in names {
+                providers.push(json!({
+                    "id": name,
+                    "displayName": name,
+                    "defaultModel": custom.get(name).and_then(|cfg| cfg.model.clone())
+                }));
+            }
+        }
+
         json!({ "providers": providers })
     }
 
     fn current_model(&self) -> Value {
+        // Prefer the raw configured provider key so a custom `[providers.<name>]`
+        // entry round-trips through ACP instead of canonicalizing to "custom".
+        let provider = match self.config.provider.as_deref() {
+            Some(name) if !name.trim().is_empty() => name.to_string(),
+            _ => self.config.api_provider().as_str().to_string(),
+        };
         json!({
-            "provider": self.config.api_provider().as_str(),
+            "provider": provider,
             "model": self.model.as_str()
         })
     }
