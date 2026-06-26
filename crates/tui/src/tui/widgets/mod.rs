@@ -1337,39 +1337,44 @@ impl Renderable for ApprovalWidget<'_> {
         }
         let details = self.request.prominent_detail_items(locale);
         if details.is_empty() {
-            let params_str = self.request.params_display();
-            let params_width = card_area.width.saturating_sub(14) as usize;
-            let params_truncated =
-                crate::utils::truncate_with_ellipsis(&params_str, params_width.max(20), "...");
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    label_params(locale),
-                    Style::default().fg(palette::TEXT_HINT),
-                ),
-                Span::styled(
-                    params_truncated,
-                    Style::default().fg(palette::TEXT_SECONDARY),
-                ),
-            ]));
+            push_params_detail_line(&mut lines, self.request, locale, card_area.width);
         } else {
             let detail_limit = if compact_vertical { 2 } else { 4 };
+            let mut rendered_detail = false;
             for detail in details.iter().take(detail_limit) {
-                if self.request.category == ToolCategory::Shell
-                    && matches!(detail.label.as_str(), "Command" | "命令")
-                    && let Some(shell_lines) = detail.shell_lines.as_deref()
-                {
+                let multiline_preview = detail.shell_lines.as_deref();
+                let is_command_detail = matches!(detail.label.as_str(), "Command" | "命令");
+                let is_change_preview = matches!(detail.label.as_str(), "Preview" | "预览");
+                if compact_vertical && is_change_preview {
+                    continue;
+                }
+                if let Some(shell_lines) = multiline_preview {
                     let command_width = card_area.width.saturating_sub(10) as usize;
+                    let max_rows = if is_change_preview {
+                        if self.request.intent_summary.is_some() {
+                            Some(3)
+                        } else {
+                            Some(5)
+                        }
+                    } else if compact_vertical && is_command_detail {
+                        Some(3)
+                    } else {
+                        None
+                    };
                     push_shell_command_lines(
                         &mut lines,
                         &detail.label,
                         shell_lines,
                         command_width.max(20),
-                        if compact_vertical { Some(3) } else { None },
+                        max_rows,
                     );
                 } else {
                     push_detail_line(&mut lines, &detail.label, &detail.value);
                 }
+                rendered_detail = true;
+            }
+            if !rendered_detail {
+                push_params_detail_line(&mut lines, self.request, locale, card_area.width);
             }
         }
 
@@ -1626,6 +1631,29 @@ fn push_detail_line(lines: &mut Vec<Line<'static>>, label: &str, value: &str) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(value.to_string(), Style::default().fg(palette::TEXT_BODY)),
+    ]));
+}
+
+fn push_params_detail_line(
+    lines: &mut Vec<Line<'static>>,
+    request: &ApprovalRequest,
+    locale: Locale,
+    card_width: u16,
+) {
+    let params_str = request.params_display();
+    let params_width = card_width.saturating_sub(14) as usize;
+    let params_truncated =
+        crate::utils::truncate_with_ellipsis(&params_str, params_width.max(20), "...");
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            label_params(locale),
+            Style::default().fg(palette::TEXT_HINT),
+        ),
+        Span::styled(
+            params_truncated,
+            Style::default().fg(palette::TEXT_SECONDARY),
+        ),
     ]));
 }
 
@@ -4799,6 +4827,59 @@ mod tests {
         assert!(rendered.contains("beta"), "{rendered}");
         assert!(rendered.contains("Dir"), "{rendered}");
         assert!(rendered.contains("/tmp/project"), "{rendered}");
+    }
+
+    #[test]
+    fn approval_file_write_modal_renders_proposed_change_preview() {
+        let request = crate::tui::approval::ApprovalRequest::new(
+            "approval-1",
+            "write_file",
+            "Write a file",
+            &serde_json::json!({
+                "path": "src/main.rs",
+                "content": "fn main() {\n    println!(\"visible before approval\");\n}\n",
+            }),
+            "write_file:src/main.rs",
+        );
+        let view = crate::tui::approval::ApprovalView::new(request.clone());
+        let widget = ApprovalWidget::new(&request, &view);
+        let area = Rect::new(0, 0, 120, 34);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+
+        assert!(rendered.contains("Preview:"), "{rendered}");
+        assert!(rendered.contains("+ fn main() {"), "{rendered}");
+        assert!(
+            rendered.contains("visible before approval"),
+            "approval modal should show proposed file content before approval:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn compact_apply_patch_approval_falls_back_to_params_when_preview_is_hidden() {
+        let request = crate::tui::approval::ApprovalRequest::new(
+            "approval-1",
+            "apply_patch",
+            "Apply a patch",
+            &serde_json::json!({
+                "patch": "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            }),
+            "apply_patch:src/lib.rs",
+        );
+        let view = crate::tui::approval::ApprovalView::new(request.clone());
+        let widget = ApprovalWidget::new(&request, &view);
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+
+        assert!(rendered.contains("Params:"), "{rendered}");
+        assert!(rendered.contains("patch"), "{rendered}");
+        assert!(rendered.contains("[y]"), "{rendered}");
+        assert!(rendered.contains("[d]"), "{rendered}");
     }
 
     #[test]

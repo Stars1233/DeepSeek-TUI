@@ -254,7 +254,7 @@ impl ApprovalRequest {
     /// Extract the most important params for the approval card.
     #[must_use]
     pub fn prominent_detail_items(&self, locale: Locale) -> Vec<ApprovalDetail> {
-        build_prominent_details(self.category, &self.params)
+        build_prominent_details(&self.tool_name, self.category, &self.params)
             .into_iter()
             .map(|mut detail| {
                 detail.label = localize_detail_label(&detail.label, locale).to_string();
@@ -580,7 +580,11 @@ fn build_impact_summary_zh_hans(
     }
 }
 
-fn build_prominent_details(category: ToolCategory, params: &Value) -> Vec<ApprovalDetail> {
+fn build_prominent_details(
+    tool_name: &str,
+    category: ToolCategory,
+    params: &Value,
+) -> Vec<ApprovalDetail> {
     let mut details = Vec::new();
     match category {
         ToolCategory::Shell => {
@@ -605,6 +609,13 @@ fn build_prominent_details(category: ToolCategory, params: &Value) -> Vec<Approv
                     label: "File".to_string(),
                     value: path,
                     shell_lines: None,
+                });
+            }
+            if let Some(preview_lines) = file_write_preview_lines(tool_name, params) {
+                details.push(ApprovalDetail {
+                    label: "Preview".to_string(),
+                    value: preview_lines.join("\n"),
+                    shell_lines: Some(preview_lines),
                 });
             }
         }
@@ -645,6 +656,121 @@ fn build_prominent_details(category: ToolCategory, params: &Value) -> Vec<Approv
     details
 }
 
+fn file_write_preview_lines(tool_name: &str, params: &Value) -> Option<Vec<String>> {
+    match tool_name {
+        "write_file" => {
+            let content = param_text(params, &["content"])?;
+            Some(prefixed_preview_lines(
+                "proposed content",
+                "+ ",
+                &content,
+                5,
+            ))
+        }
+        "edit_file" => {
+            let search = param_text(params, &["search"])?;
+            let replace = param_text(params, &["replace"])?;
+            let mut lines = Vec::new();
+            lines.extend(prefixed_preview_lines("replace this", "- ", &search, 3));
+            lines.extend(prefixed_preview_lines("with this", "+ ", &replace, 3));
+            Some(lines)
+        }
+        "apply_patch" => params
+            .get("patch")
+            .and_then(Value::as_str)
+            .and_then(apply_patch_preview_lines)
+            .or_else(|| {
+                params
+                    .get("changes")
+                    .and_then(Value::as_array)
+                    .and_then(|changes| changes_preview_lines(changes))
+            }),
+        _ => None,
+    }
+    .filter(|lines| !lines.is_empty())
+}
+
+fn prefixed_preview_lines(
+    header: &str,
+    prefix: &str,
+    content: &str,
+    max_lines: usize,
+) -> Vec<String> {
+    let mut lines = vec![header.to_string()];
+    if content.is_empty() {
+        lines.push(format!("{prefix}<empty>"));
+        return lines;
+    }
+
+    let total = content.lines().count();
+    for line in content.lines().take(max_lines) {
+        lines.push(format!("{prefix}{line}"));
+    }
+    if total > max_lines {
+        lines.push(format!("... (+{} more lines)", total - max_lines));
+    }
+    lines
+}
+
+fn apply_patch_preview_lines(patch: &str) -> Option<Vec<String>> {
+    let mut lines = Vec::new();
+    let mut omitted = 0usize;
+    for line in patch.lines().filter(|line| !line.trim().is_empty()) {
+        let is_diff_header = line.starts_with("diff --git ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("@@");
+        let is_change_line = (line.starts_with('+') && !line.starts_with("+++"))
+            || (line.starts_with('-') && !line.starts_with("---"));
+        if is_diff_header || is_change_line {
+            if lines.len() < 7 {
+                lines.push(line.to_string());
+            } else {
+                omitted += 1;
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        for line in patch.lines().filter(|line| !line.trim().is_empty()).take(7) {
+            lines.push(line.to_string());
+        }
+    }
+
+    if omitted > 0 {
+        lines.push(format!("... (+{omitted} more diff lines)"));
+    }
+    if lines.is_empty() { None } else { Some(lines) }
+}
+
+fn changes_preview_lines(changes: &[Value]) -> Option<Vec<String>> {
+    let mut lines = Vec::new();
+    for (idx, change) in changes.iter().take(2).enumerate() {
+        let path = change
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("<file>");
+        let content = change.get("content").and_then(Value::as_str).unwrap_or("");
+        if idx > 0 {
+            lines.push(String::new());
+        }
+        lines.push(format!("file: {path}"));
+        let remaining = 7usize.saturating_sub(lines.len()).max(1);
+        lines.extend(
+            prefixed_preview_lines("replacement content", "+ ", content, remaining)
+                .into_iter()
+                .skip(1),
+        );
+        if lines.len() >= 7 {
+            break;
+        }
+    }
+    if changes.len() > 2 {
+        lines.push(format!("... (+{} more files)", changes.len() - 2));
+    }
+    if lines.is_empty() { None } else { Some(lines) }
+}
+
 fn param_text(params: &Value, keys: &[&str]) -> Option<String> {
     let Value::Object(map) = params else {
         return None;
@@ -671,6 +797,7 @@ fn localize_detail_label(label: &str, locale: Locale) -> &str {
             "Command" => "命令",
             "Dir" => "目录",
             "File" => "文件",
+            "Preview" => "预览",
             "Path" => "路径",
             "Target" => "目标",
             "Input" => "输入",
@@ -1636,6 +1763,63 @@ mod tests {
         assert_eq!(details[0].label, "File");
         assert_eq!(details[0].value, "src/main.rs");
         assert!(details[0].shell_lines.is_none());
+        assert_eq!(details[1].label, "Preview");
+        let preview = details[1].shell_lines.as_ref().expect("preview lines");
+        assert!(preview.iter().any(|line| line == "+ fn main() {}"));
+    }
+
+    #[test]
+    fn prominent_details_edit_file_includes_search_replace_preview() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "edit_file",
+            "Edit a file on disk",
+            &json!({
+                "path": "src/lib.rs",
+                "search": "old_call();",
+                "replace": "new_call();"
+            }),
+            "tool:edit_file",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("edit preview");
+
+        assert!(preview.iter().any(|line| line == "- old_call();"));
+        assert!(preview.iter().any(|line| line == "+ new_call();"));
+    }
+
+    #[test]
+    fn prominent_details_apply_patch_includes_diff_preview() {
+        let patch = r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,2 @@
+-old
++new
+"#;
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"patch": patch}),
+            "tool:apply_patch",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("patch preview");
+
+        assert!(preview.iter().any(|line| line.starts_with("@@")));
+        assert!(preview.iter().any(|line| line == "-old"));
+        assert!(preview.iter().any(|line| line == "+new"));
     }
 
     #[test]
