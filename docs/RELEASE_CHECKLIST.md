@@ -172,6 +172,15 @@ release anxiety: contributors cannot tell whether their work merged.
       `git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`
 - [ ] The `release.yml` workflow has built and uploaded artifacts to the
       GitHub release for this tag.
+- [ ] The public GitHub Release assets are proven to match the tag commit
+      before publishing Cargo or npm:
+      ```
+      ./scripts/release/verify-release-assets.sh X.Y.Z
+      ```
+      This checks the local tag, remote tag, successful Release workflow SHA,
+      npm-facing assets, and `codewhale-artifacts-sha256.txt` manifest. If it
+      fails, rerun or repair the GitHub Release workflow before touching any
+      registry.
 - [ ] The live GitHub Release body has its own `## Contributors` or
       `## Credits` section; do not rely on "see CHANGELOG" alone. Verify with:
       ```
@@ -185,6 +194,10 @@ release anxiety: contributors cannot tell whether their work merged.
 - [ ] `crates.io` has the new version (or the `publish-crates.sh` job has
       pushed it).
 - [ ] `ghcr.io/hmbown/codewhale:vX.Y.Z` and `:latest` are updated.
+- [ ] The final registry verification passes:
+      ```
+      ./scripts/release/check-published.sh X.Y.Z
+      ```
 
 ## 8. Post-tag
 

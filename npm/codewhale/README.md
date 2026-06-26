@@ -103,6 +103,10 @@ offline installs, set `DEEPSEEK_TUI_DISABLE_INSTALL=1` or point
 
 - `npm publish` runs a release-asset check to ensure all required binary assets
   exist for the target GitHub release before publishing.
+- For the default GitHub Release source, `npm run release:check` also verifies
+  that the npm-facing assets were updated by a successful `release.yml` run for
+  the tag commit. When `CODEWHALE_RELEASE_BASE_URL` or a legacy mirror override
+  is set, it checks the mirror asset URLs and checksum manifest instead.
 - Install-time downloads are verified against the release checksum manifest before
   the wrapper marks them executable.
 

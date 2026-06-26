@@ -22,6 +22,35 @@ function resolveRepo() {
   return process.env.DEEPSEEK_TUI_GITHUB_REPO || process.env.DEEPSEEK_GITHUB_REPO || "Hmbown/CodeWhale";
 }
 
+function hasReleaseBaseOverride() {
+  return Boolean(
+    process.env.CODEWHALE_RELEASE_BASE_URL ||
+      process.env.DEEPSEEK_TUI_RELEASE_BASE_URL ||
+      process.env.DEEPSEEK_RELEASE_BASE_URL ||
+      process.env.CODEWHALE_USE_CNB_MIRROR,
+  );
+}
+
+function packageVersionMatchesBinaryVersion(version) {
+  return String(pkg.version).trim() === version;
+}
+
+function assertPackageVersionMatchesBinaryVersion(version) {
+  if (packageVersionMatchesBinaryVersion(version)) {
+    return;
+  }
+  if (process.env.CODEWHALE_ALLOW_NPM_BINARY_MISMATCH === "1") {
+    console.log(
+      `npm package version ${pkg.version} points at binary release ${version} (allowed packaging-only mismatch).`,
+    );
+    return;
+  }
+  throw new Error(
+    `npm package version ${pkg.version} does not match codewhaleBinaryVersion ${version}. ` +
+      "Set CODEWHALE_ALLOW_NPM_BINARY_MISMATCH=1 only for an intentional packaging-only npm release.",
+  );
+}
+
 function requestStatus(url, method = "HEAD", redirects = 0) {
   if (redirects > 10) {
     throw new Error(`Too many redirects while checking ${url}`);
@@ -96,6 +125,141 @@ async function downloadText(url) {
   });
 }
 
+async function downloadJson(url) {
+  const client = url.startsWith("https:") ? https : http;
+  return new Promise((resolve, reject) => {
+    const headers = {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "codewhale-npm-release-check",
+      "X-GitHub-Api-Version": "2022-11-28",
+    };
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    client
+      .get(url, { headers }, (res) => {
+        const status = res.statusCode || 0;
+        if (status >= 300 && status < 400 && res.headers.location) {
+          const next = new URL(res.headers.location, url).toString();
+          resolve(downloadJson(next));
+          return;
+        }
+        const chunks = [];
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          const body = chunks.join("");
+          let parsed;
+          try {
+            parsed = body ? JSON.parse(body) : {};
+          } catch (error) {
+            reject(new Error(`Invalid JSON from ${url}: ${error.message}`));
+            return;
+          }
+          if (status < 200 || status >= 300) {
+            const message = parsed.message ? `: ${parsed.message}` : "";
+            reject(new Error(`GitHub API request failed with status ${status}${message} (${url})`));
+            return;
+          }
+          resolve(parsed);
+        });
+      })
+      .on("error", reject);
+  });
+}
+
+function githubApiUrl(repo, path) {
+  return `https://api.github.com/repos/${repo}${path}`;
+}
+
+async function githubApi(repo, path) {
+  return downloadJson(githubApiUrl(repo, path));
+}
+
+async function resolveTagCommitSha(repo, tag) {
+  const ref = await githubApi(repo, `/git/ref/tags/${encodeURIComponent(tag)}`);
+  if (!ref.object || !ref.object.sha || !ref.object.type) {
+    throw new Error(`GitHub tag ref ${tag} did not include an object SHA`);
+  }
+  if (ref.object.type === "commit") {
+    return ref.object.sha;
+  }
+  if (ref.object.type !== "tag") {
+    throw new Error(`GitHub tag ref ${tag} points at ${ref.object.type}, not a commit or annotated tag`);
+  }
+  const tagObject = await githubApi(repo, `/git/tags/${ref.object.sha}`);
+  if (!tagObject.object || tagObject.object.type !== "commit" || !tagObject.object.sha) {
+    throw new Error(`Annotated tag ${tag} did not peel to a commit SHA`);
+  }
+  return tagObject.object.sha;
+}
+
+async function findReleaseWorkflowRun(repo, tag, tagSha) {
+  const runs = await githubApi(repo, "/actions/workflows/release.yml/runs?per_page=100");
+  const matches = (runs.workflow_runs || [])
+    .filter((run) => run.head_sha === tagSha)
+    .filter((run) => run.conclusion === "success")
+    .filter((run) => run.event === "push" || run.event === "workflow_dispatch")
+    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+  const tagBranchMatch = matches.find((run) => run.head_branch === tag);
+  const match = tagBranchMatch || matches[0];
+  if (!match) {
+    throw new Error(
+      `No successful release.yml workflow run found for ${tag} at ${tagSha}. ` +
+        "Rerun the Release workflow before publishing npm.",
+    );
+  }
+  return match;
+}
+
+function parseGitHubTime(value, label) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`GitHub ${label} timestamp is invalid: ${value}`);
+  }
+  return timestamp;
+}
+
+function assertReleaseAssetsFresh(release, expectedAssets, run) {
+  const assetsByName = new Map((release.assets || []).map((asset) => [asset.name, asset]));
+  const missing = expectedAssets.filter((asset) => !assetsByName.has(asset));
+  if (missing.length > 0) {
+    throw new Error(`GitHub Release is missing required npm-facing asset(s): ${missing.join(", ")}`);
+  }
+
+  const runStartedAt = parseGitHubTime(run.run_started_at || run.created_at, "workflow run start");
+  const stale = [];
+  for (const expected of expectedAssets) {
+    const asset = assetsByName.get(expected);
+    if (asset.state && asset.state !== "uploaded") {
+      stale.push(`${expected} has state ${asset.state}`);
+      continue;
+    }
+    const updatedAt = parseGitHubTime(asset.updated_at || asset.created_at, `${expected} update`);
+    if (updatedAt < runStartedAt) {
+      stale.push(`${expected} updated at ${asset.updated_at || asset.created_at}`);
+    }
+  }
+
+  if (stale.length > 0) {
+    throw new Error(
+      `GitHub Release asset set is stale for workflow run ${run.database_id || run.id}: ${stale.join("; ")}`,
+    );
+  }
+}
+
+async function verifyGitHubReleaseFreshness(repo, version, expectedAssets) {
+  const tag = `v${version}`;
+  const tagSha = await resolveTagCommitSha(repo, tag);
+  const release = await githubApi(repo, `/releases/tags/${encodeURIComponent(tag)}`);
+  const run = await findReleaseWorkflowRun(repo, tag, tagSha);
+  assertReleaseAssetsFresh(release, expectedAssets, run);
+  console.log(
+    `GitHub release asset freshness OK: ${expectedAssets.length} npm-facing assets for ${tag} were produced by run ${run.database_id || run.id} at ${tagSha.slice(0, 12)}.`,
+  );
+}
+
 function parseChecksumManifest(text) {
   const checksums = new Map();
   for (const line of text.split(/\r?\n/)) {
@@ -117,7 +281,14 @@ async function run() {
   const repo = resolveRepo();
   const assets = allReleaseAssetNames();
 
+  assertPackageVersionMatchesBinaryVersion(version);
+
   console.log(`Verifying ${assets.length} release assets for ${repo}@v${version}...`);
+  if (hasReleaseBaseOverride()) {
+    console.log("Skipping GitHub workflow freshness check because a release asset mirror/base URL override is set.");
+  } else {
+    await verifyGitHubReleaseFreshness(repo, version, assets);
+  }
   for (const asset of assets) {
     const url = releaseAssetUrl(asset, version, repo);
     await verifyAsset(url, asset);
@@ -134,7 +305,16 @@ async function run() {
   console.log("Release assets verified.");
 }
 
-run().catch((error) => {
-  console.error("Release asset verification failed:", error.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  run().catch((error) => {
+    console.error("Release asset verification failed:", error.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  assertPackageVersionMatchesBinaryVersion,
+  assertReleaseAssetsFresh,
+  hasReleaseBaseOverride,
+  parseChecksumManifest,
+};

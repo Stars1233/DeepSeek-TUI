@@ -213,17 +213,31 @@ The publish helper is idempotent for reruns: already-published crate versions ar
 
 `.github/workflows/release.yml` builds these binaries:
 
-- `codewhale-linux-x64`
-- `codewhale-macos-x64`
-- `codewhale-macos-arm64`
-- `codewhale-windows-x64.exe`
-- `codewhale-tui-linux-x64`
-- `codewhale-tui-macos-x64`
-- `codewhale-tui-macos-arm64`
-- `codewhale-tui-windows-x64.exe`
+- `codewhale-*` CLI binaries for Linux x64/arm64/riscv64, macOS x64/arm64,
+  and Windows x64
+- `codewhale-tui-*` TUI binaries for the same target matrix
+- `codew-*` shortcut binaries for the same target matrix
+- `codewhale.bat` for the Windows npm launcher
 
 The release job also uploads `codewhale-artifacts-sha256.txt`. The npm installer and
-release verification script both depend on that checksum manifest.
+release verification script both depend on that checksum manifest. The
+authoritative npm-facing asset list lives in
+`npm/codewhale/scripts/artifacts.js`.
+
+Before any Cargo or npm publish, prove that the public GitHub Release assets
+belong to the tag commit you are publishing:
+
+```bash
+./scripts/release/verify-release-assets.sh X.Y.Z
+```
+
+That gate compares the local and remote `vX.Y.Z` tag SHAs, confirms a
+successful `Release` workflow run used that SHA, then runs the npm wrapper's
+release check against the public GitHub asset URLs. The npm check fails if the
+release is missing an npm-facing asset, the checksum manifest omits a required
+binary, or the assets predate the matching release workflow run. If the command
+fails, rerun or repair `release.yml`; do not publish Cargo or npm against stale
+assets.
 
 ## npm Wrapper Release
 
@@ -240,14 +254,47 @@ on a workstation with `npm login` and an authenticator app.
 3. Push the version bump to `main`. After the release source is frozen, create
    the matching `vX.Y.Z` tag from `main`; `release.yml` then builds the binary
    matrix and drafts the GitHub Release.
-4. **Wait for the GitHub Release to finalize** with all eight signed binaries plus `codewhale-artifacts-sha256.txt`. The npm `prepublishOnly` hook (`scripts/verify-release-assets.js`) requires every asset to be present.
-5. From a developer machine, publish the npm wrapper manually:
+4. **Wait for the GitHub Release to finalize** with the full npm-facing binary
+   matrix plus `codewhale-artifacts-sha256.txt`. The npm `prepublishOnly` hook
+   (`scripts/verify-release-assets.js`) requires every asset to be present.
+5. Run the public asset freshness gate from the repo root:
 
 ```bash
+./scripts/release/verify-release-assets.sh X.Y.Z
+```
+
+For a rare packaging-only npm release where the npm package version intentionally
+points at older Rust binaries, add `--allow-npm-binary-mismatch` and keep the
+release notes explicit that no new binary version shipped.
+
+6. From a developer machine, confirm npm auth and publish the wrapper manually:
+
+```bash
+npm whoami
 cd npm/codewhale
 npm publish --access public
 # (you will be prompted for the npm OTP from your authenticator)
+npm view codewhale@X.Y.Z version codewhaleBinaryVersion --json
+cd ../..
+./scripts/release/check-published.sh X.Y.Z
 ```
+
+If `npm whoami` or `npm publish` reports `E401`, `ENEEDAUTH`, or an OTP/login
+failure, do not edit package contents. Run:
+
+```bash
+npm login
+npm whoami
+cd npm/codewhale
+npm publish --access public
+```
+
+Rerun the same `npm publish --access public` command after completing the login
+or OTP prompt. The package's `prepublishOnly` hook reruns the release-asset
+gate before each publish attempt, so an auth failure cannot accidentally skip
+asset verification on retry.
+
+Do not publish `npm/deepseek-tui`; it is deprecated compatibility metadata only.
 
 ### Why not automated?
 
