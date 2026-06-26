@@ -290,10 +290,20 @@ impl LspManager {
         if let Some(t) = self.custom_transports.lock().await.get(ext) {
             return Some(t.clone());
         }
-        match StdioLspTransport::spawn(&def.command, &def.args, &def.language_id, self.workspace.clone()).await {
+        match StdioLspTransport::spawn(
+            &def.command,
+            &def.args,
+            &def.language_id,
+            self.workspace.clone(),
+        )
+        .await
+        {
             Ok(t) => {
                 let arc: Arc<dyn LspTransport> = Arc::new(t);
-                self.custom_transports.lock().await.insert(ext.to_string(), arc.clone());
+                self.custom_transports
+                    .lock()
+                    .await
+                    .insert(ext.to_string(), arc.clone());
                 Some(arc)
             }
             Err(err) => {
@@ -324,7 +334,9 @@ impl LspManager {
         }
 
         let (cmd, args) = self.config.resolve_command(lang)?;
-        match StdioLspTransport::spawn(&cmd, &args, lang.language_id(), self.workspace.clone()).await {
+        match StdioLspTransport::spawn(&cmd, &args, lang.language_id(), self.workspace.clone())
+            .await
+        {
             Ok(transport) => {
                 let arc: Arc<dyn LspTransport> = Arc::new(transport);
                 self.transports.lock().await.insert(lang, arc.clone());
@@ -355,8 +367,13 @@ impl LspManager {
     pub async fn shutdown_all(&self) {
         let transports: Vec<Arc<dyn LspTransport>> =
             self.transports.lock().await.values().cloned().collect();
-        let custom: Vec<Arc<dyn LspTransport>> =
-            self.custom_transports.lock().await.values().cloned().collect();
+        let custom: Vec<Arc<dyn LspTransport>> = self
+            .custom_transports
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect();
         for transport in transports {
             transport.shutdown().await;
         }

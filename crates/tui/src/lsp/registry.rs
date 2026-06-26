@@ -157,10 +157,7 @@ mod tests {
     fn detects_php_extension() {
         assert_eq!(detect_language(&PathBuf::from("index.php")), Language::Php);
         assert_eq!(detect_language(&PathBuf::from("INDEX.PHP")), Language::Php);
-        assert_eq!(
-            detect_language(&PathBuf::from("router.php")),
-            Language::Php
-        );
+        assert_eq!(detect_language(&PathBuf::from("router.php")), Language::Php);
     }
 
     #[test]
