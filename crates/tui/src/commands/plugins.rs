@@ -212,7 +212,15 @@ mod tests {
         let result = plugins(&mut app, None);
         let msg = result.message.expect("should return message");
         assert!(msg.contains("No plugin tools discovered"));
-        assert!(msg.contains(&dir.path().canonicalize().unwrap().display().to_string()));
+        assert!(
+            msg.contains(
+                &dir.path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
         assert!(!result.is_error);
     }
 
