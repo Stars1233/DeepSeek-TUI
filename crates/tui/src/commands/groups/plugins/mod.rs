@@ -1,298 +1,221 @@
-//! Plugin command area: list installed plugins and (future) execute plugins.
-//!
-//! Plugins are script-based tools discovered in a configured plugin directory
-//! (default: `~/.codewhale/tools`). The `/plugins` command lists them and
-//! shows per-plugin metadata. A future `/plugin` command will handle execution.
-
-use std::path::PathBuf;
-
 use crate::commands::CommandResult;
 use crate::commands::traits::{
     Command, CommandGroup, CommandInfo, FunctionCommand, RegisterCommand,
 };
-use crate::config::Config;
-use crate::localization::{MessageId, tr};
-use crate::tools::plugin::scan_plugin_dir;
-use crate::tools::spec::ApprovalRequirement;
+use crate::localization::MessageId;
+use crate::plugins;
 use crate::tui::app::App;
 
 pub struct PluginsCommands;
 
 impl CommandGroup for PluginsCommands {
     fn commands(&self) -> Vec<Box<dyn Command>> {
-        vec![Box::new(FunctionCommand::new(
-            PluginsCmd::info(),
-            PluginsCmd::execute,
-        ))]
+        vec![
+            Box::new(FunctionCommand::new(
+                PluginListCmd::info(),
+                PluginListCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                PluginEnableCmd::info(),
+                PluginEnableCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                PluginDisableCmd::info(),
+                PluginDisableCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                PluginInfoCmd::info(),
+                PluginInfoCmd::execute,
+            )),
+        ]
     }
 }
 
-// ---------------------------------------------------------------------------
-// `/plugins` — list or show detail
-// ---------------------------------------------------------------------------
-
-pub(in crate::commands) const PLUGINS_INFO: CommandInfo = CommandInfo {
-    name: "plugins",
-    aliases: &["plugin"],
-    usage: "/plugins [name]",
+pub(in crate::commands) const PLUGIN_LIST_INFO: CommandInfo = CommandInfo {
+    name: "plugin",
+    aliases: &["plugins"],
+    usage: "/plugin list",
     description_id: MessageId::CmdPluginDescription,
 };
 
-pub(in crate::commands) struct PluginsCmd;
+pub(in crate::commands) struct PluginListCmd;
 
-impl RegisterCommand for PluginsCmd {
+impl RegisterCommand for PluginListCmd {
     fn info() -> &'static CommandInfo {
-        &PLUGINS_INFO
+        &PLUGIN_LIST_INFO
     }
 
     fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
-        plugins(app, arg)
+        if let Some(arg) = arg {
+            if arg.starts_with("list") {
+                plugin_list(app)
+            } else if arg.starts_with("enable ") {
+                let name = arg.strip_prefix("enable ").unwrap_or("").trim();
+                plugin_enable(app, name)
+            } else if arg.starts_with("disable ") {
+                let name = arg.strip_prefix("disable ").unwrap_or("").trim();
+                plugin_disable(app, name)
+            } else {
+                plugin_info(app, arg.trim())
+            }
+        } else {
+            plugin_list(app)
+        }
     }
 }
 
-/// List discovered plugins, or show details for a named plugin.
-fn plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
-    let Some(plugin_dir) = plugin_dir_for(app) else {
-        return CommandResult::error(
-            "Could not resolve plugin directory. Set [tools].plugin_dir in config.toml or ensure ~/.codewhale/tools exists.",
-        );
-    };
+pub(in crate::commands) const PLUGIN_ENABLE_INFO: CommandInfo = CommandInfo {
+    name: "plugin enable",
+    aliases: &[],
+    usage: "/plugin enable <name>",
+    description_id: MessageId::CmdPluginDescription,
+};
 
-    if !plugin_dir.exists() {
-        return CommandResult::message(format!(
-            "No plugin directory found at {}",
-            plugin_dir.display()
-        ));
+pub(in crate::commands) struct PluginEnableCmd;
+
+impl RegisterCommand for PluginEnableCmd {
+    fn info() -> &'static CommandInfo {
+        &PLUGIN_ENABLE_INFO
     }
 
-    let discovered = scan_plugin_dir(&plugin_dir);
-
-    if let Some(name) = arg.map(str::trim).filter(|s| !s.is_empty()) {
-        show_plugin_detail(app, name, &discovered)
-    } else {
-        list_plugins(app, &plugin_dir, &discovered)
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        let name = arg.unwrap_or("").trim();
+        if name.is_empty() {
+            CommandResult::error("Usage: /plugin enable <name>")
+        } else {
+            plugin_enable(app, name)
+        }
     }
 }
 
-fn list_plugins(
-    app: &App,
-    plugin_dir: &std::path::Path,
-    discovered: &[(PathBuf, crate::tools::plugin::PluginMetadata)],
-) -> CommandResult {
-    if discovered.is_empty() {
-        return CommandResult::message(
-            tr(app.ui_locale, MessageId::CmdPluginNoneFound)
-                .replace("{dir}", &plugin_dir.display().to_string()),
-        );
+pub(in crate::commands) const PLUGIN_DISABLE_INFO: CommandInfo = CommandInfo {
+    name: "plugin disable",
+    aliases: &[],
+    usage: "/plugin disable <name>",
+    description_id: MessageId::CmdPluginDescription,
+};
+
+pub(in crate::commands) struct PluginDisableCmd;
+
+impl RegisterCommand for PluginDisableCmd {
+    fn info() -> &'static CommandInfo {
+        &PLUGIN_DISABLE_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        let name = arg.unwrap_or("").trim();
+        if name.is_empty() {
+            CommandResult::error("Usage: /plugin disable <name>")
+        } else {
+            plugin_disable(app, name)
+        }
+    }
+}
+
+pub(in crate::commands) const PLUGIN_INFO_INFO: CommandInfo = CommandInfo {
+    name: "plugin info",
+    aliases: &[],
+    usage: "/plugin info <name>",
+    description_id: MessageId::CmdPluginDescription,
+};
+
+pub(in crate::commands) struct PluginInfoCmd;
+
+impl RegisterCommand for PluginInfoCmd {
+    fn info() -> &'static CommandInfo {
+        &PLUGIN_INFO_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        let name = arg.unwrap_or("").trim();
+        if name.is_empty() {
+            CommandResult::error("Usage: /plugin info <name>")
+        } else {
+            plugin_info(app, name)
+        }
+    }
+}
+
+fn plugin_list(app: &App) -> CommandResult {
+    let plugins = plugins::try_with_registry(|r| r.list()).unwrap_or_default();
+
+    if plugins.is_empty() {
+        return CommandResult::message("No plugins discovered.");
     }
 
     let mut out = String::new();
-    out.push_str(
-        &tr(app.ui_locale, MessageId::CmdPluginListHeader)
-            .replace("{count}", &discovered.len().to_string()),
-    );
+    out.push_str(&format!("Plugins ({})\n", plugins.len()));
+    out.push_str(&"=".repeat(40));
     out.push('\n');
 
-    for (path, meta) in discovered {
-        out.push_str(&format!(
-            "• {} — {}\n  {}",
-            meta.name,
-            meta.description,
-            path.display()
-        ));
-        out.push('\n');
-    }
-
-    CommandResult::message(out)
-}
-
-fn show_plugin_detail(
-    app: &App,
-    name: &str,
-    discovered: &[(PathBuf, crate::tools::plugin::PluginMetadata)],
-) -> CommandResult {
-    let Some((path, meta)) = discovered.iter().find(|(_, m)| m.name == name) else {
-        return CommandResult::error(
-            tr(app.ui_locale, MessageId::CmdPluginNotFound).replace("{name}", name),
-        );
-    };
-
-    let schema = serde_json::to_string_pretty(&meta.input_schema).unwrap_or_default();
-    let approval = approval_label(meta.approval);
-
-    let mut out = String::new();
-    out.push_str(&format!("{}\n", meta.name));
-    out.push_str(&format!("{:=<40}\n", ""));
-    out.push_str(&format!(
-        "{}\n",
-        tr(app.ui_locale, MessageId::CmdPluginDetailDescription)
-            .replace("{description}", &meta.description)
-    ));
-    out.push_str(&format!(
-        "{}\n",
-        tr(app.ui_locale, MessageId::CmdPluginDetailSchema).replace("{schema}", &schema)
-    ));
-    out.push_str(&format!(
-        "{}\n",
-        tr(app.ui_locale, MessageId::CmdPluginDetailApproval).replace("{approval}", approval)
-    ));
-    out.push_str(&format!(
-        "{}\n",
-        tr(app.ui_locale, MessageId::CmdPluginDetailPath)
-            .replace("{path}", &path.display().to_string())
-    ));
-
-    CommandResult::message(out)
-}
-
-fn approval_label(approval: ApprovalRequirement) -> &'static str {
-    match approval {
-        ApprovalRequirement::Auto => "auto",
-        ApprovalRequirement::Suggest => "suggest",
-        ApprovalRequirement::Required => "required",
-    }
-}
-
-/// Resolve the configured plugin directory, defaulting to `~/.codewhale/tools`.
-fn plugin_dir_for(app: &App) -> Option<PathBuf> {
-    let config = match &app.config_path {
-        Some(path) => {
-            Config::load(Some(path.clone()), app.config_profile.as_deref()).unwrap_or_default()
-        }
-        None => Config::default(),
-    };
-
-    config
-        .tools
-        .as_ref()
-        .and_then(|tools| tools.plugin_dir.as_ref())
-        .map(PathBuf::from)
-        .or_else(default_codewhale_tools_dir)
-}
-
-fn default_codewhale_tools_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".codewhale").join("tools"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::Config;
-    use crate::tui::app::{App, TuiOptions};
-    use tempfile::TempDir;
-
-    fn create_test_app_with_plugin_dir(plugin_dir: &std::path::Path) -> (App, TempDir) {
-        let tmp = TempDir::new().expect("tempdir");
-        let config_path = tmp.path().join("config.toml");
-        let tools_dir = plugin_dir
-            .canonicalize()
-            .unwrap_or_else(|_| plugin_dir.to_path_buf());
-        std::fs::write(
-            &config_path,
-            format!(
-                "[tools]\nplugin_dir = {}\n",
-                toml::Value::String(tools_dir.to_string_lossy().to_string())
-            ),
-        )
-        .expect("write config");
-
-        let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: tmp.path().to_path_buf(),
-            config_path: Some(config_path),
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
-            skills_dir: tmp.path().join("skills"),
-            memory_path: tmp.path().join("memory.md"),
-            notes_path: tmp.path().join("notes.txt"),
-            mcp_config_path: tmp.path().join("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+    for (name, plugin) in plugins {
+        let status = if plugin.enabled {
+            "enabled"
+        } else {
+            "disabled"
         };
-        let app = App::new(options, &Config::default());
-        (app, tmp)
+        let description = plugin
+            .manifest
+            .plugin
+            .description
+            .as_deref()
+            .unwrap_or("No description");
+        out.push_str(&format!("• {} [{}]\n  {}\n", name, status, description));
     }
 
-    #[test]
-    fn test_plugins_lists_discovered_tools() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("greet.sh"),
-            "# name: greet\n# description: Say hello\n# schema: {\"type\":\"object\"}\n# approval: auto\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("audit.sh"),
-            "# name: audit\n# description: Audit wrapper\n# approval: required\n",
-        )
-        .unwrap();
+    CommandResult::message(out)
+}
 
-        let (mut app, _tmp) = create_test_app_with_plugin_dir(dir.path());
-        let result = plugins(&mut app, None);
-        let msg = result.message.expect("should return list");
-        assert!(msg.contains("Plugin tools (2):"));
-        assert!(msg.contains("greet"));
-        assert!(msg.contains("Say hello"));
-        assert!(msg.contains("audit"));
-        assert!(msg.contains("Audit wrapper"));
-        assert!(msg.contains("greet.sh"));
-        assert!(!result.is_error);
+fn plugin_enable(_app: &App, name: &str) -> CommandResult {
+    let result = plugins::with_registry(|r| r.enable(name));
+
+    match result {
+        Some(true) => CommandResult::message(format!("Plugin '{}' enabled.", name)),
+        Some(false) => CommandResult::error(format!("Plugin '{}' not found.", name)),
+        None => CommandResult::error("Plugin registry not initialized."),
     }
+}
 
-    #[test]
-    fn test_plugins_empty_directory() {
-        let dir = TempDir::new().unwrap();
-        let (mut app, _tmp) = create_test_app_with_plugin_dir(dir.path());
-        let result = plugins(&mut app, None);
-        let msg = result.message.expect("should return message");
-        assert!(msg.contains("No plugin tools discovered"));
-        assert!(msg.contains(&dir.path().canonicalize().unwrap().display().to_string()));
-        assert!(!result.is_error);
+fn plugin_disable(_app: &App, name: &str) -> CommandResult {
+    let result = plugins::with_registry(|r| r.disable(name));
+
+    match result {
+        Some(true) => CommandResult::message(format!("Plugin '{}' disabled.", name)),
+        Some(false) => CommandResult::error(format!("Plugin '{}' not found.", name)),
+        None => CommandResult::error("Plugin registry not initialized."),
     }
+}
 
-    #[test]
-    fn test_plugins_detail_shows_metadata() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("tool.sh"),
-            "# name: my-tool\n# description: Does a thing\n# schema: {\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}\n# approval: required\n",
-        )
-        .unwrap();
+fn plugin_info(_app: &App, name: &str) -> CommandResult {
+    let plugin = plugins::try_with_registry(|r| r.get(name));
 
-        let (mut app, _tmp) = create_test_app_with_plugin_dir(dir.path());
-        let result = plugins(&mut app, Some("my-tool"));
-        let msg = result.message.expect("should return detail");
-        assert!(msg.contains("my-tool"));
-        assert!(msg.contains("Does a thing"));
-        assert!(msg.contains("\"type\": \"object\""));
-        assert!(msg.contains("\"x\""));
-        assert!(msg.contains("required"));
-        assert!(msg.contains("tool.sh"));
-        assert!(!result.is_error);
-    }
-
-    #[test]
-    fn test_plugins_detail_not_found() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("existing.sh"),
-            "# name: existing\n# description: exists\n",
-        )
-        .unwrap();
-
-        let (mut app, _tmp) = create_test_app_with_plugin_dir(dir.path());
-        let result = plugins(&mut app, Some("missing"));
-        assert!(result.is_error);
-        let msg = result.message.expect("should return error");
-        assert!(msg.contains("missing"));
-        assert!(msg.contains("not found"));
+    match plugin {
+        Some(Some(plugin)) => {
+            let mut out = String::new();
+            out.push_str(&format!("{}\n", plugin.manifest.plugin.name));
+            out.push_str(&"=".repeat(40));
+            out.push('\n');
+            if let Some(desc) = &plugin.manifest.plugin.description {
+                out.push_str(&format!("Description: {}\n", desc));
+            }
+            if let Some(version) = &plugin.manifest.plugin.version {
+                out.push_str(&format!("Version: {}\n", version));
+            }
+            if let Some(author) = &plugin.manifest.plugin.author {
+                out.push_str(&format!("Author: {}\n", author));
+            }
+            out.push_str(&format!(
+                "Status: {}\n",
+                if plugin.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            ));
+            out.push_str(&format!("Path: {}\n", plugin.base_path.display()));
+            CommandResult::message(out)
+        }
+        Some(None) => CommandResult::error(format!("Plugin '{}' not found.", name)),
+        None => CommandResult::error("Plugin registry not initialized."),
     }
 }
