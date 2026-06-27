@@ -51,15 +51,19 @@ Implemented locally:
 - `session/prompt` accepts string prompts plus text/resource/resource_link
   blocks, routes through the configured CodeWhale client, emits one
   `session/update` agent message chunk, then returns `stopReason: "end_turn"`.
-- `session/cancel` currently returns `null`.
+- `session/prompt` now runs concurrently with the input reader, so a
+  `session/cancel` for the same session interrupts the in-flight provider call
+  mid-turn and the prompt returns `stopReason: "cancelled"`. A no-prompt
+  `session/cancel` stays an idempotent `null` no-op. The turn is single-flight:
+  another request arriving mid-turn gets a clear "prompt in progress" error
+  instead of being silently dropped.
 
 Known limitations to state clearly:
 
 - The adapter is baseline ACP, not the full interactive TUI/runtime surface.
-- `session/cancel` is accepted but does not cancel an in-flight provider call
-  yet.
 - The response is emitted after the provider completes; it is not token
-  streaming.
+  streaming. Cancellation aborts the awaited call but cannot interrupt within a
+  single non-streaming provider response.
 - ACP does not expose shell tools, file-write tools, checkpoint replay, session
   loading, or the HTTP/SSE runtime API.
 - Registry submission should be gated on a local run of the upstream registry
