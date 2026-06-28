@@ -1,7 +1,10 @@
 use super::*;
 
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
-use super::turn_loop::{registered_tool_approval_required, tool_error_degradation_runtime_hint};
+use super::turn_loop::{
+    auto_review_force_prompt_overrides_auto_approve, registered_tool_approval_required,
+    tool_error_degradation_runtime_hint,
+};
 use crate::config::ApiProvider;
 use crate::models::{SystemBlock, Usage};
 use crate::test_support::{EnvVarGuard, lock_test_env};
@@ -513,6 +516,7 @@ fn auto_review_policy_forces_prompt_for_shell_git_push() {
     );
     assert_eq!(audit["decision"], "hold_for_review");
     assert_eq!(audit["action_kind"], "publish");
+    assert!(auto_review_force_prompt_overrides_auto_approve(&audit));
 }
 
 #[test]
@@ -2624,6 +2628,154 @@ async fn yolo_mode_does_not_prompt_for_background_shell_safety_floor() {
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
     assert!(saw_complete);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn yolo_mode_forces_prompt_for_publish_like_shell() {
+    // YOLO keeps ordinary/background approvals out of the way, but publish-like
+    // actions are deliberately durable-review holds. They must still surface a
+    // forced prompt even when `auto_approve` is true.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-publish\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_publish\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
+        "\"arguments\":\"{\\\"command\\\":\\\"cargo publish --dry-run\\\"}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-publish\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"ack\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("denied by user"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let run_task = tokio::spawn(engine.run());
+    let handle_for_approval = handle.clone();
+
+    handle
+        .send(Op::SendMessage {
+            content: "please publish this crate".to_string(),
+            mode: AppMode::Yolo,
+            provider: None,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            translation_enabled: false,
+            show_thinking: true,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
+        .await
+        .expect("send model turn");
+
+    let mut saw_forced_approval = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for engine event")
+    {
+        match event {
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                input,
+                approval_force_prompt,
+                ..
+            } => {
+                saw_forced_approval = true;
+                assert_eq!(tool_name, "exec_shell");
+                assert_eq!(input["command"], json!("cargo publish --dry-run"));
+                assert!(description.contains("publish-like"));
+                assert!(
+                    approval_force_prompt,
+                    "publish-like YOLO prompts must bypass TUI auto-approval"
+                );
+                handle_for_approval
+                    .deny_tool_call(id)
+                    .await
+                    .expect("deny publish-like shell");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "exec_shell" => {
+                let err = result.expect_err("publish-like shell should be denied");
+                assert!(
+                    err.to_string().contains("denied by user"),
+                    "unexpected shell result: {err:?}"
+                );
+            }
+            Event::TurnComplete { status, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    assert!(saw_forced_approval);
 }
 
 #[tokio::test]

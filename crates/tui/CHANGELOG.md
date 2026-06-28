@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserved the durable review safety floor for publish-like shell actions in
+  YOLO mode, so `cargo publish`, `npm publish`, and tag/release pushes force
+  approval instead of silently auto-approving (#3735).
 - Fixed Ctrl+O external-editor freezes where CodeWhale's terminal input pump
   could keep reading keys while Vim/editor owned the terminal, especially in
   Windows mintty/cygwin shells. Thanks @buko for the precise repro (#3657).

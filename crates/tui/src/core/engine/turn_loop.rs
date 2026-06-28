@@ -43,6 +43,19 @@ pub(super) fn registered_tool_approval_required(
     !auto_approve
 }
 
+pub(super) fn auto_review_force_prompt_overrides_auto_approve(
+    audit_event: &serde_json::Value,
+) -> bool {
+    audit_event
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        == Some("hold_for_review")
+        && audit_event
+            .get("action_kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("publish")
+}
+
 pub(super) fn tool_error_degradation_runtime_hint(
     consecutive_tool_error_steps: u32,
     step_error_tool_names: &[String],
@@ -1806,16 +1819,18 @@ impl Engine {
                     match decision {
                         AutoReviewPlanDecision::NoChange => {}
                         AutoReviewPlanDecision::ForcePrompt(reason) => {
-                            // YOLO mode (auto_approve) is the explicit "no
-                            // approvals" contract: even the auto-review safety
-                            // floor must not pop a modal in YOLO. Without this
-                            // guard every *background* shell command is held for
-                            // review, because classify_risk marks all shell
-                            // commands Destructive and the Background+Destructive
-                            // safety floor returns HoldForReview. A Block
-                            // decision (typed deny rules / hard blocks) still
-                            // holds below regardless of mode.
-                            if !self.session.auto_approve {
+                            // YOLO mode (auto_approve) skips ordinary review
+                            // holds, including Background+Destructive shell
+                            // holds created by the coarse shell risk fallback.
+                            // Publish-like actions are different: the
+                            // safety_floor marks them as durable-review holds
+                            // regardless of mode, so they must still surface a
+                            // forced prompt. A Block decision (typed deny
+                            // rules / hard blocks) still holds below
+                            // regardless of mode.
+                            if !self.session.auto_approve
+                                || auto_review_force_prompt_overrides_auto_approve(&audit_event)
+                            {
                                 approval_required = true;
                                 approval_description = reason;
                                 approval_force_prompt = true;
