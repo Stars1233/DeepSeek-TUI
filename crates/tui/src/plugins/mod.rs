@@ -4,6 +4,9 @@ pub mod discovery;
 pub mod manifest;
 pub mod registry;
 
+#[cfg(test)]
+mod tests;
+
 use discovery::discover_all;
 use registry::PluginRegistry;
 
@@ -15,9 +18,13 @@ pub fn init_registry(builtin_dirs: &[&str]) {
 }
 
 pub fn try_with_registry<R>(f: impl FnOnce(&PluginRegistry) -> R) -> Option<R> {
-    REGISTRY.get().and_then(|lock| lock.lock().ok().map(f))
+    REGISTRY
+        .get()
+        .and_then(|lock| lock.lock().ok().map(|registry| f(&registry)))
 }
 
 pub fn with_registry<R>(f: impl FnOnce(&mut PluginRegistry) -> R) -> Option<R> {
-    REGISTRY.get().and_then(|lock| lock.lock().ok().map(f))
+    REGISTRY
+        .get()
+        .and_then(|lock| lock.lock().ok().map(|mut registry| f(&mut registry)))
 }

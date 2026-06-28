@@ -136,34 +136,35 @@ impl RegisterCommand for PluginInfoCmd {
     }
 }
 
-fn plugin_list(app: &App) -> CommandResult {
-    let plugins = plugins::try_with_registry(|r| r.list()).unwrap_or_default();
+fn plugin_list(_app: &App) -> CommandResult {
+    plugins::try_with_registry(|r| {
+        if r.is_empty() {
+            return CommandResult::message("No plugins discovered.");
+        }
 
-    if plugins.is_empty() {
-        return CommandResult::message("No plugins discovered.");
-    }
+        let mut out = String::new();
+        out.push_str(&format!("Plugins ({})\n", r.len()));
+        out.push_str(&"=".repeat(40));
+        out.push('\n');
 
-    let mut out = String::new();
-    out.push_str(&format!("Plugins ({})\n", plugins.len()));
-    out.push_str(&"=".repeat(40));
-    out.push('\n');
+        for (name, plugin) in r.list() {
+            let status = if r.is_enabled(name) {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let description = plugin
+                .manifest
+                .plugin
+                .description
+                .as_deref()
+                .unwrap_or("No description");
+            out.push_str(&format!("• {} [{}]\n  {}\n", name, status, description));
+        }
 
-    for (name, plugin) in plugins {
-        let status = if plugin.enabled {
-            "enabled"
-        } else {
-            "disabled"
-        };
-        let description = plugin
-            .manifest
-            .plugin
-            .description
-            .as_deref()
-            .unwrap_or("No description");
-        out.push_str(&format!("• {} [{}]\n  {}\n", name, status, description));
-    }
-
-    CommandResult::message(out)
+        CommandResult::message(out)
+    })
+    .unwrap_or_else(|| CommandResult::error("Plugin registry not initialized."))
 }
 
 fn plugin_enable(_app: &App, name: &str) -> CommandResult {
@@ -187,10 +188,8 @@ fn plugin_disable(_app: &App, name: &str) -> CommandResult {
 }
 
 fn plugin_info(_app: &App, name: &str) -> CommandResult {
-    let plugin = plugins::try_with_registry(|r| r.get(name));
-
-    match plugin {
-        Some(Some(plugin)) => {
+    plugins::try_with_registry(|r| match r.get(name) {
+        Some(plugin) => {
             let mut out = String::new();
             out.push_str(&format!("{}\n", plugin.manifest.plugin.name));
             out.push_str(&"=".repeat(40));
@@ -213,9 +212,32 @@ fn plugin_info(_app: &App, name: &str) -> CommandResult {
                 }
             ));
             out.push_str(&format!("Path: {}\n", plugin.base_path.display()));
+            if let Some(skills) = &plugin.manifest.skills {
+                if let Some(path) = &skills.path {
+                    out.push_str(&format!("Skills: {}\n", path));
+                }
+            }
+            if let Some(mcp_servers) = &plugin.manifest.mcp_servers {
+                out.push_str(&format!("MCP servers: {}\n", mcp_servers.len()));
+                for (server_name, server) in mcp_servers {
+                    out.push_str(&format!("  - {}: {}\n", server_name, server.command));
+                    if let Some(args) = &server.args {
+                        out.push_str(&format!("    args: {}\n", args.join(" ")));
+                    }
+                    if let Some(env) = &server.env {
+                        out.push_str(&format!("    env vars: {}\n", env.len()));
+                    }
+                    if let Some(cwd) = &server.cwd {
+                        out.push_str(&format!("    cwd: {}\n", cwd));
+                    }
+                    if let Some(sandbox) = server.sandbox {
+                        out.push_str(&format!("    sandbox: {}\n", sandbox));
+                    }
+                }
+            }
             CommandResult::message(out)
         }
-        Some(None) => CommandResult::error(format!("Plugin '{}' not found.", name)),
-        None => CommandResult::error("Plugin registry not initialized."),
-    }
+        None => CommandResult::error(format!("Plugin '{}' not found.", name)),
+    })
+    .unwrap_or_else(|| CommandResult::error("Plugin registry not initialized."))
 }

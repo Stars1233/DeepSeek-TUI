@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::manifest::{PluginManifest, PluginMeta};
@@ -140,5 +139,6 @@ fn test_registry_list() {
     registry.register("plugin-2".to_string(), plugin2);
 
     assert_eq!(registry.len(), 2);
-    assert_eq!(registry.enabled_plugins().len(), 1);
+    assert!(registry.is_enabled("plugin-1"));
+    assert!(!registry.is_enabled("plugin-2"));
 }
