@@ -10,6 +10,7 @@ import {
   helpText,
   isAllowed,
   isGroupChat,
+  isTelegramMarkdownParseError,
   latestRunningTurn,
   looksLikePollingConflict,
   pairingRefusalText,
@@ -21,6 +22,7 @@ import {
   stripGroupPrefix,
   threadListKeyboard,
   telegramIdentity,
+  telegramMessageBody,
   telegramPollingConflictDelayMs,
   telegramRetryDelayMs,
   telegramSendRetryDelayMs
@@ -863,13 +865,26 @@ async function sendText(chatId, text, options = {}) {
   for (const [index, chunk] of chunks.entries()) {
     const body = {
       chat_id: chatId,
-      text: chunk,
+      ...telegramMessageBody(chunk, { markdown: true, maxChars: config.maxReplyChars }),
       disable_web_page_preview: true
     };
     if (options.replyMarkup && index === chunks.length - 1) {
       body.reply_markup = options.replyMarkup;
     }
-    await telegramApi("sendMessage", body);
+    try {
+      await telegramApi("sendMessage", body);
+    } catch (error) {
+      if (!isTelegramMarkdownParseError(error)) throw error;
+      const fallbackBody = {
+        chat_id: chatId,
+        ...telegramMessageBody(chunk, { markdown: false, maxChars: config.maxReplyChars }),
+        disable_web_page_preview: true
+      };
+      if (options.replyMarkup && index === chunks.length - 1) {
+        fallbackBody.reply_markup = options.replyMarkup;
+      }
+      await telegramApi("sendMessage", fallbackBody);
+    }
   }
 }
 

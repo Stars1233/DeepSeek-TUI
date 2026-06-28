@@ -171,6 +171,216 @@ export function callbackAction(data) {
   return null;
 }
 
+const MARKDOWN_V2_SPECIALS = /([_*\[\]()~`>#+\-=|{}.!])/g;
+const BLOCK_PLACEHOLDER_PREFIX = "\u0000mdv2:block:";
+const INLINE_PLACEHOLDER_PREFIX = "\u0000mdv2:inline:";
+const PLACEHOLDER_SUFFIX = "\u0000";
+
+export function telegramMessageBody(text, options = {}) {
+  const maxChars = Math.floor(Number(options.maxChars) || 0);
+  if (options.markdown === false) {
+    return { text: boundedPlainTelegramText(text, maxChars) };
+  }
+  const markdownText = telegramMarkdownV2(text);
+  if (maxChars > 0 && markdownText.length > maxChars) {
+    return { text: boundedPlainTelegramText(text, maxChars) };
+  }
+  return {
+    text: markdownText,
+    parse_mode: "MarkdownV2"
+  };
+}
+
+export function telegramMarkdownV2(text) {
+  const placeholders = [];
+  const source = String(text || "");
+  const fenced = source.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language, body) =>
+    markdownPlaceholder(
+      placeholders,
+      `\`\`\`${safeFenceLanguage(language)}\n${escapeMarkdownV2Code(removeClosingFenceNewline(body))}\n\`\`\``,
+      BLOCK_PLACEHOLDER_PREFIX
+    )
+  );
+  return restoreMarkdownPlaceholders(renderMarkdownLines(fenced), placeholders, BLOCK_PLACEHOLDER_PREFIX);
+}
+
+export function plainTelegramText(text) {
+  const source = String(text || "");
+  return renderPlainLines(
+    source
+      .replace(/```[^\n`]*\n?([\s\S]*?)```/g, "$1")
+      .replace(/`([^`\n]+)`/g, "$1")
+      .replace(/\[([^\]\n]+)\]\(([^ \n]+)\)/g, "$1 ($2)")
+      .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+      .replace(/__([^_\n]+)__/g, "$1")
+      .replace(/[*_~]/g, "")
+  );
+}
+
+function boundedPlainTelegramText(text, maxChars) {
+  const plain = plainTelegramText(text);
+  if (maxChars > 0 && plain.length > maxChars) {
+    return String(text || "");
+  }
+  return plain;
+}
+
+export function isTelegramMarkdownParseError(error) {
+  if (Number(error?.errorCode) !== 400) return false;
+  const text = String(error?.description || error?.message || "").toLowerCase();
+  return (
+    text.includes("parse") ||
+    text.includes("can't parse entities") ||
+    text.includes("entity") ||
+    text.includes("markdown")
+  );
+}
+
+function renderMarkdownLines(text) {
+  const lines = String(text || "").split("\n");
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (isMarkdownTable(lines, index)) {
+      const { rendered, nextIndex } = renderMarkdownTable(lines, index);
+      output.push(rendered);
+      index = nextIndex - 1;
+    } else {
+      output.push(renderMarkdownInline(lines[index]));
+    }
+  }
+  return output.join("\n");
+}
+
+function renderPlainLines(text) {
+  const lines = String(text || "").split("\n");
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (isMarkdownTable(lines, index)) {
+      const { rendered, nextIndex } = renderPlainTable(lines, index);
+      output.push(rendered);
+      index = nextIndex - 1;
+    } else {
+      output.push(lines[index]);
+    }
+  }
+  return output.join("\n");
+}
+
+function renderMarkdownInline(text) {
+  const placeholders = [];
+  let value = String(text || "");
+  value = value.replace(/\[([^\]\n]+)\]\(([^ \n]+)\)/g, (_match, label, url) =>
+    markdownPlaceholder(
+      placeholders,
+      `[${escapeMarkdownV2Text(label)}](${escapeMarkdownV2Url(url)})`,
+      INLINE_PLACEHOLDER_PREFIX
+    )
+  );
+  value = value.replace(/`([^`\n]+)`/g, (_match, code) =>
+    markdownPlaceholder(placeholders, `\`${escapeMarkdownV2Code(code)}\``, INLINE_PLACEHOLDER_PREFIX)
+  );
+  value = value.replace(/\*\*([^*\n]+)\*\*/g, (_match, body) =>
+    markdownPlaceholder(placeholders, `*${escapeMarkdownV2Text(body)}*`, INLINE_PLACEHOLDER_PREFIX)
+  );
+  value = escapeMarkdownV2Text(value);
+  return restoreMarkdownPlaceholders(value, placeholders, INLINE_PLACEHOLDER_PREFIX);
+}
+
+function renderMarkdownTable(lines, startIndex) {
+  const headers = tableCells(lines[startIndex]);
+  const rows = [];
+  let index = startIndex + 2;
+  while (index < lines.length && looksLikeTableRow(lines[index])) {
+    rows.push(tableCells(lines[index]));
+    index += 1;
+  }
+  const headerText = headers.map(escapeMarkdownV2Text).join(" / ");
+  const rendered = [`*${headerText}*`];
+  for (const row of rows) {
+    const fields = headers.map((header, cellIndex) => {
+      const value = row[cellIndex] || "";
+      return `${escapeMarkdownV2Text(header)}: ${escapeMarkdownV2Text(value)}`;
+    });
+    rendered.push(`• ${fields.join("; ")}`);
+  }
+  return { rendered: rendered.join("\n"), nextIndex: index };
+}
+
+function renderPlainTable(lines, startIndex) {
+  const headers = tableCells(lines[startIndex]);
+  const rows = [];
+  let index = startIndex + 2;
+  while (index < lines.length && looksLikeTableRow(lines[index])) {
+    rows.push(tableCells(lines[index]));
+    index += 1;
+  }
+  const rendered = [headers.join(" / ")];
+  for (const row of rows) {
+    const fields = headers.map((header, cellIndex) => `${header}: ${row[cellIndex] || ""}`);
+    rendered.push(`- ${fields.join("; ")}`);
+  }
+  return { rendered: rendered.join("\n"), nextIndex: index };
+}
+
+function isMarkdownTable(lines, index) {
+  return (
+    looksLikeTableRow(lines[index]) &&
+    index + 1 < lines.length &&
+    looksLikeTableSeparator(lines[index + 1])
+  );
+}
+
+function looksLikeTableRow(line) {
+  return tableCells(line).length >= 2;
+}
+
+function looksLikeTableSeparator(line) {
+  const cells = tableCells(line);
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function tableCells(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed.includes("|")) return [];
+  return trimmed
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function escapeMarkdownV2Text(text) {
+  return String(text || "").replace(MARKDOWN_V2_SPECIALS, "\\$1");
+}
+
+function escapeMarkdownV2Code(text) {
+  return String(text || "").replace(/([`\\])/g, "\\$1");
+}
+
+function escapeMarkdownV2Url(text) {
+  return String(text || "").replace(/([)\\])/g, "\\$1");
+}
+
+function safeFenceLanguage(language) {
+  return String(language || "").trim().replace(/[^\w+-]/g, "");
+}
+
+function removeClosingFenceNewline(text) {
+  return String(text || "").replace(/\n$/, "");
+}
+
+function markdownPlaceholder(placeholders, rendered, prefix) {
+  const index = placeholders.push(rendered) - 1;
+  return `${prefix}${index}${PLACEHOLDER_SUFFIX}`;
+}
+
+function restoreMarkdownPlaceholders(text, placeholders, prefix) {
+  return String(text || "").replace(
+    new RegExp(`${prefix}(\\d+)${PLACEHOLDER_SUFFIX}`, "g"),
+    (_match, index) => placeholders[Number(index)] || ""
+  );
+}
+
 export function telegramRetryDelayMs(error, fallbackMs = 3000) {
   const retryAfter = Number(error?.parameters?.retry_after || 0);
   if (Number.isFinite(retryAfter) && retryAfter > 0) {

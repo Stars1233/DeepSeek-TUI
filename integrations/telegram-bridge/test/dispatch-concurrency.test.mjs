@@ -178,3 +178,13 @@ test("turn streams debounce last-seq writes and flush before exit", async () => 
   assert.match(flushLastSeq, /await threadStore\.patchChat\(chatId, \{ lastSeq: latestSeq \}\);/);
   assert.match(flushLastSeq, /flushedSeq = latestSeq;/);
 });
+
+test("Telegram sends MarkdownV2 with plain-text fallback on parse errors", async () => {
+  const source = await readBridgeSource();
+  const sendText = extractFunction(source, "sendText");
+
+  assert.match(sendText, /telegramMessageBody\(chunk, \{ markdown: true, maxChars: config\.maxReplyChars \}\)/);
+  assert.match(sendText, /isTelegramMarkdownParseError\(error\)/);
+  assert.match(sendText, /telegramMessageBody\(chunk, \{ markdown: false, maxChars: config\.maxReplyChars \}\)/);
+  assert.match(sendText, /await telegramApi\("sendMessage", fallbackBody\);/);
+});

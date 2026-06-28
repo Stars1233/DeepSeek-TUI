@@ -22,9 +22,13 @@ import {
   stripGroupPrefix,
   threadListKeyboard,
   telegramIdentity,
+  telegramMarkdownV2,
+  telegramMessageBody,
+  plainTelegramText,
   telegramPollingConflictDelayMs,
   telegramRetryDelayMs,
   telegramSendRetryDelayMs,
+  isTelegramMarkdownParseError,
   looksLikePollingConflict,
   validateBridgeConfig
 } from "../src/lib.mjs";
@@ -245,6 +249,43 @@ test("activeTurnBlock reports active queued or in-progress turn", () => {
 
 test("splitMessage chunks long text without splitting surrogate pairs", () => {
   assert.deepEqual(splitMessage("a🧪b", 2), ["a🧪", "b"]);
+});
+
+test("telegramMarkdownV2 escapes text while preserving useful markdown", () => {
+  assert.equal(
+    telegramMarkdownV2("**Build** passed for [CI](https://example.com/a_(b))."),
+    "*Build* passed for [CI](https://example.com/a_(b\\))\\."
+  );
+  assert.equal(telegramMarkdownV2("Use `cargo test -p codewhale`."), "Use `cargo test -p codewhale`\\.");
+  assert.equal(
+    telegramMarkdownV2("```rust\nfn main() { println!(\"hi\"); }\n```"),
+    "```rust\nfn main() { println!(\"hi\"); }\n```"
+  );
+});
+
+test("telegramMarkdownV2 rewrites pipe tables into phone-readable bullets", () => {
+  assert.equal(
+    telegramMarkdownV2("| Gate | Result |\n| --- | --- |\n| Lint | Pass |\n| Tests | Fail |"),
+    "*Gate / Result*\n• Gate: Lint; Result: Pass\n• Gate: Tests; Result: Fail"
+  );
+});
+
+test("telegram message bodies can fall back from MarkdownV2 to plain text", () => {
+  assert.deepEqual(telegramMessageBody("**Done**", { markdown: true }), {
+    text: "*Done*",
+    parse_mode: "MarkdownV2"
+  });
+  assert.deepEqual(telegramMessageBody("!!!!", { markdown: true, maxChars: 4 }), {
+    text: "!!!!"
+  });
+  assert.deepEqual(telegramMessageBody("**Done**", { markdown: false }), {
+    text: "Done"
+  });
+  assert.equal(plainTelegramText("[CI](https://example.com) **passed**"), "CI (https://example.com) passed");
+  assert.equal(
+    isTelegramMarkdownParseError({ errorCode: 400, description: "Bad Request: can't parse entities" }),
+    true
+  );
 });
 
 test("telegramRetryDelayMs honors retry_after", () => {
