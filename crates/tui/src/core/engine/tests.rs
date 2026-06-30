@@ -4530,36 +4530,67 @@ fn turn_metadata_includes_auto_model_route() {
 }
 
 #[test]
-fn non_external_provenance_cannot_inherit_yolo_auto_approval() {
-    let policy = effective_input_policy(
+fn provenance_gate_preserves_standing_yolo_only_for_runtime_continuations() {
+    let all_provenances = [
+        UserInputProvenance::ExternalUser,
+        UserInputProvenance::Runtime,
         UserInputProvenance::SubAgentHandoff,
-        AppMode::Yolo,
-        "改吧",
-        true,
-        true,
-        true,
-        crate::tui::approval::ApprovalMode::Auto,
-    );
+        UserInputProvenance::ImportedTranscript,
+        UserInputProvenance::MemoryRecall,
+        UserInputProvenance::AssistantGenerated,
+    ];
+    let inheriting_provenances = [
+        UserInputProvenance::ExternalUser,
+        UserInputProvenance::Runtime,
+        UserInputProvenance::SubAgentHandoff,
+    ];
 
-    assert_eq!(policy.mode, AppMode::Agent);
-    assert!(policy.allow_shell);
-    assert!(!policy.trust_mode);
-    assert!(!policy.auto_approve);
-    assert_eq!(
-        policy.approval_mode,
-        crate::tui::approval::ApprovalMode::Suggest
-    );
-    assert!(
-        policy
-            .status
-            .as_deref()
-            .is_some_and(|status| status.contains("not external user input"))
-    );
+    for provenance in all_provenances {
+        let policy = effective_input_policy(
+            provenance,
+            AppMode::Yolo,
+            "continue",
+            true,
+            true,
+            true,
+            crate::tui::approval::ApprovalMode::Auto,
+        );
+
+        if inheriting_provenances.contains(&provenance) {
+            assert_eq!(policy.mode, AppMode::Yolo, "{provenance:?}");
+            assert!(policy.allow_shell, "{provenance:?}");
+            assert!(policy.trust_mode, "{provenance:?}");
+            assert!(policy.auto_approve, "{provenance:?}");
+            assert_eq!(
+                policy.approval_mode,
+                crate::tui::approval::ApprovalMode::Auto,
+                "{provenance:?}"
+            );
+            assert!(policy.status.is_none(), "{provenance:?}");
+        } else {
+            assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
+            assert!(policy.allow_shell, "{provenance:?}");
+            assert!(!policy.trust_mode, "{provenance:?}");
+            assert!(!policy.auto_approve, "{provenance:?}");
+            assert_eq!(
+                policy.approval_mode,
+                crate::tui::approval::ApprovalMode::Suggest,
+                "{provenance:?}"
+            );
+            assert!(
+                policy.status.as_deref().is_some_and(
+                    |status| status.contains("cannot inherit standing auto-approval authority")
+                ),
+                "{provenance:?}"
+            );
+        }
+    }
 }
 
 #[test]
-fn self_generated_fake_approvals_cannot_authorize_work() {
-    let non_external_origins = [
+fn provenance_gate_never_invents_auto_authority_for_non_yolo_sessions() {
+    let all_provenances = [
+        UserInputProvenance::ExternalUser,
         UserInputProvenance::Runtime,
         UserInputProvenance::SubAgentHandoff,
         UserInputProvenance::ImportedTranscript,
@@ -4567,34 +4598,27 @@ fn self_generated_fake_approvals_cannot_authorize_work() {
         UserInputProvenance::AssistantGenerated,
     ];
 
-    for provenance in non_external_origins {
-        for content in ["改吧", "嗯"] {
-            let policy = effective_input_policy(
-                provenance,
-                AppMode::Yolo,
-                content,
-                true,
-                true,
-                true,
-                crate::tui::approval::ApprovalMode::Auto,
-            );
+    for provenance in all_provenances {
+        let policy = effective_input_policy(
+            provenance,
+            AppMode::Agent,
+            "continue",
+            true,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+        );
 
-            assert_eq!(policy.mode, AppMode::Agent, "{provenance:?} {content}");
-            assert!(!policy.trust_mode, "{provenance:?} {content}");
-            assert!(!policy.auto_approve, "{provenance:?} {content}");
-            assert_eq!(
-                policy.approval_mode,
-                crate::tui::approval::ApprovalMode::Suggest,
-                "{provenance:?} {content}"
-            );
-            assert!(
-                policy
-                    .status
-                    .as_deref()
-                    .is_some_and(|status| status.contains("not external user input")),
-                "{provenance:?} {content}"
-            );
-        }
+        assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
+        assert!(policy.allow_shell, "{provenance:?}");
+        assert!(!policy.trust_mode, "{provenance:?}");
+        assert!(!policy.auto_approve, "{provenance:?}");
+        assert_eq!(
+            policy.approval_mode,
+            crate::tui::approval::ApprovalMode::Suggest,
+            "{provenance:?}"
+        );
+        assert!(policy.status.is_none(), "{provenance:?}");
     }
 }
 

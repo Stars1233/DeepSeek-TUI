@@ -3504,7 +3504,7 @@ fn effective_input_policy(
     let mut dynamic_active_tools = Vec::new();
     let mut status = None;
 
-    if !provenance.can_authorize_work() {
+    if !provenance_can_inherit_standing_auto_authority(provenance) {
         let had_auto_authority = matches!(mode, AppMode::Yolo)
             || trust_mode
             || auto_approve
@@ -3522,7 +3522,7 @@ fn effective_input_policy(
         }
         if had_auto_authority {
             status = Some(format!(
-                "Input provenance '{}' is not external user input; continuing with approvals required.",
+                "Input provenance '{}' cannot inherit standing auto-approval authority; continuing with approvals required.",
                 provenance.as_str()
             ));
         }
@@ -3545,6 +3545,15 @@ fn effective_input_policy(
         dynamic_active_tools,
         status,
     }
+}
+
+fn provenance_can_inherit_standing_auto_authority(provenance: UserInputProvenance) -> bool {
+    matches!(
+        provenance,
+        UserInputProvenance::ExternalUser
+            | UserInputProvenance::Runtime
+            | UserInputProvenance::SubAgentHandoff
+    )
 }
 
 fn is_review_only_user_intent(content: &str) -> bool {
