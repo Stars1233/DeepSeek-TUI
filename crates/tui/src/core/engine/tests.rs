@@ -6080,3 +6080,58 @@ async fn post_edit_hook_skips_unknown_tool_names() {
     assert!(engine.pending_lsp_blocks.is_empty());
     assert_eq!(fake.call_count(), 0);
 }
+
+// ── #3802: non-blocking send for ListSubAgents refresh events ─────────────
+
+#[test]
+fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
+    use tokio::sync::mpsc;
+
+    // Create a channel with the smallest possible capacity.
+    let (tx_op, _rx_op) = mpsc::channel::<Op>(1);
+
+    // Construct a minimal EngineHandle with the tiny channel.
+    let cancel_token = CancellationToken::new();
+    let handle = EngineHandle {
+        tx_op,
+        rx_event: Arc::new(RwLock::new(mpsc::channel::<Event>(1).1)),
+        cancel_token: Arc::new(StdMutex::new(cancel_token)),
+        cancel_reason: Arc::new(StdMutex::new(None)),
+        tx_approval: mpsc::channel(1).0,
+        tx_user_input: mpsc::channel(1).0,
+        tx_steer: mpsc::channel(1).0,
+        shared_paused: Arc::new(StdMutex::new(false)),
+    };
+
+    // Fill the op channel with one message (capacity = 1).
+    handle
+        .tx_op
+        .try_send(Op::ListSubAgents)
+        .expect("first send should succeed");
+
+    // try_send must return Err immediately — never block.
+    let result = handle.try_send(Op::ListSubAgents);
+    assert!(result.is_err(), "try_send should fail when channel is full");
+}
+
+#[tokio::test]
+async fn list_subagents_event_try_send_does_not_block_when_event_channel_full() {
+    use tokio::sync::mpsc;
+
+    // Simulate the engine's event channel with capacity 1.
+    let (tx_event, mut _rx_event) = mpsc::channel::<Event>(1);
+
+    // Fill the channel.
+    tx_event
+        .try_send(Event::status("filler"))
+        .expect("first send should succeed");
+
+    // Reproduce the handler pattern: try_send an AgentList event.
+    // This must return Err immediately — the handler should never hang.
+    let agents = vec![];
+    let result = tx_event.try_send(Event::AgentList { agents });
+    assert!(
+        result.is_err(),
+        "try_send should fail when event channel is full (backpressure avoided)"
+    );
+}

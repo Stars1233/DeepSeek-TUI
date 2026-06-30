@@ -1542,7 +1542,14 @@ impl Engine {
                         } else {
                             self.subagent_manager.read().await.list()
                         };
-                        let _ = self.tx_event.send(Event::AgentList { agents }).await;
+                        // #3802: use non-blocking send — this is a refresh event
+                        // that can safely be dropped when the channel is full.
+                        // The next drain cycle will re-request the list.
+                        if let Err(_e) = self.tx_event.try_send(Event::AgentList { agents }) {
+                            tracing::debug!(
+                                "Event channel full; dropping ListSubAgents refresh (will retry next drain)"
+                            );
+                        }
                     }
                     Op::ChangeMode {
                         mode,

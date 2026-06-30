@@ -3187,8 +3187,11 @@ async fn run_event_loop(
         }
         // #freeze: one trailing-edge sub-agent list refresh per drain, no
         // matter how many spawn/complete/mailbox events arrived this batch.
+        // #3802: non-blocking send — ListSubAgents is a refresh op that can
+        // be dropped when the op channel is full; the next drain cycle
+        // will re-request.
         if subagent_list_refresh_requested {
-            let _ = engine_handle.send(Op::ListSubAgents).await;
+            let _ = engine_handle.try_send(Op::ListSubAgents);
         }
 
         if let Some(next) = queued_to_send {
@@ -7341,7 +7344,8 @@ async fn apply_command_result(
                 }
             }
             AppAction::ListSubAgents => {
-                let _ = engine_handle.send(Op::ListSubAgents).await;
+                // #3802: non-blocking send — refresh op, safe to drop.
+                let _ = engine_handle.try_send(Op::ListSubAgents);
             }
             AppAction::FetchModels => {
                 app.status_message = Some("Fetching models...".to_string());
@@ -9428,7 +9432,8 @@ async fn handle_view_events(
             }
             ViewEvent::SubAgentsRefresh => {
                 app.status_message = Some("Refreshing sub-agents...".to_string());
-                let _ = engine_handle.send(Op::ListSubAgents).await;
+                // #3802: non-blocking send — refresh op, safe to drop.
+                let _ = engine_handle.try_send(Op::ListSubAgents);
             }
             ViewEvent::FilePickerSelected { path } => {
                 // Insert `@<path>` at the composer's cursor with surrounding
