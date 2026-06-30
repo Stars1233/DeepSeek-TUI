@@ -593,10 +593,6 @@ Use `exec_shell` for shell-native diagnostics, pipelines, and bounded commands.
 For commands expected to take >5 seconds, use `task_shell_start` or background
 shell execution and poll with the wait/interact tools. Keep exact calculations,
 hashes, dates, system state, and other mandatory shell checks in `exec_shell`.
-Do not send multiline `exec_shell` commands, heredocs, or multiline embedded
-scripts such as `python -c` blocks; shell safety blocks them even when
-`allow_shell = true`. Write a script/file first, use single-line commands, or
-use `task_shell_start`/background shell for long manual flows.
 
 ### `agent`
 Use `agent` for independent investigations or implementation slices that can run
