@@ -897,12 +897,12 @@ fn compact_action_id(action_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{ApiProvider, Config};
     use crate::tui::app::TuiOptions;
     use crossterm::event::KeyModifiers;
     use std::path::PathBuf;
 
-    fn test_app() -> App {
+    fn test_app_with_config(config: &Config) -> App {
         let options = TuiOptions {
             model: "deepseek-v4-pro".to_string(),
             workspace: PathBuf::from("."),
@@ -924,9 +924,13 @@ mod tests {
             resume_session_id: None,
             initial_input: None,
         };
-        let mut app = App::new(options, &Config::default());
+        let mut app = App::new(options, config);
         app.ui_locale = crate::localization::Locale::En;
         app
+    }
+
+    fn test_app() -> App {
+        test_app_with_config(&Config::default())
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1089,8 +1093,15 @@ mod tests {
 
     #[test]
     fn keyboard_controls_navigate_source_action_and_slot() {
-        let app = test_app();
-        let mut view = HotbarSetupView::new(&app, &Config::default());
+        let mut config = Config {
+            provider: Some(ApiProvider::Deepseek.as_str().to_string()),
+            ..Config::default()
+        };
+        config
+            .provider_config_for_mut(ApiProvider::Openrouter)
+            .model = Some("anthropic/claude-sonnet-4".to_string());
+        let app = test_app_with_config(&config);
+        let mut view = HotbarSetupView::new(&app, &config);
 
         assert_eq!(view.selected_source(), Some(HotbarActionCategory::App));
         view.handle_key(key(KeyCode::Tab));
