@@ -331,6 +331,7 @@
   "SetupCheckpointLayerOrder": "层级顺序：内置 Constitution -> 用户全局宪法 -> 仓库宪法 -> AGENTS/项目说明 -> 记忆/交接 -> 当前请求。",
   "SetupCheckpointDoneBundled": "宪法检查点已完成：使用内置/默认准则。",
   "SetupCheckpointDoneGuided": "宪法已批准——长期准则已保存。可随时用 /constitution 修订。",
+  "SetupCheckpointDoneKept": "已保留现有宪法——你的准则保持不变。可随时用 /constitution 修订。",
   "SetupCheckpointDeferred": "宪法检查点已稍后处理：在返回 /setup 前使用内置/默认准则。",
   "SetupStepSkipped": "已保存跳过此设置步骤。",
   "SetupStepRetryRecorded": "已标记此设置步骤待重试。",

@@ -141,6 +141,10 @@ pub struct SetupWizardView {
     facts: SetupRuntimeFacts,
     guided_draft: GuidedConstitutionDraft,
     guided_preview_seen: bool,
+    /// The keep-existing path mirrors the guided two-step: the first `K`
+    /// opens the rendered preview of the existing file, the second completes
+    /// the checkpoint without touching it.
+    existing_preview_seen: bool,
     /// A model-drafted constitution awaiting ratification, installed by the
     /// host after a successful one-shot draft (already sanitized + bounded).
     /// Cleared whenever a guided answer changes so a stale draft can never be
@@ -933,6 +937,7 @@ impl SetupWizardView {
             facts: SetupRuntimeFacts::default(),
             guided_draft: GuidedConstitutionDraft::default(),
             guided_preview_seen: false,
+            existing_preview_seen: false,
             model_draft: None,
             model_draft_label: None,
             runtime_preset: SetupRuntimePreset::default(),
@@ -983,6 +988,7 @@ impl SetupWizardView {
             facts,
             guided_draft: GuidedConstitutionDraft::default(),
             guided_preview_seen: false,
+            existing_preview_seen: false,
             model_draft: None,
             model_draft_label: None,
             runtime_preset: SetupRuntimePreset::default(),
@@ -1003,6 +1009,7 @@ impl SetupWizardView {
             facts,
             guided_draft: GuidedConstitutionDraft::default(),
             guided_preview_seen: false,
+            existing_preview_seen: false,
             model_draft: None,
             model_draft_label: None,
             runtime_preset: SetupRuntimePreset::default(),
@@ -1294,6 +1301,54 @@ impl SetupWizardView {
         })
     }
 
+    /// Complete the checkpoint by keeping the existing valid
+    /// `constitution.json` exactly as it stands (#3794). First `K` previews
+    /// the rendered law; second `K` records the choice. The file is never
+    /// rewritten — only `setup_state.json` changes, through the same commit
+    /// event as every other completion.
+    fn commit_keep_existing_constitution(&mut self) -> ViewAction {
+        if self.facts.constitution_file != SetupConstitutionFileState::Loaded {
+            return ViewAction::None;
+        }
+        // Re-read the live file so a stale card cannot ratify a file that
+        // has since become invalid; any non-loaded state leaves the key inert.
+        let Ok(load) = UserConstitution::load() else {
+            return ViewAction::None;
+        };
+        let Some(constitution) = load.constitution() else {
+            return ViewAction::None;
+        };
+        if !self.existing_preview_seen {
+            self.existing_preview_seen = true;
+            let content = constitution_ratification_text(
+                self.locale,
+                constitution,
+                &DraftProvenance::Existing,
+            );
+            return ViewAction::Emit(ViewEvent::OpenTextPager {
+                title: ratification_preview_title(self.locale).to_string(),
+                content,
+            });
+        }
+        let mut state = self.state.clone();
+        state.complete_constitution_checkpoint(
+            CONSTITUTION_CHECKPOINT_VERSION,
+            ConstitutionChoice::GuidedCustom,
+        );
+        state.constitution_source = ConstitutionSource::UserGlobal;
+        state.constitution_validity = ConstitutionValidity::Valid;
+        state.constitution_preview_hash = Some(constitution.preview_hash());
+        state.set_step(
+            SetupStep::Constitution,
+            StepEntry::new(StepStatus::Verified, true, CONSTITUTION_CHECKPOINT_VERSION)
+                .with_result("existing constitution kept unchanged"),
+        );
+        ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested {
+            state,
+            message: tr(self.locale, MessageId::SetupCheckpointDoneKept).to_string(),
+        })
+    }
+
     fn status_label(&self, status: StepStatus) -> Cow<'static, str> {
         tr(
             self.locale,
@@ -1374,6 +1429,9 @@ impl ModalView for SetupWizardView {
             }
             KeyCode::Char('a') if self.selected_step() == SetupStep::Constitution => {
                 self.request_model_draft()
+            }
+            KeyCode::Char('k') if self.selected_step() == SetupStep::Constitution => {
+                self.commit_keep_existing_constitution()
             }
             KeyCode::Char('u') => self.commit_constitution(SetupCommitKind::BundledConstitution),
             KeyCode::Char('d') => self.commit_constitution(SetupCommitKind::DeferredConstitution),
@@ -1638,6 +1696,12 @@ impl SetupWizardView {
                 self.guided_draft.principles.label(self.locale),
             ),
         ];
+        if self.facts.constitution_file == SetupConstitutionFileState::Loaded {
+            lines.push(Line::from(Span::styled(
+                keep_existing_invitation_line(self.locale),
+                Style::default().fg(palette::WHALE_ACCENT_PRIMARY),
+            )));
+        }
         if let Some(label) = self
             .model_draft_label
             .as_deref()
@@ -2004,6 +2068,9 @@ enum DraftProvenance {
     Guided,
     /// Drafted by the named model, then sanitized and bounded by CodeWhale.
     Model(String),
+    /// The user's existing `constitution.json`, shown unchanged for the
+    /// keep-existing checkpoint completion (#3794).
+    Existing,
 }
 
 fn ratification_preview_title(locale: Locale) -> &'static str {
@@ -2039,6 +2106,19 @@ fn constitution_ratification_text(
                     "由 {label} 根据你的引导式答案起草，并已由 CodeWhale 完成结构校验与边界限制。"
                 ),
                 DraftProvenance::Guided => "由你的引导式答案确定性生成。".to_string(),
+                DraftProvenance::Existing => {
+                    "你现有的宪法，读取自 constitution.json——原样展示，未做任何修改。".to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "这已是你现行的准则。关闭此预览后按 K 保留并完成检查点——文件不会被修改。\
+                     之后可随时用 /constitution 或 /setup 修订。"
+                }
+                _ => {
+                    "未经你确认，任何内容都不会成为准则。关闭此预览后按 G 批准并保存；\
+                     之后可随时用 /constitution 或 /setup 修订。"
+                }
             };
             format!(
                 "CODEWHALE · 用户宪法\n{RULE}\n\n{drafted_by}\n\n\
@@ -2048,8 +2128,7 @@ fn constitution_ratification_text(
                  权限层级\n{layer_order}\n你的直接指令始终高于本文件。\n\n\
                  它不能做什么\n\
                  它只提供行为指导，不能授予或更改审批策略、沙箱、Shell、网络、信任、MCP 权限、默认模式、发布或支出权限——这些始终由你在运行时掌控。\n\n\
-                 批准\n\
-                 未经你确认，任何内容都不会成为准则。关闭此预览后按 G 批准并保存；之后可随时用 /constitution 或 /setup 修订。"
+                 批准\n{ratify_how}"
             )
         }
         _ => {
@@ -2059,6 +2138,21 @@ fn constitution_ratification_text(
                 ),
                 DraftProvenance::Guided => {
                     "Rendered deterministically from your guided answers.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Your existing constitution, loaded from constitution.json — shown unchanged."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "This is already your standing law. Close this preview, then press K to \
+                     keep it and complete the checkpoint — the file is not modified. Amend \
+                     anytime with /constitution or /setup."
+                }
+                _ => {
+                    "Nothing becomes law until you confirm. Close this preview, then press G to \
+                     ratify and save. Amend anytime with /constitution or /setup."
                 }
             };
             format!(
@@ -2075,9 +2169,7 @@ fn constitution_ratification_text(
                  It guides behavior. It cannot grant or change approval policy, sandbox, shell, \
                  network, trust, MCP permissions, default mode, publishing, or spending \
                  authority — those stay under your hand at runtime.\n\n\
-                 RATIFICATION\n\
-                 Nothing becomes law until you confirm. Close this preview, then press G to \
-                 ratify and save. Amend anytime with /constitution or /setup."
+                 RATIFICATION\n{ratify_how}"
             )
         }
     }
@@ -2090,6 +2182,14 @@ fn model_draft_invitation_line(locale: Locale, model_label: &str) -> String {
             format!("A {model_label} 起草，你批准。未经确认不会保存。")
         }
         _ => format!("A {model_label} can draft it. You ratify it. Nothing saves without you."),
+    }
+}
+
+/// Card line offering to keep an existing valid constitution unchanged.
+fn keep_existing_invitation_line(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "K 保留现有宪法——先查看，再保留，文件不变。",
+        _ => "K Keep your existing constitution — review it, keep it, file unchanged.",
     }
 }
 
@@ -3034,6 +3134,105 @@ mod tests {
                 .as_deref(),
             Some(CONSTITUTION_CHECKPOINT_VERSION)
         );
+    }
+
+    #[test]
+    fn keep_existing_constitution_previews_then_completes_without_rewriting() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+
+        // An existing valid custom constitution from a prior version.
+        let existing = guided_constitution_template(Locale::En);
+        persist_user_constitution_choice(&existing, &SetupState::default())
+            .expect("write existing constitution");
+        let path = UserConstitution::path().expect("constitution path");
+        let bytes_before = std::fs::read(&path).expect("existing file bytes");
+
+        let facts = SetupRuntimeFacts {
+            constitution_file: SetupConstitutionFileState::Loaded,
+            ..SetupRuntimeFacts::default()
+        };
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Constitution,
+            facts,
+        );
+
+        // The card offers the keep path.
+        let text = lines_to_text(view.constitution_detail_lines());
+        assert!(text.contains("K Keep your existing constitution"), "{text}");
+
+        // First K previews the existing law, unchanged, with keep wording.
+        let action = view.handle_key(key(KeyCode::Char('k')));
+        let ViewAction::Emit(ViewEvent::OpenTextPager { title, content }) = action else {
+            panic!("expected keep-existing preview event");
+        };
+        assert!(title.contains("Draft for Ratification"));
+        assert!(content.contains("shown unchanged"), "{content}");
+        assert!(content.contains("press K to keep it"), "{content}");
+        assert!(
+            content.contains("<codewhale_user_constitution"),
+            "{content}"
+        );
+
+        // Second K completes the checkpoint without touching the file.
+        let action = view.handle_key(key(KeyCode::Char('k')));
+        let ViewAction::EmitAndClose(ViewEvent::SetupStateCommitRequested { state, message }) =
+            action
+        else {
+            panic!("expected keep-existing commit event");
+        };
+        assert_eq!(state.constitution_choice, ConstitutionChoice::GuidedCustom);
+        assert_eq!(state.constitution_source, ConstitutionSource::UserGlobal);
+        assert_eq!(state.constitution_validity, ConstitutionValidity::Valid);
+        assert_eq!(
+            state.constitution_checkpoint_completed_for.as_deref(),
+            Some(CONSTITUTION_CHECKPOINT_VERSION)
+        );
+        assert_eq!(
+            state.constitution_preview_hash.as_deref(),
+            Some(existing.preview_hash().as_str())
+        );
+        assert_eq!(state.status(SetupStep::Constitution), StepStatus::Verified);
+        assert!(message.contains("Constitution kept"), "{message}");
+
+        let bytes_after = std::fs::read(&path).expect("file bytes after keep");
+        assert_eq!(bytes_before, bytes_after, "keep must not rewrite the file");
+    }
+
+    #[test]
+    fn keep_key_is_inert_without_a_valid_existing_constitution() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+
+        for file_state in [
+            SetupConstitutionFileState::Missing,
+            SetupConstitutionFileState::Invalid,
+            SetupConstitutionFileState::Empty,
+        ] {
+            let facts = SetupRuntimeFacts {
+                constitution_file: file_state,
+                ..SetupRuntimeFacts::default()
+            };
+            let mut view = SetupWizardView::new_at_with_facts(
+                SetupState::default(),
+                Locale::En,
+                SetupStep::Constitution,
+                facts,
+            );
+            let text = lines_to_text(view.constitution_detail_lines());
+            assert!(
+                !text.contains("K Keep your existing constitution"),
+                "{file_state:?} must not offer keep: {text}"
+            );
+            assert!(
+                matches!(view.handle_key(key(KeyCode::Char('k'))), ViewAction::None),
+                "{file_state:?} must leave K inert"
+            );
+        }
     }
 
     #[test]

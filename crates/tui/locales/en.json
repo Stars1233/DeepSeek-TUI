@@ -341,6 +341,7 @@
     "SetupCheckpointLayerOrder": "Layer order: bundled Constitution -> user-global constitution -> repo constitution -> AGENTS/project instructions -> memory/handoff -> current request.",
     "SetupCheckpointDoneBundled": "Constitution checkpoint complete: using bundled/default law.",
     "SetupCheckpointDoneGuided": "Constitution ratified — your standing law is saved. Amend anytime with /constitution.",
+    "SetupCheckpointDoneKept": "Constitution kept — your existing law stands, unchanged. Amend anytime with /constitution.",
     "SetupCheckpointDeferred": "Constitution checkpoint deferred: bundled/default law applies until you return to /setup.",
     "SetupStepSkipped": "Setup step skipped and saved.",
     "SetupStepRetryRecorded": "Setup step marked for retry.",
