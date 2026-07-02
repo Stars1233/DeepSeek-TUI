@@ -115,10 +115,9 @@ impl StreamableHttpTransport {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let body = response
-            .text()
+        let body = super::read_body_capped(response, super::MAX_MCP_RESPONSE_BYTES)
             .await
-            .map_err(|err| StreamableSendError::Other(err.into()))?;
+            .map_err(StreamableSendError::Other)?;
         self.store_response_body(content_type.as_deref(), &body)
             .map_err(StreamableSendError::Other)
     }

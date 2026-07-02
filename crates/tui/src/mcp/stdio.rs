@@ -176,10 +176,17 @@ impl McpTransport for StdioTransport {
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
-        let mut line = String::new();
+        let mut line_bytes: Vec<u8> = Vec::new();
         loop {
-            line.clear();
-            let bytes = match self.reader.read_line(&mut line).await {
+            // Bounded read: a server emitting a newline-free multi-GB "line"
+            // must not OOM us (read_line is unbounded).
+            let bytes = match read_line_capped(
+                &mut self.reader,
+                &mut line_bytes,
+                super::MAX_MCP_RESPONSE_BYTES,
+            )
+            .await
+            {
                 Ok(b) => b,
                 Err(err) => {
                     if let Some(stderr) = format_stderr_context(&self.stderr_tail).await {
@@ -195,6 +202,7 @@ impl McpTransport for StdioTransport {
                 anyhow::bail!("Stdio transport closed");
             }
 
+            let line = String::from_utf8_lossy(&line_bytes);
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -221,5 +229,85 @@ impl McpTransport for StdioTransport {
 impl Drop for StdioTransport {
     fn drop(&mut self) {
         send_sigterm(&self.child);
+    }
+}
+
+/// Read one newline-terminated line into `out` (cleared first), aborting if it
+/// exceeds `max` bytes without a newline. Bounds an otherwise-unbounded
+/// `read_line` so a misbehaving MCP server cannot OOM the client. Returns the
+/// number of bytes accumulated; 0 means EOF.
+async fn read_line_capped<R>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<usize>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    out.clear();
+    loop {
+        let (chunk, consumed, done) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                (Vec::new(), 0usize, true)
+            } else if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                (available[..=pos].to_vec(), pos + 1, true)
+            } else {
+                (available.to_vec(), available.len(), false)
+            }
+        };
+        if consumed > 0 {
+            reader.consume(consumed);
+        }
+        out.extend_from_slice(&chunk);
+        if done {
+            break;
+        }
+        if out.len() > max {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("MCP stdio line exceeded {max} bytes without a newline"),
+            ));
+        }
+    }
+    Ok(out.len())
+}
+
+#[cfg(test)]
+mod read_cap_tests {
+    use super::read_line_capped;
+
+    #[tokio::test]
+    async fn reads_a_line_and_reports_eof() {
+        let data = b"hello\nworld\n".to_vec();
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(data));
+        let mut out = Vec::new();
+        assert_eq!(
+            read_line_capped(&mut reader, &mut out, 1024).await.unwrap(),
+            6
+        );
+        assert_eq!(out, b"hello\n");
+        assert_eq!(
+            read_line_capped(&mut reader, &mut out, 1024).await.unwrap(),
+            6
+        );
+        assert_eq!(out, b"world\n");
+        // EOF.
+        assert_eq!(
+            read_line_capped(&mut reader, &mut out, 1024).await.unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn aborts_on_newline_free_line_over_cap() {
+        let data = vec![b'x'; 4096]; // no newline
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(data));
+        let mut out = Vec::new();
+        let err = read_line_capped(&mut reader, &mut out, 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }
