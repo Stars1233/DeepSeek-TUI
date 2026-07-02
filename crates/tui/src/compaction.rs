@@ -563,13 +563,24 @@ fn estimate_tokens_for_message(message: &Message, include_thinking: bool) -> usi
                 .map(|s| s.len() / 4)
                 .unwrap_or(100),
             ContentBlock::ToolResult { content, .. } => content.len() / 4,
+            // An inline image is real input the model pays for; estimating it
+            // at 0 undercounts the budget and risks overflow in image-heavy
+            // sessions. Use a conservative flat per-image estimate (vision
+            // tiles are typically ~1k tokens); erring high compacts slightly
+            // early rather than overflowing.
+            ContentBlock::ImageUrl { .. } => IMAGE_TOKEN_ESTIMATE,
             ContentBlock::ServerToolUse { .. }
             | ContentBlock::ToolSearchToolResult { .. }
-            | ContentBlock::CodeExecutionToolResult { .. }
-            | ContentBlock::ImageUrl { .. } => 0,
+            | ContentBlock::CodeExecutionToolResult { .. } => 0,
         })
         .sum::<usize>()
 }
+
+/// Conservative flat token estimate for an inline image (`ContentBlock::ImageUrl`).
+/// Vision models bill images by resized tile count; ~1k tokens is a safe
+/// mid-range estimate that keeps the compaction trigger from under-reading an
+/// image-heavy session.
+const IMAGE_TOKEN_ESTIMATE: usize = 1000;
 
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     // Rough estimate: ~4 chars per token. DeepSeek thinking-mode rule: any
@@ -1129,10 +1140,16 @@ async fn create_summary(
     let mut telemetry_cache_aligned = used_cache_aligned;
     let response = match client.create_message(request).await {
         Ok(response) => response,
-        Err(err) if used_cache_aligned && is_context_window_error(&err) => {
+        // The cache-aligned request replays a non-contiguous message
+        // subsequence (pinned messages removed from the middle), which can
+        // exceed the window OR violate strict role-ordering (a non-transient
+        // InvalidInput). Fall back to the bounded formatted summary on ANY
+        // cache-aligned failure rather than aborting compaction entirely and
+        // letting context keep growing.
+        Err(err) if used_cache_aligned => {
             logging::warn(format!(
-                "Cache-aligned compaction summary exceeded the model context window ({err}); \
-                 retrying with bounded formatted summary input"
+                "Cache-aligned compaction summary failed ({err}); retrying with \
+                 bounded formatted summary input"
             ));
             telemetry_cache_aligned = false;
             let fallback_request = build_formatted_summary_request(model, messages, limits);
@@ -1168,6 +1185,9 @@ async fn create_summary(
     Ok(summary)
 }
 
+// Retained for tests; production compaction now falls back on any
+// cache-aligned summary failure, not only context-window errors.
+#[cfg(test)]
 fn is_context_window_error(e: &anyhow::Error) -> bool {
     let text = e.to_string();
     if crate::error_taxonomy::classify_error_message(&text)
@@ -1537,6 +1557,24 @@ pub fn merge_system_prompts(
 
 #[cfg(test)]
 mod tests {
+    use crate::models::{ImageUrlContent, Message};
+
+    #[test]
+    fn inline_image_estimates_nonzero_tokens() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                },
+            }],
+        };
+        assert!(
+            estimate_tokens_for_message(&msg, false) >= IMAGE_TOKEN_ESTIMATE,
+            "an inline image must not estimate to 0 tokens"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

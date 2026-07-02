@@ -2955,13 +2955,23 @@ impl Engine {
             .min(target_budget.saturating_sub(1))
             .max(1);
 
+        // Preserve the working-set pins on the emergency/preflight path too.
+        // Previously this passed None/None, so a compaction routed here (which,
+        // on large windows, is the path that actually fires) could summarize
+        // away pinned errors, patches, and the files the user is editing.
+        let compaction_pins = self
+            .session
+            .working_set
+            .pinned_message_indices(&self.session.messages, &self.session.workspace);
+        let compaction_paths = self.session.working_set.top_paths(24);
+
         match compact_messages_safe(
             client,
             &self.session.messages,
             &forced_config,
             Some(&self.session.workspace),
-            None,
-            None,
+            Some(&compaction_pins),
+            Some(&compaction_paths),
         )
         .await
         {
