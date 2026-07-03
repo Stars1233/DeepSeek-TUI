@@ -1197,18 +1197,21 @@ If you are upgrading from older releases:
   with process-tree containment only and must not be described as read-only
   filesystem isolation, workspace-write enforcement, network blocking,
   registry isolation, or AppContainer isolation until those are implemented.
-- `permissions.toml` (sibling file, optional): ask-only typed permission rule
-  records loaded next to `config.toml`, for example
-  `~/.codewhale/permissions.toml`. This schema foundation accepts
-  `[[rules]]` entries with `tool` plus optional `command` or `path` fields.
-  Loaded rules feed the execution policy engine and force approval in
-  non-YOLO approval modes that can ask; under `approval_policy = "never"`,
-  matching ask rules are rejected because no prompt can be shown. YOLO / auto
-  approval retains complete freedom: ask rules do not downgrade YOLO into
-  prompting or blocking.
+- `permissions.toml` (sibling file, optional): typed permission rule records
+  loaded next to `config.toml`, for example `~/.codewhale/permissions.toml`.
+  Manually authored `[[rules]]` entries accept `tool`, optional `command` or
+  `path`, and optional `action = "deny" | "ask" | "allow"`; omitted `action`
+  defaults to `"ask"`. `deny` blocks matching invocations before mode-based
+  approval handling, `allow` skips approval for matching invocations, and
+  `ask` forces approval only in modes that can prompt. Outside the TUI
+  auto-approve path, a matching `ask` rule under `approval_policy = "never"`
+  is rejected because no prompt can be shown. In YOLO / auto-approval sessions,
+  `ask` rules do not downgrade the session into prompting or blocking; explicit
+  `deny` rules still block according to the current execution-policy logic.
 
   In a supported approval card, press `S` to approve the request once and
-  append exact ask rules to this file. Supported saves are intentionally narrow:
+  append exact `action = "ask"` rules to this file. Supported saves are
+  intentionally narrow:
   `exec_shell` stores the exact approved command string; `write_file` and
   `edit_file` store the exact workspace-relative file path; `apply_patch`
   stores one exact workspace-relative `path` rule per validated touched file
@@ -1217,10 +1220,10 @@ If you are upgrading from older releases:
   form used by runtime matching.
 
   `read_file` rules can still be authored manually when you want future reads
-  of a specific path to ask, but the approval UI does not save `read_file`
-  rules. This schema still does not accept typed allow/deny records, glob
-  expansion, broad directory/recursive rules, or UI editing/deleting of saved
-  rules.
+  of a specific path to ask, allow, or deny, but the approval UI does not save
+  `read_file` rules. The UI is not a policy editor: it does not save
+  `allow`/`deny`, edit or delete rules, expand globs, or create broad
+  directory/recursive rules.
 - `[[hotbar]]` (array of tables, optional): user-owned 1-8 slot bindings for
   the TUI hotbar. Each entry has `slot`, `action`, and optional `label`.
   Omitting `hotbar` uses the built-in default eight slots. Setting
