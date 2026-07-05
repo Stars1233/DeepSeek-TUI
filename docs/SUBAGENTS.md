@@ -19,7 +19,7 @@ backoff inside the child runtime before the worker is marked interrupted; if the
 retry budget is exhausted, CodeWhale preserves a checkpoint and returns a
 continuation handle instead of leaving the parent to infer what happened. For
 work that must survive process restarts, sleep, or remote execution, prefer
-Fleet or a WhaleFlow-backed fleet run.
+Fleet or a Workflow-backed fleet run.
 
 Sub-agents inherit the parent's tool registry by default, but child agents are
 leaf workers: they do not receive `agent` or nested lifecycle tools. `agent`

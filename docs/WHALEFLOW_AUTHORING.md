@@ -1,9 +1,13 @@
-# WhaleFlow Authoring
+# Workflow Authoring
 
-WhaleFlow has one runtime boundary: authored workflow source lowers to typed
+Workflow has one runtime boundary: authored source lowers to typed
 Rust `WorkflowSpec`, Rust validates the IR, and the scheduler/headless worker
 runtime executes leaves. Authoring languages do not get hidden authority to own
 files, shell, network, providers, cancellation, or TUI state.
+
+This document keeps its legacy `WHALEFLOW_AUTHORING.md` path for compatibility.
+Public UI and docs should say Workflow; internal crate and package names may
+still use `whaleflow` where renaming would create churn.
 
 ## Language Choice
 
@@ -17,7 +21,7 @@ The default high-capability path is TypeScript/JavaScript authoring, but only as
 a compile step. The compiler accepts a JSON-compatible object inside
 `workflow({...})` from `.workflow.js` or `.workflow.ts`, lowers it to
 `WorkflowSpec`, and runs the Rust validation gate. (Starlark authoring was a
-bootstrap reference and has been removed; WhaleFlow is JS-only.)
+bootstrap reference and has been removed; Workflow authoring is JS-only.)
 
 ## Contract
 
@@ -66,10 +70,10 @@ Current example: `workflows/issue_audit.workflow.js`.
 
 The primary product flow is not "ask the user to write a script." The main
 agent should decide when a task deserves workflow orchestration, draft the
-WhaleFlow source, show the plan for the current permission mode, and then let
+Workflow source, show the plan for the current permission mode, and then let
 the runtime compile and monitor it.
 
-WhaleFlow owns the plan: phases, branches, loops, reducers, and intermediate
+Workflow owns the plan: phases, branches, loops, reducers, and intermediate
 results. Fleet owns the durable sub-agent configuration: slots, profiles,
 models, tool posture, launch concurrency, leases, heartbeats, logs, receipts,
 and resume/stop/restart controls. In other words, a workflow can choose and
@@ -77,7 +81,7 @@ monitor Fleet slots, but it must not become a second executor with its own shell
 or filesystem authority.
 
 Fleet launch validation applies a conservative default shape before any
-WhaleFlow IR is lowered to workers:
+Workflow IR is lowered to workers:
 
 - up to 100 total worker agents per workflow run;
 - up to 5 recursive Fleet rings;

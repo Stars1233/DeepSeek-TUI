@@ -54,7 +54,7 @@ The model-visible progress surface is `checklist_*`:
 Agents and Fleet workers use that surface for concrete Work progress under the
 active runtime thread or durable task.
 
-`task_*` and the Fleet/WhaleFlow ledger remain the durable lifecycle owners.
+`task_*` and the Fleet/Workflow ledger remain the durable lifecycle owners.
 Checklist metadata is the model-visible projection of progress:
 `task_updates.checklist` carries the current items, completion percentage, and
 in-progress item. `update_plan` is optional high-level strategy metadata for

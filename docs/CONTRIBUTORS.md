@@ -194,8 +194,8 @@ patches, and TUI fixes landed alongside first-time and returning contributor wor
   pausable custom-command lifecycle direction harvested into the forward track,
   plus the directly merged command-support boundary cleanup and broader command
   layer design direction (#2788, #2732, #2871, #2851, #2791)
-- **[AdityaVG13](https://github.com/AdityaVG13)** — WhaleFlow orchestration and
-  cost-tracking drafts that shaped the maintained WhaleFlow IR and
+- **[AdityaVG13](https://github.com/AdityaVG13)** — Workflow orchestration
+  (then WhaleFlow) and cost-tracking drafts that shaped the maintained workflow IR and
   TraceStore foundation (#2482, #2486)
 - **[lbcheng888](https://github.com/lbcheng888)**,
   **[AiurArtanis](https://github.com/AiurArtanis)**, and

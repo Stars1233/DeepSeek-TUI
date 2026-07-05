@@ -60,46 +60,46 @@ drafting behind a ratify gate:
   nothing is saved until you press **`g`** to ratify (or press `m` again to
   redraft). Ratifying writes the profile to `.codewhale/agents/<role>`.
 
-## Naming: Modes, WhaleFlow, Fleet, and Swarm
+## Naming: Modes, Workflow, Fleet, and Swarm
 
 These names describe different layers, not competing systems. Agent, Plan, and
-YOLO stay the permission/work modes. WhaleFlow is an orchestration overlay that
+YOLO stay the permission/work modes. Workflow is an orchestration overlay that
 can run on top of those modes when the task needs a continuous workflow.
 
-- **WhaleFlow** is the repeatable workflow plan and user-facing orchestration
+- **Workflow** is the repeatable plan and user-facing orchestration
   overlay: a script/IR that decides which phases and agents run next, keeps
   intermediate results out of the main conversation, and can be inspected or
-  rerun. A WhaleFlow run should have a visible progress view and a clear active
+  rerun. A Workflow run should have a visible progress view and a clear active
   header state instead of feeling like a hidden background task.
 - **Fleet** is the durable sub-agent configuration and execution substrate:
   slots, profiles, per-slot models, tool posture, local/SSH hosts, trust
   policy, leases, heartbeats, logs, receipts, and status APIs.
-- **Swarm** is the high-fanout behavior inside WhaleFlow. It is gated in
+- **Swarm** is the high-fanout behavior inside Workflow. It is gated in
   v0.8.61: `/swarm` must not revive prompt-only sub-agent fanout. It should
-  compile into a WhaleFlow-backed fleet run once the durable worker and goal
+  compile into a Workflow-backed fleet run once the durable worker and goal
   re-dispatch substrate is available.
 
-UI guidance: keep the main transcript calm. A WhaleFlow run should appear as a
+UI guidance: keep the main transcript calm. A Workflow run should appear as a
 compact progress card plus Work/Agents sidebar rows with phase names, worker
 counts, receipts, and nested indentation for child workers. Use the whale mark
 sparingly as an active header/status signal; avoid repeating emoji-heavy rows
 for every worker.
 
-## WhaleFlow on Fleet
+## Workflow on Fleet
 
 The intended high-capability path is agent-authored. When the main agent
 decides a task needs more durable coordination than turn-by-turn sub-agent
-calls, it drafts a WhaleFlow script/IR, presents the run plan according to the
+calls, it drafts a Workflow script/IR, presents the run plan according to the
 active permission mode, and the runtime compiles it into typed Fleet work.
 
 Fleet remains the sub-agent config surface. It owns slot count, role profiles,
 model/loadout selection, tool posture, launch concurrency, and the ledger.
-WhaleFlow owns only the orchestration plan: branch, sequence, loop, expand,
+Workflow owns only the orchestration plan: branch, sequence, loop, expand,
 review, and reduce decisions. The workflow script must not get direct shell,
 filesystem, network, provider-secret, cancellation, or TUI authority; workers
 perform real work as `codewhale exec` processes.
 
-Default WhaleFlow-to-Fleet validation is intentionally bounded:
+Default Workflow-to-Fleet validation is intentionally bounded:
 
 - 100 total worker agents per workflow run;
 - 5 recursive Fleet rings;

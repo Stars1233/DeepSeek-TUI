@@ -1583,7 +1583,7 @@ for experimental feature flags. It shows each flag's effective enabled/disabled
 state and whether that state comes from the default or a configured override.
 Change feature flags in `[features]` or with `--enable` / `--disable`; the
 `/config` section is an audit surface, not a stability promise. Goal and
-WhaleFlow preview rows may appear there as reserved entries until those workflows
+Workflow preview rows may appear there as reserved entries until those workflows
 graduate behind real gated flags.
 
 ## Web Search Provider

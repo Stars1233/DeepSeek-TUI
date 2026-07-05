@@ -841,7 +841,7 @@ fallback_default_prior = 3.8
 # ─────────────────────────────────────────────────────────────────────────────────
 # Harness profiles let future CodeWhale runtime slices select model-specific
 # prompt, context, tool, and subagent posture. v0.9 parses, validates, and can
-# resolve profiles for tests/status plumbing, but normal Agent and WhaleFlow
+# resolve profiles for tests/status plumbing, but normal Agent and Workflow
 # runs do not silently promote or mutate behavior from these profiles yet.
 #
 # [[harness_profiles]]

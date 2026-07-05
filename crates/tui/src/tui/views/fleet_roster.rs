@@ -349,7 +349,7 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
         &mut lines,
         "Description",
         "Your main session model is the operator. Fleet members are the workers it dispatches \
-         — via `agent` profile spawns and WhaleFlow task({profile}). Change the operator's \
+         — via `agent` profile spawns and Workflow task({profile}). Change the operator's \
          route via /model or /provider."
             .to_string(),
     );

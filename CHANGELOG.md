@@ -53,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`longcat`, with `long-cat`, `meituan-longcat`, and `meituan` aliases),
   `LONGCAT_API_KEY` discovery, the `LongCat-2.0` default model, provider
   picker wiring, model completions, provider docs, and web provider facts.
-- Added Workflow/WhaleFlow runtime foundations only: the JS authoring/runtime
+- Added Workflow runtime foundations only: the internal JS authoring/runtime
   crates compile and replay example workflows, but 0.8.67 does not ship a
   product-ready Workflow surface yet. There is no model-facing `workflow` tool,
   no `/workflow` runner, and no TUI run view in this release; those are tracked

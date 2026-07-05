@@ -277,7 +277,7 @@ README는 짧은 버전입니다. 나머지는 docs와
   출력 계약, 복구 동작.
 - [아키텍처](docs/ARCHITECTURE.md) — 크레이트 구성, 런타임 흐름, 도구 시스템,
   확장 지점, 보안 모델.
-- [WhaleFlow 작성](docs/WHALEFLOW_AUTHORING.md) · [MCP](docs/MCP.md) ·
+- [Workflow 작성](docs/WHALEFLOW_AUTHORING.md) · [MCP](docs/MCP.md) ·
   [Runtime API](docs/RUNTIME_API.md) · [Model Lab](docs/MODEL_LAB.md)
 - [키 바인딩](docs/KEYBINDINGS.md) · [샌드박스와 승인](docs/SANDBOX.md)
   · [접근성](docs/ACCESSIBILITY.md) · [Docker](docs/DOCKER.md)

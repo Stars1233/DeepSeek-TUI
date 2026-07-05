@@ -1750,7 +1750,7 @@ fn experimental_config_rows(config: &Config) -> Vec<ConfigRow> {
     });
     rows.push(ConfigRow {
         section: ConfigSection::Experimental,
-        key: "whaleflow".to_string(),
+        key: "workflow".to_string(),
         value: "preview overlay for workflow/fleet runs (not stable)".to_string(),
         editable: false,
         scope: ConfigScope::Saved,
@@ -1817,7 +1817,7 @@ fn config_label_for_key(key: &str) -> String {
         "mcp_config_path" => "MCP config path",
         "fleet.exec.max_spawn_depth" => "Fleet recursion depth",
         "goal_command" => "Goal command",
-        "whaleflow" => "WhaleFlow",
+        "workflow" => "Workflow",
         _ => {
             if let Some(feature) = key.strip_prefix("features.") {
                 return format!("Feature: {}", humanize_config_key(feature));
@@ -1888,7 +1888,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "features.exec_policy" => "read-only feature flag state for execution policy tools",
         "features.vision_model" => "read-only feature flag state for vision/model image support",
         "goal_command" => "preview-only; not a stable command surface yet",
-        "whaleflow" => "preview-only workflow/fleet overlay; not a stable command surface yet",
+        "workflow" => "preview-only workflow/fleet overlay; not a stable command surface yet",
         _ => "",
     }
 }
@@ -3347,7 +3347,8 @@ mod tests {
         assert!(keys.contains(&"features.exec_policy"));
         assert!(keys.contains(&"features.vision_model"));
         assert!(keys.contains(&"goal_command"));
-        assert!(keys.contains(&"whaleflow"));
+        assert!(keys.contains(&"workflow"));
+        assert!(!keys.contains(&"whaleflow"));
         assert!(
             view.rows
                 .iter()
@@ -3467,9 +3468,13 @@ max_spawn_depth = 2
         assert_eq!(visible_row_keys(&view), vec!["goal_command"]);
 
         view.clear_filter();
-        type_filter(&mut view, "whaleflow");
+        type_filter(&mut view, "workflow");
         assert_eq!(visible_section_labels(&view), vec!["Experimental"]);
-        assert_eq!(visible_row_keys(&view), vec!["whaleflow"]);
+        assert_eq!(visible_row_keys(&view), vec!["workflow"]);
+
+        view.clear_filter();
+        type_filter(&mut view, "whaleflow");
+        assert!(visible_row_keys(&view).is_empty());
     }
 
     #[test]

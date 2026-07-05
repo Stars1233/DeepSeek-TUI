@@ -851,7 +851,7 @@ fn profile_authoring_prompt(
          - workers are summoned as focused Fleet members with only their assigned slice\n\
          - default model behavior is same-route inheritance; choose fast/strong/code/review only when the role needs it\n\
          - DeepSeek-style model tiers are recommendations, not hierarchy rules; every slot may override model\n\
-         - WhaleFlow plans may select and monitor Fleet slots, but Fleet owns the worker config\n\
+         - Workflow plans may select and monitor Fleet slots, but Fleet owns the worker config\n\
          - do not encode a recursive worker tree in [instructions].text; topology belongs to the orchestrator, not each worker\n\n\
          Keep the profile permission-narrowing and compatible with recursive Fleet role workers.",
         provider = snapshot.provider,

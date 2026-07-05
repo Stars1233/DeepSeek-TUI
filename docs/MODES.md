@@ -4,18 +4,18 @@ codewhale has two related concepts:
 
 - **TUI mode**: what kind of visible interaction you're in (Plan/Agent/YOLO).
 - **Approval mode**: how aggressively the UI asks before executing tools.
-- **WhaleFlow overlay**: optional long-running workflow orchestration that can
+- **Workflow overlay**: optional long-running orchestration that can
   run on top of any TUI mode when a task needs many coordinated workers.
 
 Model selection is separate. `--model auto` and `/model auto` route each turn to
 a concrete model and thinking level; they are not TUI modes and are not part of
 the `Tab` cycle.
 
-WhaleFlow is also separate from the `Tab` mode cycle. It is the visible
+Workflow is also separate from the `Tab` mode cycle. It is the visible
 continuous-work layer for repeatable workflows and fleet workers. Swarm-style
 high-fanout remains gated in v0.8.61 until it routes through durable
 Fleet-backed workers instead of prompt-only sub-agent fanout. The active mode
-still controls permissions; WhaleFlow controls whether a large task is planned
+still controls permissions; Workflow controls whether a large task is planned
 into a resumable workflow with its own progress view.
 
 ## TUI Modes
@@ -66,9 +66,9 @@ the turn, `/goal complete` marks it done, `/goal blocked` marks it blocked, and
 approval mode, or model route. This remains distinct from `--model auto`, which
 only controls model and thinking selection.
 
-WhaleFlow builds on the same separation: a goal can ask the agent to keep
-working, while WhaleFlow supplies the repeatable workflow/progress surface for
-large fanout. In the UI, a WhaleFlow run should be shown as an overlay on the
+Workflow builds on the same separation: a goal can ask the agent to keep
+working, while Workflow supplies the repeatable workflow/progress surface for
+large fanout. In the UI, a Workflow run should be shown as an overlay on the
 main screen, not as a fourth mode next to Agent, Plan, and YOLO.
 
 App-server clients can persist a thread-scoped goal with `thread/goal/set`, read

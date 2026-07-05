@@ -205,7 +205,7 @@ v0.9.0 是当前的集成轨道，正在那里汇聚的工作包括：
 - 更强的跨会话、跨 Agent 的 relay 与交接界面；
 - 高密度工具运行时更安静的转录；
 - 面向 VS Code 与 GUI 客户端的运行时 API；
-- WhaleFlow 分支/叶子工作流编排。
+- Workflow 分支/叶子工作流编排。
 
 逐版本的细节见 [CHANGELOG.md](CHANGELOG.md)。
 

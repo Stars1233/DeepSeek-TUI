@@ -237,7 +237,7 @@ v0.9.0 là làn tích hợp hiện tại. Những việc đang tụ về đó:
 - bề mặt relay và handoff mạnh hơn giữa các session và agent;
 - transcript gọn gàng hơn cho các chuỗi công cụ dày đặc;
 - runtime API cho VS Code và các client GUI;
-- điều phối workflow branch/leaf với WhaleFlow.
+- điều phối workflow branch/leaf với Workflow.
 
 Chi tiết theo từng bản phát hành nằm trong [CHANGELOG.md](CHANGELOG.md).
 

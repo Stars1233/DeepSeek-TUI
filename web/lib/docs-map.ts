@@ -188,10 +188,10 @@ export const DOC_TOPICS: DocTopic[] = [
   {
     id: "fleet",
     slug: "fleet",
-    label: { en: "Fleet / WhaleFlow", zh: "Fleet / WhaleFlow" },
+    label: { en: "Fleet / Workflow", zh: "Fleet / Workflow" },
     description: {
-      en: "Durable task execution, fleet management, and WhaleFlow authoring.",
-      zh: "持久任务执行、Fleet 管理和 WhaleFlow 编写。",
+      en: "Durable task execution, fleet management, and Workflow authoring.",
+      zh: "持久任务执行、Fleet 管理和 Workflow 编写。",
     },
     repoSource: ["docs/FLEET.md", "docs/WHALEFLOW_AUTHORING.md"],
     hasPage: false,
