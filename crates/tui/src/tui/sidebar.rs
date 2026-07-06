@@ -47,6 +47,9 @@ const TASK_STOP_TARGET_LABEL: &str = "[x]";
 const TASK_STOP_TARGET_SUFFIX: &str = " [x]";
 const HOTBAR_PANEL_HEIGHT: u16 = 4;
 const HOTBAR_ROW_COLUMNS: usize = 4;
+/// Maximum character width for goal/objective text displayed in the
+/// compact To-do sidebar panel. Hover text shows the full objective.
+const SIDEBAR_GOAL_MAX_CHARS: usize = 50;
 
 pub fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App, config: &Config) {
     // Clear hover state at the start of each render
@@ -898,10 +901,14 @@ fn push_work_goal_lines(
             .fg(theme.warning)
             .add_modifier(ratatui::style::Modifier::BOLD)
     };
+    // Truncate long goal text to a short sidebar label — never leak raw
+    // prompt/goal text into the compact To-do panel. The hover text still
+    // shows the full objective.
+    let display = crate::tui::ui::short_title_truncate(objective, SIDEBAR_GOAL_MAX_CHARS);
     let label = if let Some(indicator) = summary.pause_indicator.as_deref() {
-        format!("{objective} {indicator}")
+        format!("{display} {indicator}")
     } else {
-        objective.to_string()
+        display
     };
 
     lines.push(Line::from(Span::styled(

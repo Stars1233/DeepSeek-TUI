@@ -11165,27 +11165,61 @@ fn restore_loaded_session_provider(app: &mut App, config: &mut Config, model_pro
 }
 
 /// Derive a short display title from the API message list.
-/// Skips the `<turn_meta>` block prepended by the engine and takes the first
-/// real user-text block, truncated to 32 characters.
+///
+/// Tries several strategies in order:
+/// 1. If the first user message starts with a known slash command (`/goal`,
+///    `/fleet`, `/workflow`, etc.), use the command + first argument.
+/// 2. Otherwise, take the first meaningful line and cut it at a natural
+///    phrase boundary (period, comma, colon, or word boundary) within
+///    `SESSION_TITLE_MAX_CHARS`, never splitting mid-word.
+///
+/// Never leaks raw prompt text — the result is always a concise label.
 fn derive_session_title(messages: &[Message]) -> Option<String> {
-    messages.iter().find(|m| m.role == "user").and_then(|m| {
+    let text = messages.iter().find(|m| m.role == "user").and_then(|m| {
         m.content.iter().find_map(|block| match block {
             ContentBlock::Text { text, .. } if !text.starts_with(TURN_META_PREFIX) => {
-                let first_line = text.trim().lines().next().unwrap_or("").trim();
-                if first_line.is_empty() {
-                    return None;
-                }
-                let char_count = first_line.chars().count();
-                let chars: String = first_line.chars().take(SESSION_TITLE_MAX_CHARS).collect();
-                if char_count > SESSION_TITLE_MAX_CHARS {
-                    Some(format!("{chars}…"))
-                } else {
-                    Some(chars)
-                }
+                Some(text.trim().to_string())
             }
             _ => None,
         })
-    })
+    })?;
+
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return None;
+    }
+
+    // Slash command: extract command name + first reasonable argument.
+    if let Some(rest) = first_line.strip_prefix('/') {
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        return match parts.as_slice() {
+            [] => None,
+            [cmd] => Some(format!("/{cmd}")),
+            [cmd, arg, ..] => {
+                let arg_short = short_title_truncate(arg, 24);
+                Some(format!("/{cmd} {arg_short}"))
+            }
+        };
+    }
+
+    Some(short_title_truncate(first_line, SESSION_TITLE_MAX_CHARS))
+}
+
+/// Truncate `text` to at most `max_chars` characters, cutting at the last
+/// natural phrase boundary (`.`, `,`, `:`, `;`, `—`, `-`, or whitespace)
+/// so words are never split. Appends `…` only when text was actually cut.
+pub(crate) fn short_title_truncate(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    // Look for a natural boundary within the allowed range.
+    let candidate: String = text.chars().take(max_chars).collect();
+    let boundary = candidate
+        .rfind(['.', ',', ':', ';', '—', '-'])
+        .or_else(|| candidate.rfind(' '))
+        .unwrap_or(max_chars.min(candidate.len()).saturating_sub(1));
+    let cut: String = text.chars().take(boundary.max(1)).collect();
+    format!("{cut}…")
 }
 
 fn recover_interrupted_user_tail(messages: &[Message]) -> (Vec<Message>, Option<QueuedMessage>) {
