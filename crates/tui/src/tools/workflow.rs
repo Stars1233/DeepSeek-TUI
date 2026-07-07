@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,9 +18,9 @@ use codewhale_workflow::{
 };
 use codewhale_workflow_js::{
     BudgetSnapshot, DriverError, ProgressEvent, SpawnedTask, TaskCompletion, TaskRequest,
-    WorkflowDriver, WorkflowVm,
+    WorkflowDriver, WorkflowRunCancel, WorkflowVm,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -33,30 +32,56 @@ use crate::tools::spec::{
 use crate::tools::subagent::{
     SharedSubAgentManager, SubAgentCompletion, SubAgentRuntime, SubAgentStatus, spawn_workflow_task,
 };
+use crate::tools::verifier::run_workflow_completion_gates;
 use crate::utils::spawn_supervised;
 
 #[derive(Clone)]
 pub struct WorkflowTool {
     manager: SharedSubAgentManager,
     runtime: SubAgentRuntime,
-    runs: SharedWorkflowRuns,
-    controllers: SharedWorkflowControllers,
 }
 
 impl WorkflowTool {
     #[must_use]
     pub fn new(manager: SharedSubAgentManager, runtime: SubAgentRuntime) -> Self {
-        Self {
-            manager,
-            runtime,
-            runs: Arc::new(Mutex::new(HashMap::new())),
-            controllers: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { manager, runtime }
     }
 }
 
 type SharedWorkflowRuns = Arc<Mutex<HashMap<String, WorkflowRunRecord>>>;
-type SharedWorkflowControllers = Arc<Mutex<HashMap<String, Arc<SubAgentWorkflowDriver>>>>;
+type SharedWorkflowControllers = Arc<Mutex<HashMap<String, Arc<WorkflowRunController>>>>;
+
+struct WorkflowRunController {
+    driver: Arc<SubAgentWorkflowDriver>,
+    vm_cancel: WorkflowRunCancel,
+    run_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl WorkflowRunController {
+    fn new(driver: Arc<SubAgentWorkflowDriver>, vm_cancel: WorkflowRunCancel) -> Self {
+        Self {
+            driver,
+            vm_cancel,
+            run_handle: Mutex::new(None),
+        }
+    }
+
+    fn set_run_handle(&self, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut guard) = self.run_handle.lock() {
+            *guard = Some(handle);
+        }
+    }
+
+    fn cancel(&self) {
+        self.vm_cancel.cancel();
+        self.driver.force_cancel_all();
+        if let Ok(mut guard) = self.run_handle.lock()
+            && let Some(handle) = guard.take()
+        {
+            handle.abort();
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct WorkflowRunSummary {
@@ -79,13 +104,13 @@ struct WorkflowRunSummary {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowSchemaError {
     task_id: String,
     message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowRunRecord {
     run_id: String,
     status: WorkflowRunStatus,
@@ -101,6 +126,10 @@ struct WorkflowRunRecord {
     result: Option<Value>,
     execution: Option<IrWorkflowExecution>,
     error: Option<String>,
+    #[serde(default)]
+    verify_on_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification: Option<Value>,
 }
 
 impl WorkflowRunRecord {
@@ -125,6 +154,8 @@ impl WorkflowRunRecord {
             result: None,
             execution: None,
             error: None,
+            verify_on_complete: false,
+            verification: None,
         }
     }
 
@@ -163,7 +194,7 @@ impl WorkflowRunRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WorkflowRunStatus {
     Running,
@@ -240,6 +271,11 @@ impl ToolSpec for WorkflowTool {
                 "wait": {
                     "type": "boolean",
                     "description": "For action=start, wait for completion instead of returning immediately."
+                },
+                "verify": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "After a successful workflow completion, run quick workspace verifier gates (auto/quick profile)."
                 }
             },
             "required": [],
@@ -279,6 +315,7 @@ impl ToolSpec for WorkflowTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let state = shared_workflow_state(&context.workspace);
         match parse_workflow_action(&input)? {
             WorkflowAction::Start => {
                 let wait = optional_bool(&input, "wait", false);
@@ -287,8 +324,7 @@ impl ToolSpec for WorkflowTool {
                     context,
                     self.manager.clone(),
                     self.runtime.clone(),
-                    self.runs.clone(),
-                    self.controllers.clone(),
+                    state,
                     wait,
                 )
                 .await
@@ -299,16 +335,13 @@ impl ToolSpec for WorkflowTool {
                     context,
                     self.manager.clone(),
                     self.runtime.clone(),
-                    self.runs.clone(),
-                    self.controllers.clone(),
+                    state,
                     true,
                 )
                 .await
             }
-            WorkflowAction::Status => status_workflow(input, self.runs.clone()),
-            WorkflowAction::Cancel => {
-                cancel_workflow(input, self.runs.clone(), self.controllers.clone()).await
-            }
+            WorkflowAction::Status => status_workflow(input, state),
+            WorkflowAction::Cancel => cancel_workflow(input, state).await,
         }
     }
 }
@@ -319,34 +352,44 @@ async fn start_workflow(
     context: &ToolContext,
     manager: SharedSubAgentManager,
     runtime: SubAgentRuntime,
-    runs: SharedWorkflowRuns,
-    controllers: SharedWorkflowControllers,
+    state: Arc<WorkflowWorkspaceState>,
     wait: bool,
 ) -> Result<ToolResult, ToolError> {
     let source = workflow_source(&input, context)?;
     let args = input.get("args").cloned().unwrap_or(Value::Null);
     let token_budget = optional_u64(&input, "token_budget", 0);
     let token_budget = (token_budget > 0).then_some(token_budget);
+    let verify_on_complete = optional_bool(&input, "verify", false);
     let run_id = format!("workflow_{}", &Uuid::new_v4().to_string()[..8]);
 
     {
-        let mut runs_guard = lock_mutex(&runs)?;
-        runs_guard.insert(
+        let mut runs_guard = lock_mutex(&state.runs)?;
+        let mut record = WorkflowRunRecord::new(
             run_id.clone(),
-            WorkflowRunRecord::new(
-                run_id.clone(),
-                source.path.clone(),
-                token_budget,
-                source.spec.as_ref(),
-            ),
+            source.path.clone(),
+            token_budget,
+            source.spec.as_ref(),
         );
+        record.verify_on_complete = verify_on_complete;
+        runs_guard.insert(run_id.clone(), record.clone());
+        state.record_snapshot(&record);
     }
 
-    let driver =
-        SubAgentWorkflowDriver::new(run_id.clone(), manager, runtime, runs.clone(), token_budget);
+    let driver = SubAgentWorkflowDriver::new(
+        run_id.clone(),
+        manager,
+        runtime,
+        state.clone(),
+        token_budget,
+    );
+    let vm_cancel = WorkflowRunCancel::new();
+    let controller = Arc::new(WorkflowRunController::new(
+        driver.clone(),
+        vm_cancel.clone(),
+    ));
     {
-        let mut controllers_guard = lock_mutex(&controllers)?;
-        controllers_guard.insert(run_id.clone(), driver.clone());
+        let mut controllers_guard = lock_mutex(&state.controllers)?;
+        controllers_guard.insert(run_id.clone(), controller.clone());
     }
 
     let run = run_workflow_vm(
@@ -355,24 +398,29 @@ async fn start_workflow(
         source.spec,
         args,
         driver,
-        runs.clone(),
-        controllers.clone(),
+        state.clone(),
+        context.clone(),
+        vm_cancel,
     );
     if wait {
         run.await;
     } else {
-        spawn_supervised("workflow-run", std::panic::Location::caller(), run);
+        let handle = spawn_supervised("workflow-run", std::panic::Location::caller(), run);
+        controller.set_run_handle(handle);
     }
 
-    workflow_result_for(&run_id, runs)
+    workflow_result_for(&run_id, state)
 }
 
-fn status_workflow(input: Value, runs: SharedWorkflowRuns) -> Result<ToolResult, ToolError> {
+fn status_workflow(
+    input: Value,
+    state: Arc<WorkflowWorkspaceState>,
+) -> Result<ToolResult, ToolError> {
     if let Some(run_id) = optional_str(&input, "run_id") {
-        return workflow_result_for(run_id, runs);
+        return workflow_result_for(run_id, state);
     }
     let mut summaries = {
-        let runs_guard = lock_mutex(&runs)?;
+        let runs_guard = lock_mutex(&state.runs)?;
         runs_guard
             .values()
             .map(WorkflowRunRecord::summary)
@@ -389,41 +437,46 @@ fn status_workflow(input: Value, runs: SharedWorkflowRuns) -> Result<ToolResult,
 
 async fn cancel_workflow(
     input: Value,
-    runs: SharedWorkflowRuns,
-    controllers: SharedWorkflowControllers,
+    state: Arc<WorkflowWorkspaceState>,
 ) -> Result<ToolResult, ToolError> {
     let run_id =
         optional_str(&input, "run_id").ok_or_else(|| ToolError::missing_field("run_id"))?;
     let controller = {
-        let mut controllers_guard = lock_mutex(&controllers)?;
+        let mut controllers_guard = lock_mutex(&state.controllers)?;
         controllers_guard.remove(run_id)
     };
     if let Some(controller) = controller {
-        controller.force_cancel_all();
+        controller.cancel();
     }
-    {
-        let mut runs_guard = lock_mutex(&runs)?;
+    let snapshot = {
+        let mut runs_guard = lock_mutex(&state.runs)?;
         let record = runs_guard.get_mut(run_id).ok_or_else(|| {
             ToolError::invalid_input(format!("Unknown workflow run_id '{run_id}'"))
         })?;
         record.status = WorkflowRunStatus::Cancelled;
         record.completed_at_ms = Some(now_ms());
         record.error = Some("cancelled by workflow tool".to_string());
-    }
-    workflow_result_for(run_id, runs)
+        record.clone()
+    };
+    state.record_snapshot(&snapshot);
+    workflow_result_for(run_id, state)
 }
 
+// Pre-existing spawn signature that grew `vm_cancel` for the cancel-interrupt
+// wiring; the args mirror one workflow run's context and are consumed once.
+#[allow(clippy::too_many_arguments)]
 async fn run_workflow_vm(
     run_id: String,
     source: String,
     spec: Option<WorkflowSpec>,
     args: Value,
     driver: Arc<SubAgentWorkflowDriver>,
-    runs: SharedWorkflowRuns,
-    controllers: SharedWorkflowControllers,
+    state: Arc<WorkflowWorkspaceState>,
+    context: ToolContext,
+    vm_cancel: WorkflowRunCancel,
 ) {
     let result = WorkflowVm::new()
-        .run_script(&source, args, driver.clone())
+        .run_script_with_cancel(&source, args, driver.clone(), vm_cancel)
         .await;
     let mut status = WorkflowRunStatus::Completed;
     let mut output = None;
@@ -435,27 +488,68 @@ async fn run_workflow_vm(
             error = Some(err.to_string());
         }
     }
-    let task_records = driver.task_records_snapshot();
-    if let Ok(mut runs_guard) = runs.lock()
-        && let Some(record) = runs_guard.get_mut(&run_id)
-        && record.status != WorkflowRunStatus::Cancelled
-    {
-        record.status = status;
-        record.result = output;
-        record.error = error;
-        record.execution = spec
-            .as_ref()
-            .map(|spec| execution_from_declarative_spec(spec, task_records, status));
-        record.completed_at_ms = Some(now_ms());
+    let snapshot = {
+        let mut runs_guard = match state.runs.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        let Some(record) = runs_guard.get_mut(&run_id) else {
+            return;
+        };
+        if record.status != WorkflowRunStatus::Cancelled {
+            record.status = status;
+            record.result = output;
+            record.error = error.clone();
+            record.execution = spec.as_ref().map(|spec| {
+                execution_from_declarative_spec(spec, driver.task_records_snapshot(), status)
+            });
+            record.completed_at_ms = Some(now_ms());
+        }
+        record.clone()
+    };
+    let verify_on_complete = state
+        .runs
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(&run_id).map(|record| record.verify_on_complete))
+        .unwrap_or(false);
+    if status == WorkflowRunStatus::Completed && verify_on_complete {
+        match run_workflow_completion_gates(&context).await {
+            Ok(verification) => {
+                if let Ok(mut runs_guard) = state.runs.lock()
+                    && let Some(record) = runs_guard.get_mut(&run_id)
+                {
+                    record.verification = Some(verification);
+                }
+            }
+            Err(err) => {
+                if let Ok(mut runs_guard) = state.runs.lock()
+                    && let Some(record) = runs_guard.get_mut(&run_id)
+                {
+                    record.status = WorkflowRunStatus::Failed;
+                    record.error = Some(format!("verification gates failed: {err}"));
+                }
+            }
+        }
     }
-    if let Ok(mut controllers_guard) = controllers.lock() {
+    let snapshot = state
+        .runs
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(&run_id).cloned())
+        .unwrap_or(snapshot);
+    state.record_snapshot(&snapshot);
+    if let Ok(mut controllers_guard) = state.controllers.lock() {
         controllers_guard.remove(&run_id);
     }
 }
 
-fn workflow_result_for(run_id: &str, runs: SharedWorkflowRuns) -> Result<ToolResult, ToolError> {
+fn workflow_result_for(
+    run_id: &str,
+    state: Arc<WorkflowWorkspaceState>,
+) -> Result<ToolResult, ToolError> {
     let record = {
-        let runs_guard = lock_mutex(&runs)?;
+        let runs_guard = lock_mutex(&state.runs)?;
         runs_guard.get(run_id).cloned().ok_or_else(|| {
             ToolError::invalid_input(format!("Unknown workflow run_id '{run_id}'"))
         })?
@@ -892,6 +986,8 @@ fn is_write_or_shell_tool(tool: &str) -> bool {
     )
 }
 
+// Pre-existing builder that grew `allowed_tools`; each arg maps 1:1 onto one
+// optional field of the generated JS options literal.
 #[allow(clippy::too_many_arguments)]
 fn task_options_expression(
     description_expr: String,
@@ -964,13 +1060,12 @@ struct SubAgentWorkflowDriver {
     run_id: String,
     manager: SharedSubAgentManager,
     runtime: SubAgentRuntime,
-    runs: SharedWorkflowRuns,
+    state: Arc<WorkflowWorkspaceState>,
     completion_tx: mpsc::UnboundedSender<SubAgentCompletion>,
     completion_state: Arc<Mutex<CompletionState>>,
     child_ids: Arc<Mutex<Vec<String>>>,
     task_records: Arc<Mutex<HashMap<String, RuntimeTaskRecord>>>,
     total_budget: Option<u64>,
-    spent_budget: AtomicU64,
 }
 
 impl SubAgentWorkflowDriver {
@@ -978,7 +1073,7 @@ impl SubAgentWorkflowDriver {
         run_id: String,
         manager: SharedSubAgentManager,
         runtime: SubAgentRuntime,
-        runs: SharedWorkflowRuns,
+        state: Arc<WorkflowWorkspaceState>,
         total_budget: Option<u64>,
     ) -> Arc<Self> {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
@@ -986,13 +1081,12 @@ impl SubAgentWorkflowDriver {
             run_id,
             manager,
             runtime,
-            runs,
+            state,
             completion_tx,
             completion_state: Arc::new(Mutex::new(CompletionState::default())),
             child_ids: Arc::new(Mutex::new(Vec::new())),
             task_records: Arc::new(Mutex::new(HashMap::new())),
             total_budget,
-            spent_budget: AtomicU64::new(0),
         });
         spawn_completion_pump(driver.clone(), completion_rx);
         driver
@@ -1018,7 +1112,7 @@ impl SubAgentWorkflowDriver {
         {
             ids.push(agent_id.to_string());
         }
-        if let Ok(mut runs) = self.runs.lock()
+        if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
             && !record.child_ids.iter().any(|id| id == agent_id)
         {
@@ -1133,6 +1227,10 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
         let task_id = result.agent_id.clone();
         self.record_child(&task_id);
         self.record_task_request(&task_id, &request_record);
+        if let Some(limit) = self.total_budget {
+            let mut manager = self.manager.write().await;
+            manager.attach_shared_budget_scope(&task_id, &self.run_id, limit);
+        }
         let (tx, rx) = oneshot::channel();
         self.add_waiter_or_complete(task_id.clone(), tx);
         Ok(SpawnedTask {
@@ -1146,9 +1244,15 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
     }
 
     fn budget(&self) -> BudgetSnapshot {
+        let spent = self
+            .manager
+            .try_read()
+            .ok()
+            .map(|manager| manager.budget_spent_for_scope(&self.run_id))
+            .unwrap_or(0);
         BudgetSnapshot {
             total: self.total_budget,
-            spent: self.spent_budget.load(Ordering::Relaxed),
+            spent,
         }
     }
 
@@ -1166,14 +1270,15 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
                 format!("schema validation failed for {task_id}: {message}")
             }
         };
-        if let Ok(mut runs) = self.runs.lock()
+        if let Ok(mut runs) = self.state.runs.lock()
             && let Some(record) = runs.get_mut(&self.run_id)
         {
-            record.progress.push(message);
+            record.progress.push(message.clone());
             if let Some(schema_error) = schema_error {
                 record.schema_errors.push(schema_error);
             }
         }
+        self.state.record_progress(&self.run_id, &message);
     }
 }
 
@@ -1477,8 +1582,8 @@ async fn completion_from_manager(
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    TaskCompletion::Completed {
-        text: fallback_payload,
+    TaskCompletion::Failed {
+        message: format!("sub-agent '{agent_id}' did not report a terminal status within 1s"),
     }
 }
 
@@ -1520,6 +1625,262 @@ fn now_ms() -> u64 {
         .try_into()
         .unwrap_or(u64::MAX)
 }
+
+mod journal {
+    use super::{
+        SharedWorkflowControllers, SharedWorkflowRuns, WorkflowRunRecord, WorkflowRunStatus,
+    };
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+    use std::fs::OpenOptions;
+    use std::io::{BufRead, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tracing::warn;
+
+    const CODEWHALE_DIR: &str = ".codewhale";
+    const WORKFLOW_RUNS_FILE: &str = "workflow-runs.jsonl";
+
+    /// Per-workspace workflow state shared across tool-registry rebuilds.
+    pub(super) struct WorkflowWorkspaceState {
+        pub runs: SharedWorkflowRuns,
+        pub controllers: SharedWorkflowControllers,
+        journal: WorkflowRunJournal,
+    }
+
+    impl WorkflowWorkspaceState {
+        pub fn open(workspace: &Path) -> Arc<Self> {
+            let journal = WorkflowRunJournal::open(workspace);
+            let runs = Arc::new(Mutex::new(journal.hydrate_runs()));
+            Arc::new(Self {
+                runs,
+                controllers: Arc::new(Mutex::new(HashMap::new())),
+                journal,
+            })
+        }
+
+        pub fn record_snapshot(&self, record: &WorkflowRunRecord) {
+            if let Err(err) = self.journal.append_snapshot(record) {
+                warn!("workflow journal snapshot failed: {err}");
+            }
+        }
+
+        pub fn record_progress(&self, run_id: &str, message: &str) {
+            if let Err(err) = self.journal.append_progress(run_id, message) {
+                warn!("workflow journal progress failed: {err}");
+            }
+        }
+    }
+
+    fn workspace_store() -> &'static Mutex<HashMap<PathBuf, Arc<WorkflowWorkspaceState>>> {
+        static STORE: OnceLock<Mutex<HashMap<PathBuf, Arc<WorkflowWorkspaceState>>>> =
+            OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn shared_workflow_state(workspace: &Path) -> Arc<WorkflowWorkspaceState> {
+        let key = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        let mut store = workspace_store()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        store
+            .entry(key)
+            .or_insert_with(|| WorkflowWorkspaceState::open(workspace))
+            .clone()
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum WorkflowJournalRecord {
+        // Boxed: a full run record dwarfs the progress variant
+        // (clippy::large_enum_variant).
+        Snapshot { run: Box<WorkflowRunRecord> },
+        Progress { run_id: String, message: String },
+    }
+
+    #[derive(Debug)]
+    struct WorkflowRunJournal {
+        ledger_path: PathBuf,
+    }
+
+    impl WorkflowRunJournal {
+        fn open(workspace: &Path) -> Self {
+            let dir = workspace.join(CODEWHALE_DIR);
+            if let Err(err) = std::fs::create_dir_all(&dir) {
+                warn!(
+                    "workflow journal dir create failed ({}): {err}",
+                    dir.display()
+                );
+            }
+            let ledger_path = dir.join(WORKFLOW_RUNS_FILE);
+            if !ledger_path.exists()
+                && let Err(err) = std::fs::write(&ledger_path, "")
+            {
+                warn!(
+                    "workflow journal create failed ({}): {err}",
+                    ledger_path.display()
+                );
+            }
+            Self { ledger_path }
+        }
+
+        fn hydrate_runs(&self) -> HashMap<String, WorkflowRunRecord> {
+            let file = match std::fs::File::open(&self.ledger_path) {
+                Ok(file) => file,
+                Err(_) => return HashMap::new(),
+            };
+            let mut runs = HashMap::new();
+            for line in std::io::BufReader::new(file).lines() {
+                let Ok(line) = line else { continue };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let record = match serde_json::from_str::<WorkflowJournalRecord>(trimmed) {
+                    Ok(record) => record,
+                    Err(err) => {
+                        warn!("workflow journal skipped malformed line: {err}");
+                        continue;
+                    }
+                };
+                match record {
+                    WorkflowJournalRecord::Snapshot { run } => {
+                        runs.insert(run.run_id.clone(), *run);
+                    }
+                    WorkflowJournalRecord::Progress { run_id, message } => {
+                        if let Some(run) = runs.get_mut(&run_id) {
+                            run.progress.push(message);
+                        }
+                    }
+                }
+            }
+            // A run journaled as Running belongs to a process that is gone;
+            // without this it would show as live forever after a restart.
+            for run in runs.values_mut() {
+                if run.status == WorkflowRunStatus::Running {
+                    run.status = WorkflowRunStatus::Failed;
+                    run.error = Some(
+                        "process exited before the run completed (recovered on startup)"
+                            .to_string(),
+                    );
+                }
+            }
+            runs
+        }
+
+        fn append_record(&self, record: &WorkflowJournalRecord) -> std::io::Result<()> {
+            let mut line = serde_json::to_string(record)
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            line.push('\n');
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.ledger_path)?;
+            file.write_all(line.as_bytes())?;
+            file.flush()?;
+            Ok(())
+        }
+
+        fn append_snapshot(&self, record: &WorkflowRunRecord) -> std::io::Result<()> {
+            self.append_record(&WorkflowJournalRecord::Snapshot {
+                run: Box::new(record.clone()),
+            })
+        }
+
+        fn append_progress(&self, run_id: &str, message: &str) -> std::io::Result<()> {
+            self.append_record(&WorkflowJournalRecord::Progress {
+                run_id: run_id.to_string(),
+                message: message.to_string(),
+            })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn sample_record(run_id: &str, status: WorkflowRunStatus) -> WorkflowRunRecord {
+            WorkflowRunRecord {
+                run_id: run_id.to_string(),
+                status,
+                started_at_ms: 1,
+                completed_at_ms: None,
+                source_path: None,
+                workflow_id: Some("fixture".to_string()),
+                workflow_goal: Some("journal test".to_string()),
+                token_budget: None,
+                child_ids: Vec::new(),
+                progress: Vec::new(),
+                schema_errors: Vec::new(),
+                result: None,
+                execution: None,
+                error: None,
+                verify_on_complete: false,
+                verification: None,
+            }
+        }
+
+        #[test]
+        fn workflow_journal_hydrates_snapshots_and_progress() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let state = WorkflowWorkspaceState::open(tmp.path());
+            let running = sample_record("workflow_abc", WorkflowRunStatus::Running);
+            state.record_snapshot(&running);
+            state.record_progress("workflow_abc", "phase: scan");
+
+            let completed = WorkflowRunRecord {
+                status: WorkflowRunStatus::Completed,
+                completed_at_ms: Some(99),
+                progress: vec!["phase: scan".to_string()],
+                ..sample_record("workflow_abc", WorkflowRunStatus::Completed)
+            };
+            state.record_snapshot(&completed);
+
+            let reloaded = WorkflowWorkspaceState::open(tmp.path());
+            let runs = reloaded
+                .runs
+                .lock()
+                .expect("runs lock")
+                .get("workflow_abc")
+                .cloned()
+                .expect("hydrated run");
+            assert_eq!(runs.status, WorkflowRunStatus::Completed);
+            assert_eq!(runs.progress, vec!["phase: scan"]);
+            assert_eq!(runs.completed_at_ms, Some(99));
+        }
+
+        #[test]
+        fn workflow_journal_marks_orphaned_running_runs_failed() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let state = WorkflowWorkspaceState::open(tmp.path());
+            state.record_snapshot(&sample_record(
+                "workflow_orphan",
+                WorkflowRunStatus::Running,
+            ));
+
+            let reloaded = WorkflowWorkspaceState::open(tmp.path());
+            let run = reloaded
+                .runs
+                .lock()
+                .expect("runs lock")
+                .get("workflow_orphan")
+                .cloned()
+                .expect("hydrated run");
+            assert_eq!(run.status, WorkflowRunStatus::Failed);
+            assert!(
+                run.error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("process exited")),
+                "expected orphan recovery error, got {:?}",
+                run.error
+            );
+        }
+    }
+}
+
+use journal::{WorkflowWorkspaceState, shared_workflow_state};
 
 #[cfg(test)]
 mod tests {
@@ -1654,7 +2015,7 @@ mod tests {
             .expect("workflow run should complete");
         let payload: Value = serde_json::from_str(&result.content).expect("json result");
 
-        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["status"], "completed", "{payload}");
         assert_eq!(payload["result"]["out"], "child done");
         assert_eq!(payload["child_ids"].as_array().unwrap().len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -1670,7 +2031,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn declarative_parallel_spawn_failure_fails_before_reduce() {
+        let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
@@ -1786,7 +2149,7 @@ mod tests {
             .expect("dependency workflow should complete");
         let payload: Value = serde_json::from_str(&result.content).expect("json result");
 
-        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["status"], "completed", "{payload}");
         assert_eq!(payload["execution"]["status"], "succeeded");
         assert_eq!(
             payload["execution"]["leaf_results"][0]["output"],
@@ -1868,6 +2231,63 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn workflow_status_survives_tool_rebuild_via_journal() {
+        let _retry_guard = workflow_test_retry_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let (client, _calls) = fake_chat_client("journal-output").await;
+        let runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager.clone(),
+        );
+        let tool = WorkflowTool::new(manager.clone(), runtime.clone());
+
+        let run = tool
+            .execute(
+                json!({
+                    "action": "run",
+                    "script": "return { ok: true };"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("workflow run");
+        let run_payload: Value = serde_json::from_str(&run.content).expect("run json");
+        let run_id = run_payload["run_id"].as_str().expect("run id");
+
+        let journal_path = tmp.path().join(".codewhale/workflow-runs.jsonl");
+        assert!(
+            journal_path.exists(),
+            "journal should be created under workspace"
+        );
+
+        let rebuilt = WorkflowTool::new(
+            manager.clone(),
+            SubAgentRuntime::new(
+                stub_client(),
+                "deepseek-v4-flash".to_string(),
+                ctx.clone(),
+                true,
+                None,
+                manager,
+            ),
+        );
+        let status = rebuilt
+            .execute(json!({"action": "status", "run_id": run_id}), &ctx)
+            .await
+            .expect("workflow status after rebuild");
+        let status_payload: Value = serde_json::from_str(&status.content).expect("status json");
+        assert_eq!(status_payload["run_id"], run_id);
+        assert_eq!(status_payload["status"], "completed");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn workflow_status_surfaces_schema_failure_instead_of_null_success() {
         let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1880,9 +2300,9 @@ mod tests {
             ctx.clone(),
             true,
             None,
-            manager,
+            manager.clone(),
         );
-        let tool = WorkflowTool::new(runtime.manager.clone(), runtime);
+        let tool = WorkflowTool::new(manager, runtime);
 
         let run = tool
             .execute(
@@ -1967,7 +2387,7 @@ mod tests {
             .expect("declarative workflow should complete");
         let payload: Value = serde_json::from_str(&result.content).expect("json result");
 
-        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["status"], "completed", "{payload}");
         assert_eq!(payload["result"]["code-audit"], "audited");
         assert_eq!(payload["result"]["test-audit"], "audited");
         assert_eq!(payload["result"]["docs-audit"], "audited");
@@ -2002,6 +2422,129 @@ mod tests {
                 .iter()
                 .any(|message| message == "phase: parallel-audit")
         );
+    }
+
+    #[tokio::test]
+    async fn completion_from_manager_fails_closed_when_status_stays_running() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+
+        let completion =
+            completion_from_manager(manager, "missing_agent", "fallback".to_string()).await;
+        match completion {
+            TaskCompletion::Failed { message } => {
+                assert!(
+                    message.contains("did not report a terminal status"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected timeout failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn workflow_cancel_interrupts_vm_and_blocks_further_spawns() {
+        let _retry_guard = workflow_test_retry_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+        let (client, calls) = fake_chat_client("child done").await;
+        let runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager.clone(),
+        );
+        let tool = WorkflowTool::new(manager.clone(), runtime);
+
+        let started = tool
+            .execute(
+                json!({
+                    "action": "start",
+                    "script": r#"
+                        let n = 0;
+                        while (n < 20) {
+                            await task({ description: `task ${n}`, type: 'explore', allowedTools: [] });
+                            n++;
+                        }
+                        return n;
+                    "#
+                }),
+                &ctx,
+            )
+            .await
+            .expect("workflow start");
+        let run_id = started
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("run_id"))
+            .and_then(Value::as_str)
+            .expect("run_id metadata");
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let calls_before_cancel = calls.load(Ordering::SeqCst);
+        assert!(
+            calls_before_cancel >= 1,
+            "workflow should spawn at least one child before cancel"
+        );
+
+        let cancelled = tool
+            .execute(json!({"action": "cancel", "run_id": run_id}), &ctx)
+            .await
+            .expect("workflow cancel");
+        let cancelled_payload: Value =
+            serde_json::from_str(&cancelled.content).expect("cancel json");
+        assert_eq!(cancelled_payload["status"], "cancelled");
+
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        let calls_after_cancel = calls.load(Ordering::SeqCst);
+        assert!(
+            calls_after_cancel <= calls_before_cancel + 1,
+            "cancelled workflow kept spawning children: before={calls_before_cancel} after={calls_after_cancel}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn workflow_budget_spent_delegates_to_manager_scope() {
+        let _retry_guard = workflow_test_retry_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let (client, _calls) = fake_chat_client("budgeted").await;
+        let runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager.clone(),
+        );
+        let tool = WorkflowTool::new(manager.clone(), runtime);
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "run",
+                    "token_budget": 1000,
+                    "script": r#"
+                        await task({ description: 'budgeted work', type: 'explore', allowedTools: [] });
+                        return { spent: budget.spent(), total: budget.total, remaining: budget.remaining() };
+                    "#
+                }),
+                &ctx,
+            )
+            .await
+            .expect("budget workflow should complete");
+        let payload: Value = serde_json::from_str(&result.content).expect("json result");
+
+        assert_eq!(payload["status"], "completed", "{payload}");
+        assert_eq!(payload["result"]["spent"], 2);
+        assert_eq!(payload["result"]["total"], 1000);
+        assert_eq!(payload["result"]["remaining"], 998);
     }
 
     fn stub_client() -> DeepSeekClient {

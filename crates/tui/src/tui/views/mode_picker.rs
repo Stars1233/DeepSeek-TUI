@@ -10,7 +10,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::{Locale, MessageId, tr};
+use crate::localization::Locale;
 use crate::palette;
 use crate::tui::app::AppMode;
 use crate::tui::views::{
@@ -102,12 +102,12 @@ impl ModalView for ModePickerView {
             .title(Line::from(Span::styled(
                 " Mode ",
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .padding(Padding::uniform(1));
 
         let inner = block.inner(popup_area);
@@ -123,11 +123,7 @@ impl ModalView for ModePickerView {
             ],
         );
 
-        let mut lines = Vec::with_capacity(AppMode::CHOICES.len() + 1);
-        lines.push(Line::from(Span::styled(
-            tr(self.locale, MessageId::ModePickerPrompt),
-            Style::default().fg(palette::TEXT_MUTED),
-        )));
+        let mut lines = Vec::with_capacity(AppMode::CHOICES.len());
 
         for (idx, mode) in AppMode::CHOICES.iter().copied().enumerate() {
             let is_cursor = idx == self.cursor;
@@ -242,7 +238,7 @@ mod tests {
             let center = &buf[(w / 2, h / 2)];
             assert_eq!(
                 center.bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
 
@@ -258,15 +254,26 @@ mod tests {
 
     #[test]
     fn number_keys_select_modes() {
+        // Wave 7 picker roster: 1 Act, 2 Plan, 3 Multitask, 5 Operate.
         let mut view = ModePickerView::new(AppMode::Agent, Locale::En);
         let action = view.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        match action {
+            ViewAction::EmitAndClose(ViewEvent::ModeSelected { mode }) => {
+                assert_eq!(mode, AppMode::Multitask);
+            }
+            other => panic!("expected ModeSelected, got {other:?}"),
+        }
+
+        // The deprecated YOLO slot (4) is not offered by the picker.
+        let mut view = ModePickerView::new(AppMode::Agent, Locale::En);
+        let action = view.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
         assert!(matches!(action, ViewAction::None));
 
         let mut view = ModePickerView::new(AppMode::Agent, Locale::En);
-        let action = view.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        let action = view.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
         match action {
             ViewAction::EmitAndClose(ViewEvent::ModeSelected { mode }) => {
-                assert_eq!(mode, AppMode::Yolo);
+                assert_eq!(mode, AppMode::Operate);
             }
             other => panic!("expected ModeSelected, got {other:?}"),
         }

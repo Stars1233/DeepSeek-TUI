@@ -187,7 +187,10 @@ impl WebhookHookSink {
     pub fn new(url: String) -> Self {
         Self {
             url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 }

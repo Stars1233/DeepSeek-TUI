@@ -3485,6 +3485,13 @@ fn validate_route_rejects_mismatched_provider_model_tuple() {
     assert!(validate_route(ApiProvider::Together, DEFAULT_TOGETHER_MODEL).is_ok());
     assert!(validate_route(ApiProvider::Together, DEFAULT_TOGETHER_FLASH_MODEL).is_ok());
     assert!(validate_route(ApiProvider::Together, "deepseek-v4-pro").is_ok());
+
+    // Sakana AI (Fugu) is a native provider — DeepSeek ids must not cross-wire.
+    let err = validate_route(ApiProvider::Sakana, "deepseek-v4-flash")
+        .expect_err("sakana + deepseek flash must be rejected");
+    assert!(err.contains("deepseek-v4-flash"), "names the model: {err}");
+    assert!(err.contains("sakana"), "names the provider: {err}");
+    assert!(validate_route(ApiProvider::Sakana, DEFAULT_SAKANA_MODEL).is_ok());
 }
 
 #[test]

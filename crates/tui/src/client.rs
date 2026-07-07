@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 
 use codewhale_config::catalog::{
-    CatalogOffering, CatalogRefreshError, CatalogSource, CatalogStatus, ProviderCatalogCache,
-    ProviderCatalogDelta, base_url_fingerprint, now_unix,
+    CatalogOffering, CatalogRefreshError, CatalogSnapshot, CatalogSource, CatalogStatus,
+    ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
 };
 use codewhale_config::route::ReadyRouteCandidate;
 
@@ -1198,41 +1198,52 @@ impl DeepSeekClient {
             .text()
             .await
             .map_err(|_| CatalogRefreshError::Network)?;
-        let models =
-            parse_models_response(&body).map_err(|_| CatalogRefreshError::InvalidResponse)?;
-        if models.is_empty() {
-            return Err(CatalogRefreshError::EmptyList);
-        }
 
         let provider = self.catalog_provider_id();
         let fingerprint = base_url_fingerprint(&self.base_url);
         let fetched_at = now_unix();
-        let offerings = models
-            .into_iter()
-            .map(|model| CatalogOffering {
-                provider: provider.clone(),
-                wire_model_id: model.id,
-                canonical_model: None,
-                // This refresh calls the chat-model listing endpoint. A future
-                // provider-specific catalog adapter can split image/TTS/embed
-                // rows before they become executable route candidates.
-                endpoint_key: "chat".to_string(),
-                default_for_provider: false,
-                family: None,
-                limit: None,
-                cost: None,
-                // The chat-model listing endpoint does not state modalities; a
-                // future per-provider catalog adapter can fill this in. Left
-                // unknown rather than assumed text-only.
-                modalities: None,
-                reasoning: None,
-                reasoning_options: Vec::new(),
-                source: CatalogSource::Live {
-                    base_url_fingerprint: fingerprint.clone(),
-                    fetched_at,
-                },
-            })
-            .collect();
+
+        // OpenRouter returns extended capability metadata in its /models
+        // response (#3385). Capture limits, pricing, reasoning, and modalities
+        // from the live API instead of leaving them unknown.
+        let offerings: Vec<CatalogOffering> = if provider == "openrouter" {
+            let or_models = parse_openrouter_models_response(&body)?;
+            if or_models.is_empty() {
+                return Err(CatalogRefreshError::EmptyList);
+            }
+            or_models
+                .iter()
+                .map(|item| {
+                    openrouter_to_catalog_offering(item, &provider, &fingerprint, fetched_at)
+                })
+                .collect()
+        } else {
+            let models =
+                parse_models_response(&body).map_err(|_| CatalogRefreshError::InvalidResponse)?;
+            if models.is_empty() {
+                return Err(CatalogRefreshError::EmptyList);
+            }
+            models
+                .into_iter()
+                .map(|model| CatalogOffering {
+                    provider: provider.clone(),
+                    wire_model_id: model.id,
+                    canonical_model: None,
+                    endpoint_key: "chat".to_string(),
+                    default_for_provider: false,
+                    family: None,
+                    limit: None,
+                    cost: None,
+                    modalities: None,
+                    reasoning: None,
+                    reasoning_options: Vec::new(),
+                    source: CatalogSource::Live {
+                        base_url_fingerprint: fingerprint.clone(),
+                        fetched_at,
+                    },
+                })
+                .collect()
+        };
 
         Ok(ProviderCatalogDelta {
             provider,
@@ -1254,6 +1265,7 @@ impl DeepSeekClient {
         match self.fetch_catalog_delta().await {
             Ok(delta) => {
                 cache.record_success(delta, ttl_secs);
+                publish_provider_lake_snapshot(cache);
                 CatalogStatus::Fresh
             }
             Err(reason) => {
@@ -1262,6 +1274,7 @@ impl DeepSeekClient {
                     &base_url_fingerprint(&self.base_url),
                     reason,
                 );
+                publish_provider_lake_snapshot(cache);
                 CatalogStatus::Failed { reason }
             }
         }
@@ -1619,12 +1632,72 @@ struct ModelsListResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct OpenRouterModelsResponse {
+    data: Vec<OpenRouterModelItem>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ModelListItem {
     id: String,
     #[serde(default)]
     owned_by: Option<String>,
     #[serde(default)]
     created: Option<u64>,
+}
+
+/// OpenRouter `/models` response item with full capability metadata (#3385).
+#[derive(Debug, Deserialize)]
+struct OpenRouterModelItem {
+    id: String,
+    // Captured from OpenRouter for future display/deprecation surfaces. The
+    // current CatalogOffering shape has no honest fields for these yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    name: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    created: Option<u64>,
+    #[serde(default)]
+    context_length: Option<u32>,
+    #[serde(default)]
+    pricing: Option<OpenRouterPricing>,
+    #[serde(default)]
+    top_provider: Option<OpenRouterTopProvider>,
+    #[serde(default)]
+    supported_parameters: Option<Vec<String>>,
+    #[serde(default)]
+    architecture: Option<OpenRouterArchitecture>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    expiration_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterPricing {
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    completion: Option<String>,
+    #[serde(default)]
+    input_cache_read: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterTopProvider {
+    #[serde(default)]
+    context_length: Option<u32>,
+    #[serde(default)]
+    max_completion_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterArchitecture {
+    #[serde(default)]
+    modality: Option<String>,
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
+    #[serde(default)]
+    output_modalities: Option<Vec<String>>,
 }
 
 pub(super) fn parse_models_response(payload: &str) -> Result<Vec<AvailableModel>> {
@@ -1643,6 +1716,128 @@ pub(super) fn parse_models_response(payload: &str) -> Result<Vec<AvailableModel>
     models.sort_by(|a, b| a.id.cmp(&b.id));
     models.dedup_by(|a, b| a.id == b.id);
     Ok(models)
+}
+
+/// Parse an OpenRouter `/models` response, preserving server-side ordering and
+/// capturing full capability metadata (#3385).
+fn parse_openrouter_models_response(
+    payload: &str,
+) -> Result<Vec<OpenRouterModelItem>, CatalogRefreshError> {
+    let parsed: OpenRouterModelsResponse =
+        serde_json::from_str(payload).map_err(|_| CatalogRefreshError::InvalidResponse)?;
+    let mut seen = std::collections::HashSet::new();
+    let models: Vec<_> = parsed
+        .data
+        .into_iter()
+        .filter(|item| seen.insert(item.id.clone()))
+        .collect();
+    Ok(models)
+}
+
+fn publish_provider_lake_snapshot(cache: &ProviderCatalogCache) {
+    let offerings = cache.all_fresh_offerings(now_unix());
+    if offerings.is_empty() {
+        crate::provider_lake::clear_live_snapshot();
+    } else {
+        crate::provider_lake::set_live_snapshot(CatalogSnapshot { offerings });
+    }
+}
+
+/// Convert an OpenRouter model item into a [`CatalogOffering`] with live-sourced
+/// limits, pricing, reasoning, and modalities (#3385).
+fn openrouter_to_catalog_offering(
+    item: &OpenRouterModelItem,
+    provider: &str,
+    base_url_fingerprint: &str,
+    fetched_at: u64,
+) -> CatalogOffering {
+    use codewhale_config::models_dev::{ModelsDevCost, ModelsDevLimit, ModelsDevModalities};
+
+    let context_length = item
+        .top_provider
+        .as_ref()
+        .and_then(|tp| tp.context_length)
+        .or(item.context_length);
+
+    let max_output = item
+        .top_provider
+        .as_ref()
+        .and_then(|tp| tp.max_completion_tokens);
+
+    let limit = if context_length.is_some() || max_output.is_some() {
+        Some(ModelsDevLimit {
+            context: context_length.map(u64::from),
+            input: context_length.map(u64::from),
+            output: max_output.map(u64::from),
+        })
+    } else {
+        None
+    };
+
+    let cost = item.pricing.as_ref().map(|p| {
+        let parse_price = |s: &Option<String>| -> Option<f64> {
+            s.as_ref()
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|price_per_token| price_per_token * 1_000_000.0)
+        };
+        ModelsDevCost {
+            input: parse_price(&p.prompt),
+            output: parse_price(&p.completion),
+            cache_read: parse_price(&p.input_cache_read),
+            cache_write: None,
+        }
+    });
+
+    let reasoning = item.supported_parameters.as_ref().map(|params| {
+        params
+            .iter()
+            .any(|p| p == "reasoning" || p == "include_reasoning" || p.contains("reasoning"))
+    });
+
+    let modalities = item.architecture.as_ref().map(|arch| {
+        let mut input = arch.input_modalities.clone().unwrap_or_default();
+        let mut output = arch.output_modalities.clone().unwrap_or_default();
+        if input.is_empty()
+            && output.is_empty()
+            && let Some((left, right)) = arch
+                .modality
+                .as_deref()
+                .and_then(|value| value.split_once("->"))
+        {
+            input.extend(
+                left.split('+')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            );
+            output.extend(
+                right
+                    .split('+')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            );
+        }
+        ModelsDevModalities { input, output }
+    });
+
+    CatalogOffering {
+        provider: provider.to_string(),
+        wire_model_id: item.id.clone(),
+        canonical_model: None,
+        endpoint_key: "chat".to_string(),
+        default_for_provider: false,
+        family: None,
+        limit,
+        cost,
+        modalities,
+        reasoning,
+        reasoning_options: Vec::new(),
+        source: CatalogSource::Live {
+            base_url_fingerprint: base_url_fingerprint.to_string(),
+            fetched_at,
+        },
+    }
 }
 
 pub(super) fn system_to_instructions(system: Option<SystemPrompt>) -> Option<String> {

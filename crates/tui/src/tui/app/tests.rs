@@ -1476,7 +1476,8 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::parse("act"), Some(AppMode::Agent));
     assert_eq!(AppMode::parse("2"), Some(AppMode::Plan));
     assert_eq!(AppMode::parse("auto"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("3"), None);
+    assert_eq!(AppMode::parse("3"), Some(AppMode::Multitask));
+    assert_eq!(AppMode::parse("5"), Some(AppMode::Operate));
     assert_eq!(AppMode::parse("YOLO"), Some(AppMode::Yolo));
     assert_eq!(AppMode::parse("4"), Some(AppMode::Yolo));
     assert_eq!(AppMode::parse("fast"), None);
@@ -1484,27 +1485,41 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::Agent.as_setting(), "agent");
     assert_eq!(AppMode::Auto.as_setting(), "agent");
     assert_eq!(AppMode::Plan.display_name(), "Plan");
-    assert_eq!(AppMode::Auto.display_name(), "Agent");
-    assert_eq!(AppMode::Auto.label(), "AGENT");
+    assert_eq!(AppMode::Auto.display_name(), "Act");
+    assert_eq!(AppMode::Auto.label(), "ACT");
     assert_eq!(AppMode::Yolo.label(), "YOLO");
     assert_eq!(AppMode::Agent.number(), '1');
     assert_eq!(AppMode::Auto.number(), '1');
     assert_eq!(AppMode::Yolo.number(), '4');
     assert_eq!(
         AppMode::CHOICES,
-        [AppMode::Agent, AppMode::Plan, AppMode::Yolo]
+        [
+            AppMode::Agent,
+            AppMode::Plan,
+            AppMode::Multitask,
+            AppMode::Operate
+        ]
     );
     assert_eq!(
         AppMode::CYCLE,
-        [AppMode::Plan, AppMode::Agent, AppMode::Yolo]
+        [
+            AppMode::Plan,
+            AppMode::Agent,
+            AppMode::Multitask,
+            AppMode::Operate
+        ]
     );
 
     assert_eq!(AppMode::Plan.next(), AppMode::Agent);
-    assert_eq!(AppMode::Agent.next(), AppMode::Yolo);
+    assert_eq!(AppMode::Agent.next(), AppMode::Multitask);
+    assert_eq!(AppMode::Multitask.next(), AppMode::Operate);
+    assert_eq!(AppMode::Operate.next(), AppMode::Plan);
     assert_eq!(AppMode::Auto.next(), AppMode::Agent);
-    assert_eq!(AppMode::Yolo.next(), AppMode::Plan);
-    assert_eq!(AppMode::Plan.previous(), AppMode::Yolo);
+    assert_eq!(AppMode::Yolo.next(), AppMode::Agent);
+    assert_eq!(AppMode::Plan.previous(), AppMode::Operate);
     assert_eq!(AppMode::Agent.previous(), AppMode::Plan);
+    assert_eq!(AppMode::Multitask.previous(), AppMode::Agent);
+    assert_eq!(AppMode::Operate.previous(), AppMode::Multitask);
     assert_eq!(AppMode::Auto.previous(), AppMode::Agent);
     assert_eq!(AppMode::Yolo.previous(), AppMode::Agent);
 }
@@ -1524,9 +1539,13 @@ fn test_cycle_mode_reverse_transitions() {
 
     app.mode = AppMode::Plan;
     app.cycle_mode_reverse();
-    assert_eq!(app.mode, AppMode::Yolo);
+    assert_eq!(app.mode, AppMode::Operate);
 
-    app.mode = AppMode::Yolo;
+    app.mode = AppMode::Operate;
+    app.cycle_mode_reverse();
+    assert_eq!(app.mode, AppMode::Multitask);
+
+    app.mode = AppMode::Multitask;
     app.cycle_mode_reverse();
     assert_eq!(app.mode, AppMode::Agent);
 
@@ -1540,40 +1559,24 @@ fn test_cycle_mode_reverse_transitions() {
 }
 
 #[test]
-fn test_mode_switch_toasts_replace_previous_mode_switch_toast() {
+fn test_mode_switch_does_not_emit_redundant_toast() {
     let mut app = App::new(test_options(false), &Config::default());
     let first_mode = app.mode.next();
     let second_mode = first_mode.next();
-    let third_mode = second_mode.next();
 
     app.set_mode(first_mode);
     app.sync_status_message_to_toasts();
-    assert_eq!(app.status_toasts.len(), 1);
-    assert_eq!(
-        app.status_toasts.back().expect("mode toast").text,
-        format!("Switched to {} mode", first_mode.label())
-    );
+    assert!(app.status_toasts.is_empty());
 
     app.set_mode(second_mode);
     app.sync_status_message_to_toasts();
-    assert_eq!(app.status_toasts.len(), 1);
-    assert_eq!(
-        app.status_toasts.back().expect("mode toast").text,
-        format!("Switched to {} mode", second_mode.label())
-    );
-
-    app.set_mode(third_mode);
-    app.sync_status_message_to_toasts();
-    assert_eq!(app.status_toasts.len(), 1);
-    assert_eq!(
-        app.status_toasts.back().expect("mode toast").text,
-        format!("Switched to {} mode", third_mode.label())
-    );
+    assert!(app.status_toasts.is_empty());
 }
 
 #[test]
 fn test_mode_switch_toasts_do_not_disrupt_non_mode_toasts() {
     let mut app = App::new(test_options(false), &Config::default());
+    app.yolo_compat_notified = true;
     app.status_message = Some("Task queued".to_string());
     app.sync_status_message_to_toasts();
 
@@ -1582,16 +1585,11 @@ fn test_mode_switch_toasts_do_not_disrupt_non_mode_toasts() {
     app.set_mode(AppMode::Yolo);
     app.sync_status_message_to_toasts();
 
-    assert_eq!(app.status_toasts.len(), 2);
+    assert_eq!(app.status_toasts.len(), 1);
     assert!(
         app.status_toasts
             .iter()
             .any(|toast| toast.text == "Task queued")
-    );
-    assert!(
-        app.status_toasts
-            .iter()
-            .any(|toast| toast.text == "Switched to YOLO mode")
     );
 }
 
@@ -1643,13 +1641,16 @@ fn test_remove_queued_message_invalid_index() {
 #[test]
 fn test_set_mode_updates_state() {
     let mut app = App::new(test_options(false), &Config::default());
-    let initial_mode = app.mode;
+    app.set_mode(AppMode::Plan);
+    assert_eq!(app.mode, AppMode::Plan);
+    // The deprecated YOLO alias remaps to Agent (M6 back-compat shim).
     app.set_mode(AppMode::Yolo);
-    assert_eq!(app.mode, AppMode::Yolo);
-    assert_ne!(app.mode, initial_mode);
-    // Yolo mode should enable trust and shell
+    assert_eq!(app.mode, AppMode::Agent);
+    assert!(app.yolo);
+    // YOLO compat shim should enable trust, shell, and bypass approvals.
     assert!(app.trust_mode);
     assert!(app.allow_shell);
+    assert_eq!(app.approval_mode, ApprovalMode::Bypass);
 }
 
 #[test]
@@ -1716,7 +1717,7 @@ fn set_mode_plan_to_yolo_keeps_yolo_permissions_and_restores_agent_baseline() {
     app.approval_mode = ApprovalMode::Suggest;
 
     app.set_mode(AppMode::Yolo);
-    assert_eq!(app.mode, AppMode::Yolo);
+    assert_eq!(app.mode, AppMode::Agent);
     assert!(app.allow_shell);
     assert!(app.trust_mode);
     assert_eq!(app.approval_mode, ApprovalMode::Bypass);
@@ -1759,6 +1760,12 @@ fn base_policy_for_mode_projects_the_mode_permission_table() {
     assert!(auto.trust_mode);
     assert_eq!(auto.approval_mode, ApprovalMode::Never);
 
+    // Multitask / Operate use the Agent baseline.
+    let multitask = base_policy_for_mode(AppMode::Multitask, &prefs);
+    assert_eq!(multitask.approval_mode, ApprovalMode::Never);
+    let operate = base_policy_for_mode(AppMode::Operate, &prefs);
+    assert_eq!(operate.approval_mode, ApprovalMode::Never);
+
     // YOLO: full authority is represented by Bypass, not a separate
     // auto-approve field (#3736).
     let yolo = base_policy_for_mode(AppMode::Yolo, &prefs);
@@ -1777,6 +1784,46 @@ fn base_policy_for_mode_projects_the_mode_permission_table() {
     assert!(!agent_min.allow_shell);
     assert!(!agent_min.trust_mode);
     assert_eq!(agent_min.approval_mode, ApprovalMode::Suggest);
+}
+
+#[test]
+fn cycle_approval_posture_cycles_suggest_auto_bypass() {
+    let mut options = test_options(false);
+    options.start_in_agent_mode = true;
+    let mut app = App::new(options, &Config::default());
+    app.approval_mode = ApprovalMode::Suggest;
+
+    assert!(app.cycle_approval_posture());
+    assert_eq!(app.approval_mode, ApprovalMode::Auto);
+
+    assert!(app.cycle_approval_posture());
+    assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+
+    assert!(app.cycle_approval_posture());
+    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+}
+
+#[test]
+fn cycle_approval_posture_emits_rebinding_notice_once() {
+    let mut options = test_options(false);
+    options.start_in_agent_mode = true;
+    let mut app = App::new(options, &Config::default());
+
+    assert!(app.cycle_approval_posture());
+    let notices = app
+        .status_toasts
+        .iter()
+        .filter(|toast| toast.text.contains("moved to Ctrl+T"))
+        .count();
+    assert_eq!(notices, 1, "first cycle posts the rebinding notice");
+
+    assert!(app.cycle_approval_posture());
+    let notices = app
+        .status_toasts
+        .iter()
+        .filter(|toast| toast.text.contains("moved to Ctrl+T"))
+        .count();
+    assert_eq!(notices, 1, "notice is one-shot per session");
 }
 
 #[test]
@@ -1874,7 +1921,9 @@ fn set_mode_captures_agent_edits_as_the_durable_baseline() {
 #[test]
 fn yolo_start_with_default_config_restores_interactive_agent_shell_baseline() {
     let mut app = App::new(test_options(true), &Config::default());
-    assert_eq!(app.mode, AppMode::Yolo);
+    // --yolo starts in Agent mode with the full-access compat shim (M6).
+    assert_eq!(app.mode, AppMode::Agent);
+    assert!(app.yolo);
     assert!(app.allow_shell);
     assert!(app.trust_mode);
     assert_eq!(app.approval_mode, ApprovalMode::Bypass);
@@ -1896,7 +1945,9 @@ fn leaving_yolo_after_startup_restores_baseline_policies() {
     };
 
     let mut app = App::new(test_options(true), &config);
-    assert_eq!(app.mode, AppMode::Yolo);
+    // --yolo starts in Agent mode with the full-access compat shim (M6).
+    assert_eq!(app.mode, AppMode::Agent);
+    assert!(app.yolo);
     assert!(app.allow_shell);
     assert!(app.trust_mode);
     assert_eq!(app.approval_mode, ApprovalMode::Bypass);
@@ -2699,13 +2750,13 @@ fn submit_disposition_immediate_when_idle_and_online() {
 }
 
 #[test]
-fn submit_disposition_steer_when_busy_and_online_not_streaming() {
-    // v0.8.44: Busy + not streaming → Steer (Enter reaches engine during
-    // sub-agent/shell waits instead of silently queueing).
+fn submit_disposition_queue_when_busy_and_online_not_streaming() {
+    // Busy but not streaming means the model is still waiting, so Enter can
+    // amend the active turn immediately.
     let mut app = App::new(test_options(false), &Config::default());
     app.is_loading = true;
     app.offline_mode = false;
-    // streaming_message_index is None (default) → tool execution phase
+    // streaming_message_index is None (default) → waiting phase
     assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Steer);
 }
 
@@ -2735,6 +2786,51 @@ fn submit_disposition_offline_busy_queues() {
     // Offline mode always queues, even when streaming
     app.streaming_message_index = Some(0);
     assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Queue);
+}
+
+#[test]
+fn double_enter_detects_steering() {
+    let mut app = App::new(test_options(false), &Config::default());
+    // Simulate a busy engine that is already streaming so the first Enter
+    // queues; the second tap escalates to steer.
+    app.is_loading = true;
+    app.streaming_message_index = Some(0);
+
+    // First Enter → Queue (normal queueing)
+    let first = app.enter_with_double_tap();
+    assert_eq!(first, Some(SubmitDisposition::Queue));
+
+    // Second Enter within 500ms → Steer (double-tap detected)
+    let second = app.enter_with_double_tap();
+    assert_eq!(second, Some(SubmitDisposition::Steer));
+}
+
+#[test]
+fn double_enter_resets_after_timeout() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.is_loading = true;
+    app.streaming_message_index = Some(0);
+
+    // First Enter → Queue
+    let first = app.enter_with_double_tap();
+    assert_eq!(first, Some(SubmitDisposition::Queue));
+
+    // Simulate timeout by clearing last_enter_instant
+    app.last_enter_instant = None;
+
+    // Next Enter → Queue again (not Steer, because window expired)
+    let second = app.enter_with_double_tap();
+    assert_eq!(second, Some(SubmitDisposition::Queue));
+}
+
+#[test]
+fn double_enter_passes_through_when_idle() {
+    let mut app = App::new(test_options(false), &Config::default());
+    // Engine idle → Immediate (not affected by double-tap)
+    let first = app.enter_with_double_tap();
+    assert_eq!(first, Some(SubmitDisposition::Immediate));
+    let second = app.enter_with_double_tap();
+    assert_eq!(second, Some(SubmitDisposition::Immediate));
 }
 
 #[test]

@@ -234,13 +234,26 @@ fn build_file_tree_inner(
     }
 
     // Sort: dirs first, then files, alphabetical within each group.
-    children.sort_by(
-        |(a_name, _, a_dir), (b_name, _, b_dir)| match (a_dir, b_dir) {
+    // Decorate-sort-undecorate: precompute lowercase names to avoid
+    // allocating on every comparison.
+    let mut decorated: Vec<_> = children
+        .into_iter()
+        .map(|(name, path, is_dir)| {
+            let lower = name.to_lowercase();
+            (lower, name, path, is_dir)
+        })
+        .collect();
+    decorated.sort_by(
+        |(a_lower, _, _, a_dir), (b_lower, _, _, b_dir)| match (a_dir, b_dir) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
-            _ => a_name.to_lowercase().cmp(&b_name.to_lowercase()),
+            _ => a_lower.cmp(b_lower),
         },
     );
+    children = decorated
+        .into_iter()
+        .map(|(_, name, path, is_dir)| (name, path, is_dir))
+        .collect();
 
     // Compute depth for the current level.
     let depth = if single_root.is_some() {

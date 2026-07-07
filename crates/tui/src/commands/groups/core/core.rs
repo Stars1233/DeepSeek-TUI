@@ -610,6 +610,19 @@ pub fn home_dashboard(app: &mut App) -> CommandResult {
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeYoloModeTip));
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeYoloModeCaution));
         }
+        AppMode::Multitask => {
+            let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeAgentModeTip));
+            let _ = writeln!(
+                stats,
+                "  Multitask: light delegation — session model is operator; background workers"
+            );
+        }
+        AppMode::Operate => {
+            let _ = writeln!(
+                stats,
+                "  Operate: Fleet operator — /model route; decompose into workflow/Fleet; monitor"
+            );
+        }
         AppMode::Plan => {
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomePlanModeTip));
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomePlanModeChecklistTip));
@@ -1277,7 +1290,7 @@ mod tests {
         assert_eq!(app.view_stack.top_kind(), Some(ModalKind::SubAgents));
         assert_eq!(
             app.status_message,
-            Some("Fetching Fleet worker status...".to_string())
+            Some("Fetching Fleet status...".to_string())
         );
     }
 
@@ -1365,7 +1378,14 @@ mod tests {
 
     #[test]
     fn test_home_dashboard_mode_tips_for_each_mode() {
-        let modes = [AppMode::Agent, AppMode::Auto, AppMode::Yolo, AppMode::Plan];
+        let modes = [
+            AppMode::Agent,
+            AppMode::Auto,
+            AppMode::Yolo,
+            AppMode::Plan,
+            AppMode::Multitask,
+            AppMode::Operate,
+        ];
         for mode in modes {
             let mut app = create_test_app();
             app.mode = mode;

@@ -9,6 +9,33 @@ use crate::models::{ContentBlock, Message};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use serde_json::Value;
+use std::io;
+
+/// A writer that counts bytes written without storing them.
+pub(crate) struct CountingWriter {
+    count: usize,
+}
+
+impl CountingWriter {
+    pub(crate) fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+}
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.count += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 const LOG_FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const LOG_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -551,7 +578,11 @@ pub fn estimate_message_chars(messages: &[Message]) -> usize {
             match block {
                 ContentBlock::Text { text, .. } => total += text.len(),
                 ContentBlock::Thinking { thinking, .. } => total += thinking.len(),
-                ContentBlock::ToolUse { input, .. } => total += input.to_string().len(),
+                ContentBlock::ToolUse { input, .. } => {
+                    let mut cw = CountingWriter::new();
+                    let _ = serde_json::to_writer(&mut cw, input);
+                    total += cw.count();
+                }
                 ContentBlock::ToolResult { content, .. } => total += content.len(),
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ToolSearchToolResult { .. }

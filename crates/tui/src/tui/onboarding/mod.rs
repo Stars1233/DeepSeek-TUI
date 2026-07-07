@@ -33,7 +33,7 @@ pub const ONBOARDING_PROVIDER_OPTIONS: &[(char, ApiProvider)] = &[
 ];
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().style(Style::default().bg(palette::DEEPSEEK_INK));
+    let block = Block::default().style(Style::default().bg(palette::WHALE_BG));
     f.render_widget(block, area);
 
     const TOP_MARGIN: u16 = 2;
@@ -66,7 +66,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_SLATE))
+            .style(Style::default().bg(palette::WHALE_PANEL))
             .padding(Padding::new(2, 2, 1, 1));
         if !app.onboarding_workspace_trust_gate {
             let (step, total) = onboarding_step(app);
@@ -123,7 +123,7 @@ pub fn tips_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
         Line::from(Span::styled(
             app.tr(MessageId::OnboardTipsTitle).to_string(),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -304,7 +304,7 @@ fn provider_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
         Line::from(Span::styled(
             app.tr(MessageId::OnboardProviderTitle).to_string(),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),

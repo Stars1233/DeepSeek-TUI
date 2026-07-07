@@ -899,7 +899,8 @@ impl ProviderChain {
         self.providers
             .get(self.position)
             .copied()
-            .unwrap_or(self.providers[0])
+            .or_else(|| self.providers.first().copied())
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -928,6 +929,20 @@ impl ProviderChain {
     #[must_use]
     pub fn remaining(&self) -> usize {
         self.providers.len() - self.position
+    }
+}
+
+#[cfg(test)]
+mod provider_chain_tests {
+    use super::*;
+
+    #[test]
+    fn current_on_empty_chain_returns_default_provider() {
+        let chain = ProviderChain {
+            providers: vec![],
+            position: 0,
+        };
+        assert_eq!(chain.current(), ProviderKind::default());
     }
 }
 
@@ -3014,27 +3029,8 @@ impl ConfigStore {
             }
             write_one_time_config_backup(&path)?;
         }
-        #[cfg(unix)]
-        {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)
-                .with_context(|| format!("failed to write config at {}", path.display()))?;
-            file.write_all(body.as_bytes())
-                .with_context(|| format!("failed to write config at {}", path.display()))?;
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .with_context(|| {
-                    format!("failed to set config permissions at {}", path.display())
-                })?;
-        }
-        #[cfg(not(unix))]
-        {
-            fs::write(&path, body)
-                .with_context(|| format!("failed to write config at {}", path.display()))?;
-        }
+        persistence::atomic_write(&path, body.as_bytes())
+            .with_context(|| format!("failed to write config at {}", path.display()))?;
         Ok(())
     }
 

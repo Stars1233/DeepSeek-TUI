@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use crate::task_manager::{TaskRecord, TaskStatus, TaskSummary};
 use crate::tools::subagent::{AgentWorkerStatus, MailboxMessage, SubAgentResult, SubAgentStatus};
-use crate::tui::app::{AgentProgressMeta, App, AppMode, TaskPanelEntry, TaskPanelEntryKind};
+use crate::tui::app::{
+    AgentProgressMeta, App, AppMode, SidebarFocus, TaskPanelEntry, TaskPanelEntryKind,
+};
 use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::pager::PagerView;
 use crate::tui::tool_routing::refreshes_workspace_context_on_completion;
@@ -15,6 +17,39 @@ use crate::tui::workspace_context;
 
 const SUBAGENT_TERMINAL_CARD_TTL: Duration = Duration::from_secs(5 * 60);
 const SUBAGENT_TERMINAL_CARD_MAX_RETAINED: usize = 24;
+
+fn agents_panel_has_content(app: &App) -> bool {
+    !app.subagent_cache.is_empty()
+        || !app.agent_progress.is_empty()
+        || active_fanout_counts(app).is_some()
+        || foreground_rlm_running(app)
+}
+
+fn foreground_rlm_running(app: &App) -> bool {
+    use crate::tui::history::{HistoryCell, ToolCell, ToolStatus};
+    app.active_cell.as_ref().is_some_and(|active| {
+        active.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                HistoryCell::Tool(ToolCell::Generic(generic))
+                    if matches!(
+                        generic.name.as_str(),
+                        "rlm_open" | "rlm_eval" | "rlm_configure" | "rlm_close" | "rlm"
+                    ) && generic.status == ToolStatus::Running
+            )
+        })
+    })
+}
+
+/// True when the Agents sidebar panel is on-screen and already owns fanout summary.
+pub(super) fn agents_sidebar_surface_visible(app: &App) -> bool {
+    match app.sidebar_focus {
+        SidebarFocus::Hidden => false,
+        SidebarFocus::Agents => true,
+        SidebarFocus::Auto => agents_panel_has_content(app),
+        _ => false,
+    }
+}
 
 pub(super) fn running_agent_count(app: &App) -> usize {
     let mut ids: std::collections::HashSet<&str> =
@@ -371,10 +406,7 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
             }
             updated
         } else {
-            let mut card = FanoutCard::new(
-                dispatch_kind.unwrap_or("rlm_eval").to_string(),
-                app.ui_locale,
-            );
+            let mut card = FanoutCard::new(dispatch_kind.unwrap_or("rlm_eval").to_string());
             card.upsert_worker(&agent_id, AgentLifecycle::Running);
             app.add_message(HistoryCell::SubAgent(SubAgentCell::Fanout(card)));
             let idx = app.history.len().saturating_sub(1);

@@ -40,7 +40,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         Line::from(Span::styled(
             app.tr(MessageId::OnboardLanguageTitle).to_string(),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),

@@ -939,8 +939,14 @@ mod tests {
 
     #[test]
     fn adjacent_tool_cells_render_as_one_railed_group() {
-        let cells = vec![exec_tool_cell("cargo test"), exec_tool_cell("cargo clippy")];
-        let revisions = vec![1u64, 1];
+        // Live foreground exec cells collapse to a single header line (copy
+        // dedupe #17), so a third cell is needed for a rail-continuation row.
+        let cells = vec![
+            exec_tool_cell("cargo test"),
+            exec_tool_cell("cargo clippy"),
+            exec_tool_cell("cargo fmt"),
+        ];
+        let revisions = vec![1u64, 1, 1];
         let mut cache = TranscriptViewCache::new();
 
         cache.ensure(&cells, &revisions, 80, TranscriptRenderOptions::default());

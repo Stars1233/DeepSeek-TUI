@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> std::process::ExitCode {
     // Reset SIGPIPE to SIG_DFL so piping codewhale output into a command that
     // exits early (e.g. `codewhale doctor | head`) terminates the process

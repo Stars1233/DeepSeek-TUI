@@ -376,7 +376,8 @@ fn strip_code_fences(text: &str) -> Option<String> {
     if !text.contains("```") {
         return None;
     }
-    let mut lines = Vec::new();
+    let line_count = text.lines().count();
+    let mut lines = Vec::with_capacity(line_count);
     for line in text.lines() {
         if line.trim_start().starts_with("```") {
             continue;

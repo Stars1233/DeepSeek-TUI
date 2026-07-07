@@ -8,12 +8,13 @@ description = "Terminal UI for open-source and open-weight coding models"
 default-run = "codewhale-tui"
 
 [features]
-default = ["tui", "json", "toml"]
+default = ["tui", "json", "toml", "pdf"]
 tui = ["dep:schemaui", "schemaui/tui", "json", "toml"]
 web = ["dep:schemaui", "schemaui/web", "json", "toml"]
 json = ["schemaui/json"]
 toml = ["schemaui/toml"]
 long-running-tests = []
+pdf = ["dep:pdf-extract"]
 
 [[bin]]
 name = "codewhale-tui"
@@ -44,7 +45,7 @@ futures-util = "0.3.31"
 oauth2 = "5"
 ratatui = "0.30"
 regex = "1.11"
-reqwest = { workspace = true, features = ["blocking", "stream", "multipart", "form", "http2", "gzip", "brotli"] }
+reqwest = { workspace = true, features = ["blocking", "stream", "form", "http2", "gzip"] }
 rmcp = { version = "1.7.0", default-features = false, features = ["auth", "client"] }
 rustls.workspace = true
 qrcode = { version = "0.14", default-features = false }
@@ -77,7 +78,7 @@ ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 lru = "0.18"
 parking_lot = "0.12"
-pdf-extract = "0.10"
+pdf-extract = { version = "0.10", optional = true }
 tar = "0.4"
 flate2 = "1.1"
 sha2.workspace = true

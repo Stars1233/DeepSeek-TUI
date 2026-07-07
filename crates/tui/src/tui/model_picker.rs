@@ -17,9 +17,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::config::{ApiProvider, Config, model_completion_names_for_provider};
+use crate::config::{ApiProvider, Config};
 use crate::model_registry;
 use crate::palette;
+use crate::provider_lake::{all_catalog_models_for_provider, configured_providers};
 use crate::tui::app::{App, ReasoningEffort};
 use crate::tui::views::{
     ActionHint, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
@@ -43,6 +44,12 @@ const CODEX_PICKER_EFFORTS: &[ReasoningEffort] = &[
 const AUTO_MODEL_PICKER_EFFORTS: &[ReasoningEffort] = &[ReasoningEffort::Auto];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelListView {
+    Configured,
+    Catalog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pane {
     Model,
     Effort,
@@ -63,6 +70,7 @@ pub struct ModelPickerView {
     /// so the picker doesn't quietly forget the user's chosen IDs.
     show_custom_model_row: bool,
     model_rows: Vec<ModelPickerRow>,
+    view: ModelListView,
     /// Other providers considered "configured" (#3830), shown by default
     /// alongside `initial_provider`'s own rows without requiring the user to
     /// type a search query first. Uses the same definition as the
@@ -91,23 +99,28 @@ impl ModelPickerView {
             app.model.clone()
         };
         let model_rows = picker_model_rows_for_app(app);
-        let configured_providers = configured_providers_for(config, app.api_provider);
-        let mut selected_model_idx = model_rows.iter().position(|row| {
+        let configured_providers: Vec<_> = configured_providers(config, app.api_provider)
+            .into_iter()
+            .filter(|provider| *provider != app.api_provider)
+            .collect();
+        let default_visible_rows: Vec<_> = model_rows
+            .iter()
+            .filter(|row| {
+                model_row_visible_in_view(
+                    row.provider,
+                    app.api_provider,
+                    &configured_providers,
+                    ModelListView::Configured,
+                )
+            })
+            .collect();
+        let mut selected_model_idx = default_visible_rows.iter().position(|row| {
             row.id == initial_model
                 && (row.provider.is_none() || row.provider == Some(app.api_provider))
         });
         let show_custom_model_row = selected_model_idx.is_none();
         if show_custom_model_row {
-            // The custom row is conceptually appended right after every row
-            // the default (empty-query) view shows, so its index must match
-            // that count, not just the active-provider-scoped one (#3830) —
-            // `resolved_model`/`model_row_count` treat any selection at or
-            // past `visible_model_rows().len()` as "the custom row."
-            selected_model_idx = Some(default_visible_model_row_count(
-                &model_rows,
-                app.api_provider,
-                &configured_providers,
-            ));
+            selected_model_idx = Some(default_visible_rows.len());
         }
         let selected_model_idx = selected_model_idx.unwrap_or(0);
 
@@ -130,6 +143,7 @@ impl ModelPickerView {
             focus: Pane::Model,
             show_custom_model_row,
             model_rows,
+            view: ModelListView::Configured,
             configured_providers,
         }
     }
@@ -148,10 +162,11 @@ impl ModelPickerView {
             .iter()
             .filter(|row| {
                 if query.is_empty() {
-                    model_row_visible_by_default(
+                    model_row_visible_in_view(
                         row.provider,
                         self.initial_provider,
                         &self.configured_providers,
+                        self.view,
                     )
                 } else {
                     model_row_matches_query(row, query, self.initial_provider)
@@ -245,7 +260,10 @@ impl ModelPickerView {
             let Some(provider) = ApiProvider::parse(provider_key) else {
                 continue;
             };
-            if provider != self.initial_provider && !self.configured_providers.contains(&provider) {
+            if provider != self.initial_provider
+                && self.view == ModelListView::Configured
+                && !self.configured_providers.contains(&provider)
+            {
                 continue;
             }
             let model = model.trim();
@@ -338,6 +356,17 @@ impl ModelPickerView {
         };
     }
 
+    fn toggle_view(&mut self) {
+        self.view = match self.view {
+            ModelListView::Configured => ModelListView::Catalog,
+            ModelListView::Catalog => ModelListView::Configured,
+        };
+        let effort = self.resolved_effort();
+        self.selected_model_idx = 0;
+        self.clamp_model_selection();
+        self.select_effort_for_current_model(effort);
+    }
+
     fn build_event(&self) -> ViewEvent {
         let provider = self
             .resolved_provider()
@@ -361,7 +390,7 @@ impl ModelPickerView {
         focused: bool,
     ) {
         let border_style = if focused {
-            Style::default().fg(palette::DEEPSEEK_SKY)
+            Style::default().fg(palette::WHALE_INFO)
         } else {
             Style::default().fg(palette::BORDER_COLOR)
         };
@@ -506,10 +535,10 @@ fn fit_text(text: &str, width: usize) -> String {
 }
 
 #[cfg(test)]
-fn picker_model_ids_for_provider(provider: ApiProvider) -> Vec<&'static str> {
-    let mut models = vec!["auto"];
-    for id in model_completion_names_for_provider(provider) {
-        if id != "auto" && !models.contains(&id) {
+fn picker_model_ids_for_provider(provider: ApiProvider) -> Vec<String> {
+    let mut models = vec!["auto".to_string()];
+    for id in all_catalog_models_for_provider(provider) {
+        if id != "auto" && !models.iter().any(|m| m.eq_ignore_ascii_case(&id)) {
             models.push(id);
         }
     }
@@ -570,13 +599,7 @@ fn push_provider_model_rows(
 }
 
 fn provider_catalog_model_ids(provider: ApiProvider) -> Vec<String> {
-    let mut models = Vec::new();
-    for id in model_completion_names_for_provider(provider) {
-        if id != "auto" {
-            push_model_id(&mut models, id);
-        }
-    }
-    models
+    all_catalog_models_for_provider(provider)
 }
 
 fn provider_scoped_model_ids_for_app(app: &App, include_current_model: bool) -> Vec<String> {
@@ -584,8 +607,8 @@ fn provider_scoped_model_ids_for_app(app: &App, include_current_model: bool) -> 
     // separate custom/current-model row.
     let mut models = Vec::new();
     push_model_id(&mut models, "auto");
-    for id in model_completion_names_for_provider(app.api_provider) {
-        push_model_id(&mut models, id);
+    for id in all_catalog_models_for_provider(app.api_provider) {
+        push_model_id(&mut models, &id);
     }
 
     if let Some(model) = app
@@ -676,6 +699,22 @@ fn model_row_label(row: &ModelPickerRow, initial_provider: ApiProvider) -> Strin
     }
 }
 
+/// Whether a model row shows up without the user typing a search query,
+/// respecting the configured-only vs full-catalog view (#3830).
+fn model_row_visible_in_view(
+    row_provider: Option<ApiProvider>,
+    initial_provider: ApiProvider,
+    configured_providers: &[ApiProvider],
+    view: ModelListView,
+) -> bool {
+    match view {
+        ModelListView::Catalog => true,
+        ModelListView::Configured => {
+            model_row_visible_by_default(row_provider, initial_provider, configured_providers)
+        }
+    }
+}
+
 /// Whether a model row shows up without the user typing a search query
 /// (#3830): `auto`, the active provider's own rows, and any other
 /// provider's rows once that provider is "configured" — same definition the
@@ -689,35 +728,6 @@ fn model_row_visible_by_default(
         None => true,
         Some(provider) => provider == initial_provider || configured_providers.contains(&provider),
     }
-}
-
-/// Count of rows the default (empty-query) view shows — i.e. how many
-/// `model_rows` entries satisfy [`model_row_visible_by_default`]. Used to
-/// position the custom-model row right after them (#3830).
-fn default_visible_model_row_count(
-    rows: &[ModelPickerRow],
-    initial_provider: ApiProvider,
-    configured_providers: &[ApiProvider],
-) -> usize {
-    rows.iter()
-        .filter(|row| {
-            model_row_visible_by_default(row.provider, initial_provider, configured_providers)
-        })
-        .count()
-}
-
-/// Providers other than `active` that should be treated as "configured" for
-/// the `/model` picker's default view (#3830). Reuses the same predicate the
-/// `/provider` manager applies so the two pickers never disagree about what
-/// "configured" means.
-fn configured_providers_for(config: &Config, active: ApiProvider) -> Vec<ApiProvider> {
-    ApiProvider::sorted_for_display()
-        .into_iter()
-        .filter(|provider| {
-            *provider != active
-                && crate::config::provider_is_configured_for_active(config, *provider, active)
-        })
-        .collect()
 }
 
 fn picker_model_hint(id: &str) -> String {
@@ -777,6 +787,17 @@ impl ModalView for ModelPickerView {
             KeyCode::Esc => ViewAction::Close,
             KeyCode::Enter if self.model_row_count() == 0 => ViewAction::None,
             KeyCode::Enter => ViewAction::EmitAndClose(self.build_event()),
+            // Toggle between configured-only and full-catalog views (#3830).
+            // Handled before the query-typing arm so `a`/`A` always toggles
+            // instead of filtering the model list.
+            KeyCode::Char(c)
+                if key.modifiers.is_empty()
+                    && self.query.is_empty()
+                    && c.eq_ignore_ascii_case(&'a') =>
+            {
+                self.toggle_view();
+                ViewAction::None
+            }
             KeyCode::Char(ch)
                 if self.focus == Pane::Model
                     && !key
@@ -878,17 +899,24 @@ impl ModelPickerView {
         // wraps instead of clipping at narrow widths (#3732).
         let outer = Block::default()
             .title(Line::from(Span::styled(
-                " Model & thinking ",
+                match self.view {
+                    ModelListView::Configured => " Model & thinking ",
+                    ModelListView::Catalog => " Model & thinking · all ",
+                },
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK));
+            .style(Style::default().bg(palette::WHALE_BG));
         let inner = outer.inner(popup_area);
         outer.render(popup_area, buf);
 
+        let view_action = match self.view {
+            ModelListView::Configured => "browse all",
+            ModelListView::Catalog => "configured",
+        };
         let content = render_modal_footer(
             inner,
             buf,
@@ -897,6 +925,7 @@ impl ModelPickerView {
                 ActionHint::new("Tab", "switch"),
                 ActionHint::new("Type", "filter"),
                 ActionHint::new("Enter", "apply"),
+                ActionHint::new("A", view_action),
                 ActionHint::new("Esc", "cancel"),
             ],
         );
@@ -927,7 +956,10 @@ impl ModelPickerView {
             model_rows.push((label, hint));
         }
         let model_title = if self.query.trim().is_empty() {
-            "Model".to_string()
+            match self.view {
+                ModelListView::Configured => "Model".to_string(),
+                ModelListView::Catalog => "Model · all".to_string(),
+            }
         } else {
             format!("Model: {}", self.query.trim())
         };
@@ -1641,7 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_lists_openrouter_large_models() {
+    fn picker_lists_openrouter_catalog_models() {
         let (mut app, config, _lock) = create_test_app();
         app.api_provider = crate::config::ApiProvider::Openrouter;
         app.model_ids_passthrough = true;
@@ -1651,17 +1683,17 @@ mod tests {
         let view = ModelPickerView::new(&app, &config);
         let model_ids = view.visible_model_ids();
 
-        assert!(model_ids.contains(&"arcee-ai/trinity-large-thinking"));
-        assert!(model_ids.contains(&"xiaomi/mimo-v2.5-pro"));
-        assert!(model_ids.contains(&"minimax/minimax-m3"));
-        assert!(model_ids.contains(&"z-ai/glm-5.2"));
-        assert!(
-            model_ids
-                .iter()
-                .take(6)
-                .any(|id| *id == "minimax/minimax-m3"),
-            "MiniMax M3 should be visible in the first picker window on normal terminals"
-        );
+        for expected in [
+            "deepseek/deepseek-v4-pro",
+            "deepseek/deepseek-v4-flash",
+            "qwen/qwen3.6-flash",
+            "minimax/minimax-m3",
+        ] {
+            assert!(
+                model_ids.contains(&expected),
+                "missing {expected}: {model_ids:?}"
+            );
+        }
         assert!(!view.show_custom_model_row);
         assert_eq!(view.resolved_model(), "minimax/minimax-m3");
     }
@@ -1676,7 +1708,7 @@ mod tests {
         let view = ModelPickerView::new(&app, &config);
         let model_ids = view.visible_model_ids();
 
-        for expected in ["mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed", "mimo-v2.5"] {
+        for expected in ["mimo-v2.5-pro", "mimo-v2.5"] {
             assert!(model_ids.contains(&expected), "missing {expected}");
         }
         for deprecated in ["mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash"] {
@@ -2143,6 +2175,20 @@ mod tests {
     const BLOCKER_SIZES: [(u16, u16); 4] = [(80, 24), (100, 30), (120, 32), (160, 40)];
 
     #[test]
+    fn toggle_view_reveals_full_catalog_and_back() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (app, config, _lock) = create_test_app();
+        let mut view = ModelPickerView::new(&app, &config);
+        let configured_count = view.visible_model_rows().len();
+
+        view.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        assert!(view.visible_model_rows().len() > configured_count);
+
+        view.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        assert_eq!(view.visible_model_rows().len(), configured_count);
+    }
+
+    #[test]
     fn model_picker_is_usable_and_opaque_at_blocker_sizes() {
         use crate::tui::views::ViewStack;
         let (app, config, _lock) = create_test_app();
@@ -2173,7 +2219,7 @@ mod tests {
             let text = rows.join("\n");
 
             // Footer keeps every action (it wraps instead of clipping).
-            for label in ["move", "switch", "filter", "apply", "cancel"] {
+            for label in ["move", "switch", "filter", "apply", "browse all", "cancel"] {
                 assert!(text.contains(label), "{w}x{h}: missing '{label}' hint");
             }
             // The shared list/detail layout keeps both picker panes visible;
@@ -2189,7 +2235,7 @@ mod tests {
             );
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
             // No row exceeds the frame width (no horizontal overflow).

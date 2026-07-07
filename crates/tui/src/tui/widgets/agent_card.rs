@@ -6,8 +6,7 @@
 //! - [`DelegateCard`] — single `agent` invocation. Live tree of the
 //!   last 3 actions plus a header with status / glyph / role.
 //! - [`FanoutCard`] — `rlm` fanout (or any future multi-child dispatch).
-//!   Dot-grid of worker slots (`●` filled, `○` pending) plus an aggregate
-//!   counts line.
+//!   Dot-grid of worker slots (`●` filled, `○` pending); header owns lifecycle.
 //!
 //! Both cards are state machines updated by [`apply_to_delegate`] /
 //! [`apply_to_fanout`]. The sidebar (see `tui/sidebar.rs`) defers detail
@@ -17,7 +16,6 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tools::subagent::MailboxMessage;
 use crate::tui::ui_text::truncate_line_to_width;
@@ -208,16 +206,14 @@ impl WorkerSlot {
 pub struct FanoutCard {
     pub kind: String,
     pub workers: Vec<WorkerSlot>,
-    pub locale: Locale,
 }
 
 impl FanoutCard {
     #[must_use]
-    pub fn new(kind: impl Into<String>, locale: Locale) -> Self {
+    pub fn new(kind: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
             workers: Vec::new(),
-            locale,
         }
     }
 
@@ -337,20 +333,8 @@ impl FanoutCard {
             Span::styled(
                 self.dot_grid(),
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        let (done, running, failed, pending) = self.counts();
-        lines.push(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                tr(self.locale, MessageId::FanoutCounts)
-                    .replace("{done}", &done.to_string())
-                    .replace("{running}", &running.to_string())
-                    .replace("{failed}", &failed.to_string())
-                    .replace("{pending}", &pending.to_string()),
-                Style::default().fg(palette::TEXT_MUTED),
             ),
         ]));
         lines
@@ -710,7 +694,7 @@ mod tests {
 
     #[test]
     fn fanout_card_dot_grid_renders_stateful_worker_slots() {
-        let mut card = FanoutCard::new("fanout", Locale::En)
+        let mut card = FanoutCard::new("fanout")
             .with_workers(["w_1", "w_2", "w_3", "w_4", "w_5", "w_6", "w_7"]);
         card.upsert_worker("w_1", AgentLifecycle::Completed);
         card.upsert_worker("w_2", AgentLifecycle::Completed);
@@ -726,32 +710,30 @@ mod tests {
     }
 
     #[test]
-    fn fanout_card_aggregate_counts_match_dot_grid() {
-        let mut card =
-            FanoutCard::new("rlm", Locale::En).with_workers(["w_1", "w_2", "w_3", "w_4"]);
+    fn fanout_card_header_and_dot_grid_surface_aggregate_state() {
+        let mut card = FanoutCard::new("rlm").with_workers(["w_1", "w_2", "w_3", "w_4"]);
         card.upsert_worker("w_1", AgentLifecycle::Completed);
         card.upsert_worker("w_2", AgentLifecycle::Completed);
         card.upsert_worker("w_3", AgentLifecycle::Completed);
         card.upsert_worker("w_4", AgentLifecycle::Failed);
-        let rendered = render_to_strings(&card.render_lines(80));
-        // The stats row is the one carrying "running" too; the header may
-        // mention "done" alone via the lifecycle status badge.
-        let stats = rendered
-            .iter()
-            .find(|line| line.contains("running") && line.contains("pending"))
-            .expect("counts line present");
-        assert!(stats.contains("3 done"), "completed count: {stats}");
+        let rendered = render_to_strings(&card.render_lines(80)).join("\n");
         assert!(
-            stats.contains("1 failed"),
-            "failed/cancelled fold into the same bucket: {stats}"
+            rendered.contains("[done]") || rendered.contains("[failed]"),
+            "header should surface terminal lifecycle: {rendered}"
         );
-        assert!(stats.contains("0 running"), "no running: {stats}");
-        assert!(stats.contains("0 pending"), "no pending: {stats}");
+        assert!(
+            rendered.contains("\u{25CF}\u{25CF}\u{25CF}\u{00D7}"),
+            "dot grid should mirror worker states: {rendered}"
+        );
+        assert!(
+            !rendered.contains(" pending"),
+            "redundant counts line should stay omitted: {rendered}"
+        );
     }
 
     #[test]
     fn fanout_apply_inserts_unknown_worker_via_child_spawned() {
-        let mut card = FanoutCard::new("fanout", Locale::En);
+        let mut card = FanoutCard::new("fanout");
         let msg = MailboxMessage::ChildSpawned {
             parent_id: "root".into(),
             child_id: "agent_late".into(),
@@ -764,7 +746,7 @@ mod tests {
 
     #[test]
     fn fanout_started_claims_seeded_pending_slot_without_growing_grid() {
-        let mut card = FanoutCard::new("fanout", Locale::En).with_workers(["task:a", "task:b"]);
+        let mut card = FanoutCard::new("fanout").with_workers(["task:a", "task:b"]);
         let started =
             MailboxMessage::started("agent_live", crate::tools::subagent::SubAgentType::General);
 
@@ -785,7 +767,7 @@ mod tests {
 
     #[test]
     fn fanout_apply_transitions_worker_through_lifecycle() {
-        let mut card = FanoutCard::new("fanout", Locale::En).with_workers(["w_1"]);
+        let mut card = FanoutCard::new("fanout").with_workers(["w_1"]);
         let started = MailboxMessage::started("w_1", crate::tools::subagent::SubAgentType::General);
         apply_to_fanout(&mut card, &started);
         assert_eq!(card.workers[0].status, AgentLifecycle::Running);
@@ -814,7 +796,7 @@ mod tests {
         ];
         for (total, done, expected) in cases {
             let ids: Vec<String> = (0..*total).map(|i| format!("w_{i}")).collect();
-            let mut card = FanoutCard::new("fanout", Locale::En).with_workers(ids.iter().cloned());
+            let mut card = FanoutCard::new("fanout").with_workers(ids.iter().cloned());
             for id in ids.iter().take(*done) {
                 card.upsert_worker(id, AgentLifecycle::Completed);
             }
@@ -850,7 +832,7 @@ mod tests {
 
     #[test]
     fn fanout_interrupted_worker_leaves_running_counts() {
-        let mut card = FanoutCard::new("fanout", Locale::En).with_workers(["w_1", "w_2"]);
+        let mut card = FanoutCard::new("fanout").with_workers(["w_1", "w_2"]);
         apply_to_fanout(
             &mut card,
             &MailboxMessage::started("w_1", crate::tools::subagent::SubAgentType::General),
@@ -868,15 +850,20 @@ mod tests {
         assert_eq!(card.workers[0].status, AgentLifecycle::Interrupted);
         assert_eq!(card.workers[1].status, AgentLifecycle::Running);
 
-        let rendered = render_to_strings(&card.render_lines(80));
-        let stats = rendered
-            .iter()
-            .find(|line| line.contains("running") && line.contains("pending"))
-            .expect("counts line present");
-        assert!(stats.contains("1 running"), "{stats}");
+        // Copy dedupe (Wave 5c #4): the counts line is gone — the header and
+        // dot grid carry the aggregate state instead.
+        let rendered = render_to_strings(&card.render_lines(80)).join("\n");
         assert!(
-            stats.contains("1 failed"),
-            "interrupted folds into the non-running attention bucket: {stats}"
+            !rendered.contains("[interrupted]"),
+            "one interrupted worker must not mark the fanout interrupted while another runs: {rendered}"
+        );
+        assert!(
+            rendered.contains('\u{25D0}'),
+            "dot grid should keep the running worker glyph: {rendered}"
+        );
+        assert!(
+            rendered.contains('\u{25CC}'),
+            "dot grid should mark the interrupted worker: {rendered}"
         );
 
         let msg = MailboxMessage::Interrupted {
@@ -889,27 +876,25 @@ mod tests {
             rendered.contains("[interrupted]"),
             "aggregate header should surface interrupted once nothing runs: {rendered}"
         );
-        assert!(rendered.contains("0 running"), "{rendered}");
     }
 
     #[test]
-    fn fanout_counts_are_localized() {
+    fn fanout_card_omits_redundant_counts_line_when_header_and_grid_present() {
         let ids: Vec<String> = (0..16).map(|i| format!("w_{i}")).collect();
-        let mut card = FanoutCard::new("fanout", Locale::ZhHans).with_workers(ids.iter().cloned());
+        let mut card = FanoutCard::new("fanout").with_workers(ids.iter().cloned());
         for id in ids.iter().take(12) {
             card.upsert_worker(id, AgentLifecycle::Completed);
         }
         card.upsert_worker("w_12", AgentLifecycle::Running);
-        // w_13..w_15 stay Pending; 0 failed
 
         let rendered = render_to_strings(&card.render_lines(80));
-        let stats = rendered
-            .iter()
-            .find(|line| line.contains('·'))
-            .expect("counts line present");
-        assert!(stats.contains("已完成"), "{stats}");
-        assert!(stats.contains("运行中"), "{stats}");
-        assert!(stats.contains("失败"), "{stats}");
-        assert!(stats.contains("等待中"), "{stats}");
+        assert!(
+            rendered.iter().any(|line| line.contains('\u{25CF}')),
+            "dot grid should remain: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains('·')),
+            "counts line should be dropped: {rendered:?}"
+        );
     }
 }

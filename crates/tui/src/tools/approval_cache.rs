@@ -183,12 +183,35 @@ fn push_canonical_json(value: &Value, out: &mut String) {
         }
         Value::Number(value) => {
             out.push_str("number:");
-            out.push_str(&value.to_string());
+            // Avoid allocating via value.to_string().
+            if let Some(n) = value.as_f64() {
+                let _ = write!(out, "{n}");
+            } else if let Some(n) = value.as_i64() {
+                let _ = write!(out, "{n}");
+            } else if let Some(n) = value.as_u64() {
+                let _ = write!(out, "{n}");
+            } else {
+                out.push_str(&value.to_string());
+            }
         }
         Value::String(value) => {
             out.push_str("string:");
-            let encoded = serde_json::to_string(value).expect("serializing a string cannot fail");
-            out.push_str(&encoded);
+            // Emit JSON-encoded string without an intermediate allocation.
+            out.push('"');
+            for ch in value.chars() {
+                match ch {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if c.is_control() => {
+                        let _ = write!(out, "\\u{:04x}", c as u32);
+                    }
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
         }
         Value::Array(items) => {
             out.push('[');

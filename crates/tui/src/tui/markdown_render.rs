@@ -240,7 +240,7 @@ pub fn render_parsed_tagged(
         match &parsed.blocks[i] {
             Block::Heading { text, .. } => {
                 let style = Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD);
                 out.extend(render_wrapped_line_tagged(text, width, style, false, false));
             }
@@ -267,7 +267,7 @@ pub fn render_parsed_tagged(
                 });
             }
             Block::ListItem { bullet, text } => {
-                let bullet_style = Style::default().fg(palette::DEEPSEEK_SKY);
+                let bullet_style = Style::default().fg(palette::WHALE_INFO);
                 out.extend(render_list_line_tagged(
                     bullet,
                     text,
@@ -278,7 +278,7 @@ pub fn render_parsed_tagged(
             }
             Block::Code { line } => {
                 let code_style = Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::ITALIC);
                 out.extend(render_wrapped_line_tagged(
                     line, width, code_style, true, true,

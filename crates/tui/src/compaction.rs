@@ -914,10 +914,6 @@ pub struct CompactionResult {
     pub messages: Vec<Message>,
     /// Summary system prompt
     pub summary_prompt: Option<SystemPrompt>,
-    /// Messages that were removed from the active window
-    // TODO(v0.8.71): kept for replay compatibility; dead in production, see #3490
-    #[allow(dead_code)]
-    pub removed_messages: Vec<Message>,
     /// Number of retries used before success
     pub retries_used: u32,
 }
@@ -1008,7 +1004,6 @@ pub async fn compact_messages_safe(
             return Ok(CompactionResult {
                 messages: sanitize_retained_messages(pruned_messages),
                 summary_prompt: None,
-                removed_messages: Vec::new(),
                 retries_used: 0,
             });
         }
@@ -1041,7 +1036,6 @@ pub async fn compact_messages_safe(
                 return Ok(CompactionResult {
                     messages: sanitize_retained_messages(msgs),
                     summary_prompt: prompt,
-                    removed_messages: Vec::new(),
                     retries_used: attempt,
                 });
             }
@@ -2822,13 +2816,11 @@ mod tests {
         let result = CompactionResult {
             messages: vec![],
             summary_prompt: None,
-            removed_messages: vec![],
             retries_used: 2,
         };
 
         assert_eq!(result.retries_used, 2);
         assert!(result.messages.is_empty());
-        assert!(result.removed_messages.is_empty());
     }
 
     #[test]

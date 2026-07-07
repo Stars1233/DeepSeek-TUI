@@ -32,7 +32,7 @@ fn modal_block(title: &str) -> Block<'static> {
         )]))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette::BORDER_COLOR))
-        .style(Style::default().bg(palette::DEEPSEEK_INK))
+        .style(Style::default().bg(palette::WHALE_BG))
         .padding(Padding::uniform(1))
 }
 
@@ -654,7 +654,7 @@ fn build_list_lines(
     } else if let Some(status) = status {
         lines.push(Line::from(Span::styled(
             truncate(status, width),
-            Style::default().fg(palette::DEEPSEEK_SKY),
+            Style::default().fg(palette::WHALE_INFO),
         )));
     }
 
@@ -1545,7 +1545,7 @@ mod tests {
             assert!(!text.contains('X'), "{w}x{h}: background bleed-through");
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
 

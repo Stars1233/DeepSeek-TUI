@@ -58,6 +58,9 @@ pub enum ApprovalMode {
 }
 
 impl ApprovalMode {
+    /// Shift+Tab permission cycle order (#0.8.68 M2).
+    pub const PERMISSION_CYCLE: [Self; 3] = [Self::Suggest, Self::Auto, Self::Bypass];
+
     pub fn label(self) -> &'static str {
         match self {
             ApprovalMode::Auto => "AUTO",
@@ -75,6 +78,24 @@ impl ApprovalMode {
             "suggest" | "suggested" | "on-request" | "untrusted" => Some(ApprovalMode::Suggest),
             "never" | "deny" | "denied" => Some(ApprovalMode::Never),
             _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn cycle_permission_next(self) -> Self {
+        let Some(index) = Self::PERMISSION_CYCLE.iter().position(|mode| *mode == self) else {
+            return Self::Suggest;
+        };
+        Self::PERMISSION_CYCLE[(index + 1) % Self::PERMISSION_CYCLE.len()]
+    }
+
+    #[must_use]
+    pub fn permission_chip_label(self) -> &'static str {
+        match self {
+            Self::Suggest => "Ask",
+            Self::Auto => "Auto-Review",
+            Self::Bypass => "Full Access",
+            Self::Never => "Never",
         }
     }
 }
@@ -3003,12 +3024,45 @@ diff --git a/src/b.rs b/src/b.rs
         let joined = lines.join("\n");
         assert!(joined.contains("REVIEW"), "missing REVIEW badge:\n{joined}");
         assert_approval_key_badges_visible(&joined);
-        assert!(joined.contains("Choose"), "benign hint missing:\n{joined}");
+        // The selection prose moved into the per-option key badges; the footer
+        // keeps only the escape-hatch hints.
         assert!(
-            joined.contains("Enter selected option"),
-            "benign selection hint missing:\n{joined}"
+            joined.contains("full params"),
+            "footer controls hint missing:\n{joined}"
         );
         assert!(joined.contains("read_file"));
+    }
+
+    #[test]
+    fn approval_footer_hints_use_muted_contrast_tier() {
+        // #3380: the footer key hints ("v: full params · Esc: abort") must
+        // render one contrast tier above TEXT_HINT — TEXT_MUTED, the same
+        // color the app-wide ActionHint modal footers use for labels.
+        use crate::palette;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let view = ApprovalView::new(benign_request());
+        let (w, h) = (100u16, 40u16);
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        ModalView::render(&view, Rect::new(0, 0, w, h), &mut buf);
+
+        let target: Vec<String> = "full params".chars().map(|c| c.to_string()).collect();
+        let mut found = None;
+        for y in 0..h {
+            let symbols: Vec<String> = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            for x in 0..=(w as usize - target.len()) {
+                if symbols[x..x + target.len()] == target[..] {
+                    found = Some((u16::try_from(x).expect("column fits"), y));
+                }
+            }
+        }
+        let (x, y) = found.expect("footer key hints must be rendered");
+        assert_eq!(
+            buf[(x, y)].fg,
+            palette::TEXT_MUTED,
+            "footer key hints must use the muted (not hint) contrast tier"
+        );
     }
 
     #[test]
@@ -3026,8 +3080,8 @@ diff --git a/src/b.rs b/src/b.rs
         );
         assert_approval_key_badges_visible(&joined);
         assert!(
-            joined.contains("Enter selected option"),
-            "selection hint missing:\n{joined}"
+            joined.contains("full params"),
+            "footer controls hint missing:\n{joined}"
         );
         assert!(
             !joined.contains("active approval policy"),
@@ -3081,12 +3135,8 @@ diff --git a/src/b.rs b/src/b.rs
             "routine write must not use the destructive zh badge:\n{joined}"
         );
         assert!(
-            joined.contains("选择："),
-            "missing zh selection prefix:\n{joined}"
-        );
-        assert!(
-            joined.contains("Enter执行选中项，或直接按y/a/d"),
-            "missing zh one-step hint:\n{joined}"
+            joined.contains("v：完整参数"),
+            "missing zh footer controls hint:\n{joined}"
         );
         assert!(
             !joined.contains("影响："),

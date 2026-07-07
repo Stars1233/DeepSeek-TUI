@@ -21,25 +21,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Lifecycle status of a conversation thread.
-///
-/// Serialized as lowercase snake_case strings (e.g. `"running"`, `"archived"`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadStatus {
-    /// Thread is actively being worked on.
-    Running,
-    /// Thread exists but has no active work in progress.
-    Idle,
-    /// Thread has finished its task successfully.
-    Completed,
-    /// Thread encountered an unrecoverable error.
-    Failed,
-    /// Thread has been temporarily paused by the user.
-    Paused,
-    /// Thread has been archived and is hidden from default listings.
-    Archived,
-}
+// Re-export protocol's ThreadStatus so callers in the state crate and
+// external consumers (e.g. core) can reference a single canonical definition.
+pub use codewhale_protocol::ThreadStatus;
 
 /// Indicates how a session was initiated.
 ///
@@ -169,6 +153,8 @@ pub enum JobStateStatus {
     Queued,
     /// Job is currently executing.
     Running,
+    /// Job has been temporarily paused.
+    Paused,
     /// Job has finished successfully.
     Completed,
     /// Job has failed with an error.
@@ -263,6 +249,13 @@ struct SessionIndexEntry {
     thread_name: Option<String>,
     updated_at: i64,
     rollout_path: Option<PathBuf>,
+}
+
+/// Rewrite the session index once the append-only log grows large enough that
+/// full-file scans become costly. Lookups already dedupe by thread id, so
+/// compaction keeps only the latest entry per thread.
+fn session_index_compact_line_threshold() -> usize {
+    if cfg!(test) { 5 } else { 5_000 }
 }
 
 /// Persistent storage for conversation threads, messages, checkpoints, and jobs.
@@ -717,8 +710,12 @@ impl StateStore {
     pub fn mark_unarchived(&self, id: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            "UPDATE threads SET archived = 0, archived_at = NULL WHERE id = ?1",
-            params![id],
+            "UPDATE threads SET archived = 0, archived_at = NULL, status = CASE WHEN status = ?2 THEN ?3 ELSE status END WHERE id = ?1",
+            params![
+                id,
+                thread_status_to_str(&ThreadStatus::Archived),
+                thread_status_to_str(&ThreadStatus::Idle),
+            ],
         )
         .context("failed to unarchive thread")?;
         Ok(())
@@ -832,9 +829,9 @@ impl StateStore {
         time_delta_seconds: i64,
         now: i64,
     ) -> Result<Option<ThreadGoalRecord>> {
-        let changed = {
-            let conn = self.conn()?;
-            conn.execute(
+        let conn = self.conn()?;
+        let changed = conn
+            .execute(
                 r#"
                 UPDATE thread_goals
                 SET tokens_used = tokens_used + ?2,
@@ -844,12 +841,11 @@ impl StateStore {
                 "#,
                 params![thread_id, token_delta, time_delta_seconds, now],
             )
-            .context("failed to record thread goal usage")?
-        };
+            .context("failed to record thread goal usage")?;
         if changed == 0 {
             return Ok(None);
         }
-        self.get_thread_goal(thread_id)
+        Self::read_thread_goal(&conn, thread_id)
     }
 
     /// Increment the durable cross-turn continuation counter for a thread goal.
@@ -862,9 +858,9 @@ impl StateStore {
         thread_id: &str,
         now: i64,
     ) -> Result<Option<ThreadGoalRecord>> {
-        let changed = {
-            let conn = self.conn()?;
-            conn.execute(
+        let conn = self.conn()?;
+        let changed = conn
+            .execute(
                 r#"
                 UPDATE thread_goals
                 SET continuation_count = continuation_count + 1,
@@ -873,17 +869,23 @@ impl StateStore {
                 "#,
                 params![thread_id, now],
             )
-            .context("failed to record thread goal continuation")?
-        };
+            .context("failed to record thread goal continuation")?;
         if changed == 0 {
             return Ok(None);
         }
-        self.get_thread_goal(thread_id)
+        Self::read_thread_goal(&conn, thread_id)
     }
 
     /// Retrieve the persisted goal for a thread.
     pub fn get_thread_goal(&self, thread_id: &str) -> Result<Option<ThreadGoalRecord>> {
         let conn = self.conn()?;
+        Self::read_thread_goal(&conn, thread_id)
+    }
+
+    /// Read a goal on an already-held connection. The `record_*` mutators call
+    /// this instead of [`Self::get_thread_goal`], which would re-lock the
+    /// connection mutex and self-deadlock.
+    fn read_thread_goal(conn: &Connection, thread_id: &str) -> Result<Option<ThreadGoalRecord>> {
         conn.query_row(
             r#"
             SELECT thread_id, goal_id, objective, status, token_budget, tokens_used,
@@ -1288,39 +1290,55 @@ impl StateStore {
                     "SELECT thread_id, checkpoint_id, state_json, created_at FROM checkpoints WHERE thread_id = ?1 AND checkpoint_id = ?2",
                     params![thread_id, checkpoint_id],
                     |row| {
-                        let state_json: String = row.get(2)?;
-                        let state = serde_json::from_str(&state_json).unwrap_or(Value::Null);
-                        Ok(CheckpointRecord {
-                            thread_id: row.get(0)?,
-                            checkpoint_id: row.get(1)?,
-                            state,
-                            created_at: row.get(3)?,
-                        })
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
                     },
                 )
                 .optional()
                 .with_context(|| {
                     format!("failed to load checkpoint {checkpoint_id} for thread {thread_id}")
                 })?;
-            return Ok(row);
+            if let Some((thread_id, checkpoint_id, state_json, created_at)) = row {
+                let state = parse_checkpoint_state(&state_json)?;
+                return Ok(Some(CheckpointRecord {
+                    thread_id,
+                    checkpoint_id,
+                    state,
+                    created_at,
+                }));
+            }
+            return Ok(None);
         }
 
-        conn.query_row(
-            "SELECT thread_id, checkpoint_id, state_json, created_at FROM checkpoints WHERE thread_id = ?1 ORDER BY created_at DESC LIMIT 1",
-            params![thread_id],
-            |row| {
-                let state_json: String = row.get(2)?;
-                let state = serde_json::from_str(&state_json).unwrap_or(Value::Null);
-                Ok(CheckpointRecord {
-                    thread_id: row.get(0)?,
-                    checkpoint_id: row.get(1)?,
-                    state,
-                    created_at: row.get(3)?,
-                })
-            },
-        )
-        .optional()
-        .with_context(|| format!("failed to load latest checkpoint for thread {thread_id}"))
+        let row = conn
+            .query_row(
+                "SELECT thread_id, checkpoint_id, state_json, created_at FROM checkpoints WHERE thread_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                params![thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .with_context(|| format!("failed to load latest checkpoint for thread {thread_id}"))?;
+        if let Some((thread_id, checkpoint_id, state_json, created_at)) = row {
+            let state = parse_checkpoint_state(&state_json)?;
+            return Ok(Some(CheckpointRecord {
+                thread_id,
+                checkpoint_id,
+                state,
+                created_at,
+            }));
+        }
+        Ok(None)
     }
 
     /// List checkpoints for a thread, ordered by creation time (newest first).
@@ -1345,7 +1363,7 @@ impl StateStore {
         let mut out = Vec::new();
         while let Some(row) = rows.next().context("failed to iterate checkpoint rows")? {
             let state_json: String = row.get(2).context("failed to read checkpoint state json")?;
-            let state = serde_json::from_str(&state_json).unwrap_or(Value::Null);
+            let state = parse_checkpoint_state(&state_json)?;
             out.push(CheckpointRecord {
                 thread_id: row.get(0).context("failed to read checkpoint thread id")?,
                 checkpoint_id: row.get(1).context("failed to read checkpoint id")?,
@@ -1515,6 +1533,7 @@ impl StateStore {
                 )
             })?;
         writeln!(file, "{encoded}").context("failed to append session index entry")?;
+        self.maybe_compact_session_index()?;
         Ok(())
     }
 
@@ -1560,6 +1579,87 @@ impl StateStore {
             })
             .max_by_key(|entry| entry.updated_at);
         Ok(matched.and_then(|entry| entry.rollout_path.clone()))
+    }
+
+    fn maybe_compact_session_index(&self) -> Result<()> {
+        if !self.session_index_path.exists() {
+            return Ok(());
+        }
+        let line_count = BufReader::new(
+            OpenOptions::new()
+                .read(true)
+                .open(&self.session_index_path)
+                .with_context(|| {
+                    format!(
+                        "failed to read session index {}",
+                        self.session_index_path.display()
+                    )
+                })?,
+        )
+        .lines()
+        .filter(|line| {
+            line.as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .count();
+        if line_count <= session_index_compact_line_threshold() {
+            return Ok(());
+        }
+
+        let latest = self.session_index_map()?;
+        let compact_path = self.session_index_path.with_extension("jsonl.compact");
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&compact_path)
+                .with_context(|| {
+                    format!(
+                        "failed to open compact session index {}",
+                        compact_path.display()
+                    )
+                })?;
+            for entry in latest.values() {
+                let encoded = serde_json::to_string(entry)
+                    .context("failed to serialize compact session index entry")?;
+                writeln!(file, "{encoded}")
+                    .context("failed to write compact session index entry")?;
+            }
+        }
+        fs::rename(&compact_path, &self.session_index_path).with_context(|| {
+            format!(
+                "failed to replace session index {}",
+                self.session_index_path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn session_index_line_count(&self) -> Result<usize> {
+        if !self.session_index_path.exists() {
+            return Ok(0);
+        }
+        Ok(BufReader::new(
+            OpenOptions::new()
+                .read(true)
+                .open(&self.session_index_path)
+                .with_context(|| {
+                    format!(
+                        "failed to read session index {}",
+                        self.session_index_path.display()
+                    )
+                })?,
+        )
+        .lines()
+        .filter(|line| {
+            line.as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .count())
     }
 
     fn session_index_map(&self) -> Result<HashMap<String, SessionIndexEntry>> {
@@ -1681,10 +1781,15 @@ fn path_to_opt_string(path: Option<&Path>) -> Option<String> {
     path.map(|p| p.display().to_string())
 }
 
+fn parse_checkpoint_state(state_json: &str) -> Result<Value> {
+    serde_json::from_str(state_json).context("failed to parse checkpoint state json")
+}
+
 fn job_state_status_to_str(status: &JobStateStatus) -> &'static str {
     match status {
         JobStateStatus::Queued => "queued",
         JobStateStatus::Running => "running",
+        JobStateStatus::Paused => "paused",
         JobStateStatus::Completed => "completed",
         JobStateStatus::Failed => "failed",
         JobStateStatus::Cancelled => "cancelled",
@@ -1695,6 +1800,7 @@ fn job_state_status_from_str(value: &str) -> JobStateStatus {
     match value {
         "queued" => JobStateStatus::Queued,
         "running" => JobStateStatus::Running,
+        "paused" => JobStateStatus::Paused,
         "completed" => JobStateStatus::Completed,
         "failed" => JobStateStatus::Failed,
         "cancelled" => JobStateStatus::Cancelled,
@@ -1775,6 +1881,7 @@ fn row_to_thread_goal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadGoalRec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_state_store(name: &str) -> StateStore {
@@ -2158,5 +2265,53 @@ mod tests {
         // <CODEWHALE_HOME>/.codewhale/state.db, and the legacy ~/.deepseek
         // fallback is bypassed entirely.
         assert_eq!(default_state_db_path(), dir.join("state.db"));
+    }
+
+    #[test]
+    fn load_checkpoint_propagates_invalid_state_json() {
+        let store = temp_state_store("checkpoint-parse-error");
+        store
+            .upsert_thread(&test_thread("thread-1"))
+            .expect("upsert thread");
+        store
+            .save_checkpoint("thread-1", "broken", &json!({"ok": true}))
+            .expect("save checkpoint");
+
+        {
+            let conn = store.conn().expect("conn");
+            conn.execute(
+                "UPDATE checkpoints SET state_json = ?1 WHERE thread_id = ?2 AND checkpoint_id = ?3",
+                params!["not-json", "thread-1", "broken"],
+            )
+            .expect("corrupt checkpoint");
+        }
+
+        let err = store
+            .load_checkpoint("thread-1", Some("broken"))
+            .expect_err("invalid checkpoint json should fail");
+        assert!(
+            err.to_string()
+                .contains("failed to parse checkpoint state json")
+        );
+    }
+
+    #[test]
+    fn session_index_compacts_after_threshold() {
+        let store = temp_state_store("session-index-compact");
+        for idx in 0..6 {
+            store
+                .append_thread_name("thread-1", Some(format!("name-{idx}")), idx, None)
+                .expect("append session index entry");
+        }
+
+        let line_count = store
+            .session_index_line_count()
+            .expect("count session index lines");
+        assert_eq!(line_count, 1);
+
+        let name = store
+            .find_thread_name_by_id("thread-1")
+            .expect("lookup thread name");
+        assert_eq!(name.as_deref(), Some("name-5"));
     }
 }

@@ -98,6 +98,33 @@ struct CoreActionToolFallback {
     unavailable_reason: &'static str,
 }
 
+/// Pre-computed lowercased haystack + name for each fallback; built once.
+struct CachedFallback {
+    fallback: CoreActionToolFallback,
+    haystack: String,
+    name_lower: String,
+}
+
+static CACHED_FALLBACKS: std::sync::OnceLock<Vec<CachedFallback>> = std::sync::OnceLock::new();
+
+fn cached_fallbacks() -> &'static [CachedFallback] {
+    CACHED_FALLBACKS.get_or_init(|| {
+        CORE_ACTION_TOOL_FALLBACKS
+            .iter()
+            .map(|f| CachedFallback {
+                fallback: *f,
+                haystack: format!(
+                    "{}\n{}\n{}",
+                    f.name.to_lowercase(),
+                    f.description.to_lowercase(),
+                    f.unavailable_reason.to_lowercase(),
+                ),
+                name_lower: f.name.to_lowercase(),
+            })
+            .collect()
+    })
+}
+
 pub(super) fn should_default_defer_tool(name: &str, always_load: &HashSet<String>) -> bool {
     if always_load.contains(name) {
         return false;
@@ -321,8 +348,9 @@ fn active_tool_list_from_catalog(catalog: &[Tool], active: &HashSet<String>) -> 
     // and were activated mid-conversation by ToolSearch get appended at the
     // tail. Otherwise activating a deferred tool shifts every later tool's
     // byte offset and busts the cached prefix from that point onwards.
-    let mut head: Vec<Tool> = Vec::new();
-    let mut tail: Vec<Tool> = Vec::new();
+    let catalog_len = catalog.len();
+    let mut head: Vec<Tool> = Vec::with_capacity(catalog_len);
+    let mut tail: Vec<Tool> = Vec::with_capacity(catalog_len);
     for tool in catalog {
         if !active.contains(&tool.name) {
             continue;
@@ -368,15 +396,6 @@ fn tool_search_haystack(tool: &Tool) -> String {
     )
 }
 
-fn tool_search_fallback_haystack(fallback: CoreActionToolFallback) -> String {
-    format!(
-        "{}\n{}\n{}",
-        fallback.name.to_lowercase(),
-        fallback.description.to_lowercase(),
-        fallback.unavailable_reason.to_lowercase()
-    )
-}
-
 fn catalog_contains_tool(catalog: &[Tool], name: &str) -> bool {
     catalog.iter().any(|tool| tool.name == name)
 }
@@ -391,12 +410,12 @@ fn unavailable_core_action_tools_with_regex(
     }
     let regex = regex::Regex::new(query)
         .map_err(|err| ToolError::invalid_input(format!("Invalid regex query: {err}")))?;
-    Ok(CORE_ACTION_TOOL_FALLBACKS
+    Ok(cached_fallbacks()
         .iter()
-        .copied()
-        .filter(|fallback| !catalog_contains_tool(catalog, fallback.name))
-        .filter(|fallback| regex.is_match(&tool_search_fallback_haystack(*fallback)))
+        .filter(|cf| !catalog_contains_tool(catalog, cf.fallback.name))
+        .filter(|cf| regex.is_match(&cf.haystack))
         .take(max_results)
+        .map(|cf| cf.fallback)
         .collect())
 }
 
@@ -418,12 +437,12 @@ fn unavailable_core_action_tools_with_bm25_like(
     }
 
     let mut scored: Vec<(i64, CoreActionToolFallback)> = Vec::new();
-    for fallback in CORE_ACTION_TOOL_FALLBACKS {
-        if catalog_contains_tool(catalog, fallback.name) {
+    for cf in cached_fallbacks() {
+        if catalog_contains_tool(catalog, cf.fallback.name) {
             continue;
         }
-        let hay = tool_search_fallback_haystack(*fallback);
-        let name = fallback.name.to_lowercase();
+        let hay = &cf.haystack;
+        let name = &cf.name_lower;
         let mut score = 0i64;
         for term in &terms {
             if hay.contains(term) {
@@ -434,7 +453,7 @@ fn unavailable_core_action_tools_with_bm25_like(
             }
         }
         if score > 0 {
-            scored.push((score, *fallback));
+            scored.push((score, cf.fallback));
         }
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(b.1.name)));

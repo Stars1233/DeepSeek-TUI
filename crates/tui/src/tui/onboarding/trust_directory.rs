@@ -12,7 +12,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled(
         app.tr(MessageId::OnboardTrustTitle).to_string(),
         Style::default()
-            .fg(palette::DEEPSEEK_SKY)
+            .fg(palette::WHALE_INFO)
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));

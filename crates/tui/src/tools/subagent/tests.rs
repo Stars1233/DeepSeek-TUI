@@ -891,33 +891,6 @@ fn new_session_tools_use_single_agent_name() {
 }
 
 #[test]
-fn test_implementer_allowed_tools_include_writes() {
-    // Implementer is the write-heavy role; the deprecated
-    // `allowed_tools()` advisory list should reflect that the role
-    // can write/edit/patch even if today's runtime grants full
-    // inheritance.
-    #[allow(deprecated)]
-    let tools = SubAgentType::Implementer.allowed_tools();
-    assert!(tools.contains(&"write_file"));
-    assert!(tools.contains(&"edit_file"));
-    assert!(tools.contains(&"apply_patch"));
-}
-
-#[test]
-fn test_verifier_allowed_tools_include_test_runner_but_no_writes() {
-    // Verifier runs validation; it should not have write tools in
-    // its advisory list. The runtime will still gate writes through
-    // approval, but the advisory list signals intent.
-    #[allow(deprecated)]
-    let tools = SubAgentType::Verifier.allowed_tools();
-    assert!(tools.contains(&"run_tests"));
-    assert!(tools.contains(&"run_verifiers"));
-    assert!(tools.contains(&"diagnostics"));
-    assert!(!tools.contains(&"write_file"));
-    assert!(!tools.contains(&"apply_patch"));
-}
-
-#[test]
 fn test_parse_spawn_request_accepts_message_and_agent_type_aliases() {
     let input = json!({
         "message": "Find references to Foo",
@@ -4729,6 +4702,7 @@ fn stub_runtime() -> SubAgentRuntime {
         parent_agent_id: None,
         parent_completion_tx: None,
         fork_context: None,
+        parent_mode: crate::tui::app::AppMode::Agent,
         mcp_pool: None,
         step_api_timeout: DEFAULT_STEP_API_TIMEOUT,
         tool_timeout: DEFAULT_TOOL_TIMEOUT,
@@ -4780,6 +4754,12 @@ fn stub_client_for_provider(provider: &str) -> DeepSeekClient {
         }
         // Ollama is keyless (local runtime); extend per-provider as needed.
         "ollama" => {}
+        "sakana" => {
+            providers.sakana = crate::config::ProviderConfig {
+                api_key: Some("test-key".to_string()),
+                ..Default::default()
+            };
+        }
         other => panic!("extend stub_client_for_provider for provider {other}"),
     }
     let config = crate::config::Config {
@@ -5613,6 +5593,75 @@ fn faster_route_uses_known_deepseek_and_glm_family_siblings() {
     );
     assert_eq!(route.model, "z-ai/glm-5-turbo");
     assert_ne!(route.model, "z-ai/glm-5.1");
+}
+
+#[test]
+fn inherit_route_remaps_stale_deepseek_model_for_sakana_provider() {
+    let mut runtime = stub_runtime_for_provider("sakana");
+    runtime.model = "deepseek-v4-flash".to_string();
+
+    let route = fallback_subagent_assignment_route(
+        &runtime,
+        None,
+        ModelRoute::Inherit,
+        SubAgentThinking::Inherit,
+        "summarize the repo layout",
+    );
+    assert_eq!(route.model, "deepseek-v4-flash");
+
+    let validated = ensure_subagent_model_for_provider(&runtime, &route.model_route, route.model)
+        .expect("inherit should remap to operator route");
+    assert_eq!(validated, crate::config::DEFAULT_SAKANA_MODEL);
+    assert!(
+        !validated.contains("deepseek"),
+        "Sakana inherit must not keep DeepSeek ids: {validated}"
+    );
+}
+
+#[test]
+fn faster_route_remaps_stale_deepseek_model_for_sakana_provider() {
+    let mut runtime = stub_runtime_for_provider("sakana");
+    runtime.model = "deepseek-v4-flash".to_string();
+
+    let route = fallback_subagent_assignment_route(
+        &runtime,
+        None,
+        ModelRoute::Faster,
+        SubAgentThinking::Inherit,
+        "quick scan",
+    );
+    let validated = ensure_subagent_model_for_provider(&runtime, &route.model_route, route.model)
+        .expect("faster should remap to operator route");
+    assert_eq!(validated, crate::config::DEFAULT_SAKANA_MODEL);
+}
+
+#[test]
+fn fixed_route_rejects_deepseek_model_for_sakana_provider() {
+    let runtime = stub_runtime_for_provider("sakana");
+    let err = ensure_subagent_model_for_provider(
+        &runtime,
+        &ModelRoute::Fixed("deepseek-v4-flash".to_string()),
+        "deepseek-v4-flash".to_string(),
+    )
+    .expect_err("explicit DeepSeek pin must fail before spawn");
+    assert!(
+        err.to_string().contains("deepseek-v4-flash"),
+        "error should name the model: {err}"
+    );
+}
+
+#[test]
+fn normalize_requested_subagent_model_rejects_cross_namespace_for_sakana() {
+    let err = normalize_requested_subagent_model(
+        "deepseek-v4-flash",
+        "model",
+        crate::config::ApiProvider::Sakana,
+    )
+    .expect_err("Sakana must reject DeepSeek-only model ids at spawn");
+    assert!(
+        err.to_string().contains("deepseek-v4-flash"),
+        "error should name the model: {err}"
+    );
 }
 
 #[test]

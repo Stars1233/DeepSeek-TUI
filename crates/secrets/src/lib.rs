@@ -500,25 +500,32 @@ impl FileKeyringStore {
     }
 }
 
-#[cfg(unix)]
 fn write_private_file(path: &Path, body: &[u8]) -> Result<(), SecretsError> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(body)?;
-    Ok(())
+    atomic_write_private_file(path, body)
 }
 
-#[cfg(not(unix))]
-fn write_private_file(path: &Path, body: &[u8]) -> Result<(), SecretsError> {
-    fs::write(path, body)?;
+fn atomic_write_private_file(path: &Path, body: &[u8]) -> Result<(), SecretsError> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(SecretsError::Io)?;
+    use std::io::Write as _;
+    tmp.write_all(body).map_err(SecretsError::Io)?;
+    tmp.flush().map_err(SecretsError::Io)?;
+    tmp.as_file().sync_all().map_err(SecretsError::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        tmp.as_file()
+            .set_permissions(perms)
+            .map_err(SecretsError::Io)?;
+    }
+    tmp.persist(path).map_err(|e| SecretsError::Io(e.error))?;
     Ok(())
 }
 

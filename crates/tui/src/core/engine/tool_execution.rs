@@ -172,7 +172,7 @@ impl Engine {
             .call_tool(name, input)
             .await
             .map_err(|e| ToolError::execution_failed(format!("MCP tool failed: {e}")))?;
-        let content = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+        let content = serde_json::to_string(&result).unwrap_or_else(|_| result.to_string());
         Ok(ToolResult::success(content))
     }
 

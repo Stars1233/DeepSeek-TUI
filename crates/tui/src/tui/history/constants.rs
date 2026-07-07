@@ -24,3 +24,5 @@ pub(super) const TRANSCRIPT_RAIL: &str = "\u{258F} "; // ▏ + space
 pub(super) const TOOL_CARD_SUMMARY_LINES: usize = 4;
 pub(super) const TOOL_DONE_SYMBOL: &str = "•";
 pub(super) const TOOL_FAILED_SYMBOL: &str = "•";
+/// Compact Ctrl+B affordance for foreground shell waits in the live transcript.
+pub(super) const FOREGROUND_SHELL_WAIT_HINT: &str = "Ctrl+B → /jobs";

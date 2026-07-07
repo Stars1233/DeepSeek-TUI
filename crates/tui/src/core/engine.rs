@@ -51,7 +51,8 @@ use crate::tools::spec::{ApprovalRequirement, ToolError, ToolResult};
 use crate::tools::subagent::{
     Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion, SubAgentForkContext,
     SubAgentResult, SubAgentRuntime, SubAgentStatus, SubAgentThinking, SubAgentType,
-    new_shared_subagent_manager_with_timeout, resolve_subagent_assignment_route,
+    ensure_subagent_model_for_provider, new_shared_subagent_manager_with_timeout,
+    resolve_subagent_assignment_route,
 };
 use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
@@ -675,6 +676,8 @@ impl Engine {
         match mode {
             AppMode::Agent | AppMode::Auto => prompts::AGENT_MODE,
             AppMode::Plan => prompts::PLAN_MODE,
+            AppMode::Multitask => prompts::MULTITASK_MODE,
+            AppMode::Operate => prompts::OPERATE_MODE,
             AppMode::Yolo => prompts::YOLO_MODE,
         }
         .trim()
@@ -1502,6 +1505,7 @@ impl Engine {
                         .with_speech_output_dir(self.config.speech_output_dir.clone())
                         .with_mcp_pool(mcp_pool)
                         .with_todos(self.config.todos.clone())
+                        .with_parent_mode(self.current_mode)
                         .background_runtime();
                         let route = resolve_subagent_assignment_route(
                             &runtime,
@@ -1512,7 +1516,23 @@ impl Engine {
                             SubAgentThinking::Inherit,
                         )
                         .await;
-                        runtime.model = route.model;
+                        let effective_model = match ensure_subagent_model_for_provider(
+                            &runtime,
+                            &route.model_route,
+                            route.model,
+                        ) {
+                            Ok(model) => model,
+                            Err(err) => {
+                                let _ = self
+                                    .tx_event
+                                    .send(Event::error(ErrorEnvelope::fatal(format!(
+                                        "Failed to spawn sub-agent: {err}"
+                                    ))))
+                                    .await;
+                                continue;
+                            }
+                        };
+                        runtime.model = effective_model;
                         runtime.reasoning_effort = route.reasoning_effort;
                         runtime.reasoning_effort_auto = false;
 
@@ -2593,7 +2613,8 @@ impl Engine {
                 .with_speech_output_dir(self.config.speech_output_dir.clone())
                 .with_mcp_pool(mcp_pool.clone())
                 .with_todos(self.config.todos.clone())
-                .with_parent_completion_tx(self.tx_subagent_completion.clone());
+                .with_parent_completion_tx(self.tx_subagent_completion.clone())
+                .with_parent_mode(input_policy.mode);
                 if matches!(input_policy.mode, AppMode::Plan) {
                     rt.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Plan);
                 }

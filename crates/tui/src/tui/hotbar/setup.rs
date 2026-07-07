@@ -465,7 +465,7 @@ impl HotbarSetupView {
             Span::styled(
                 value,
                 Style::default().fg(if self.filter_focused {
-                    palette::DEEPSEEK_SKY
+                    palette::WHALE_INFO
                 } else {
                     palette::TEXT_PRIMARY
                 }),
@@ -530,7 +530,7 @@ impl HotbarSetupView {
             text,
             Style::default()
                 .fg(if selected {
-                    palette::DEEPSEEK_SKY
+                    palette::WHALE_INFO
                 } else {
                     palette::TEXT_PRIMARY
                 })
@@ -795,7 +795,7 @@ impl ModalView for HotbarSetupView {
             .title(" Hotbar setup ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK));
+            .style(Style::default().bg(palette::WHALE_BG));
         let inner = block.inner(popup_area);
         block.render(popup_area, buf);
 
@@ -902,6 +902,7 @@ mod tests {
     use super::*;
     use crate::config::{ApiProvider, Config};
     use crate::tui::app::TuiOptions;
+    use crate::tui::hotbar::HotbarActionRegistry;
     use crossterm::event::KeyModifiers;
     use std::path::PathBuf;
 
@@ -945,19 +946,103 @@ mod tests {
         let app = test_app();
         let view = HotbarSetupView::new(&app, &Config::default());
 
-        assert_eq!(
-            view.source_categories(),
-            &[
+        // Skills are registered from whatever the startup skill cache
+        // discovered, so only the always-present categories are asserted
+        // in order here (see wizard_lists_skill_and_mcp_sources_when_registered
+        // for the injected-source coverage).
+        assert!(
+            view.source_categories().starts_with(&[
                 HotbarActionCategory::App,
                 HotbarActionCategory::Route,
                 HotbarActionCategory::Slash,
-            ]
+            ]),
+            "unexpected wizard sources: {:?}",
+            view.source_categories()
+        );
+        // MCP tools only appear after a live discovery snapshot lands, and
+        // plugins stay a deferred source.
+        assert!(
+            !view
+                .source_categories()
+                .contains(&HotbarActionCategory::Mcp)
+        );
+        assert!(
+            !view
+                .source_categories()
+                .contains(&HotbarActionCategory::Plugin)
         );
         assert_eq!(view.selected_source(), Some(HotbarActionCategory::App));
         assert!(view.recommended_action_ids().contains("mode.agent"));
         // #3807: a fresh config seeds no bindings, so the wizard opens with
         // nothing checked until the user opts in.
         assert!(view.checked_action_ids().is_empty());
+    }
+
+    #[test]
+    fn wizard_lists_skill_and_mcp_sources_when_registered() {
+        let mut app = test_app();
+        let mut registry = HotbarActionRegistry::with_builtins();
+        registry.register_skills(&[("demo".to_string(), "Demo skill".to_string())]);
+        registry.replace_mcp_tools(Some(&crate::mcp::McpManagerSnapshot {
+            config_path: PathBuf::from("mcp.json"),
+            config_exists: true,
+            restart_required: false,
+            servers: vec![crate::mcp::McpServerSnapshot {
+                name: "search".to_string(),
+                enabled: true,
+                required: false,
+                transport: "stdio".to_string(),
+                command_or_url: "search-server".to_string(),
+                connect_timeout: 5,
+                execute_timeout: 5,
+                read_timeout: 5,
+                connected: true,
+                error: None,
+                tools: vec![crate::mcp::McpDiscoveredItem {
+                    name: "web_search".to_string(),
+                    model_name: "mcp_search_web_search".to_string(),
+                    description: Some("Search the web".to_string()),
+                }],
+                resources: Vec::new(),
+                prompts: Vec::new(),
+            }],
+        }));
+        app.hotbar_actions = registry;
+        let mut view = HotbarSetupView::new(&app, &Config::default());
+
+        assert!(
+            view.source_categories()
+                .contains(&HotbarActionCategory::Skill)
+        );
+        assert!(
+            view.source_categories()
+                .contains(&HotbarActionCategory::Mcp)
+        );
+
+        // Skills assign like any direct action; MCP tools stay assignable as
+        // composer-prefill actions.
+        assert!(view.select_slot(4));
+        assert!(view.select_action_by_id("skill.demo"));
+        assert!(view.assign_selected_action());
+        assert_eq!(
+            view.binding_for_slot(4)
+                .map(|binding| binding.action.as_str()),
+            Some("skill.demo")
+        );
+
+        assert!(view.select_action_by_id("mcp.search.web_search"));
+        assert!(
+            view.status_text().contains("prefill"),
+            "MCP tools must be labeled as prefill actions: {}",
+            view.status_text()
+        );
+        assert!(view.select_slot(5));
+        assert!(view.assign_selected_action());
+        assert_eq!(
+            view.binding_for_slot(5)
+                .map(|binding| binding.action.as_str()),
+            Some("mcp.search.web_search")
+        );
     }
 
     #[test]
@@ -1220,7 +1305,7 @@ mod tests {
             assert!(!text.contains('X'), "{w}x{h}: background bleed-through");
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
 

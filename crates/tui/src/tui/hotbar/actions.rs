@@ -1,12 +1,13 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
 use crate::commands::{self, CommandInfo, CommandResult};
-use crate::config::{ApiProvider, Config, model_completion_names_for_provider};
+use crate::config::{ApiProvider, Config};
 use crate::localization::Locale;
+use crate::provider_lake::all_catalog_models_for_provider;
 use crate::tui::app::{App, AppAction, AppMode, SidebarFocus};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
@@ -195,6 +196,9 @@ pub enum HotbarSourceDispatchBoundary {
     ModelRoute,
     /// The action routes through the slash command registry/dispatcher.
     SlashCommand,
+    /// The action only prefills the composer with a reference; nothing
+    /// executes until the user reviews and sends the message themselves.
+    ComposerPrefill,
     /// The source is visible as a future hotbar source, but binding/dispatch is
     /// intentionally deferred until its safety contract is wired.
     Deferred,
@@ -237,6 +241,8 @@ const HOTBAR_SLASH_SAFETY: &[HotbarSourceSafetyMode] = &[
     HotbarSourceSafetyMode::DirectFire,
     HotbarSourceSafetyMode::ComposerPrefill,
 ];
+const HOTBAR_MCP_SAFETY: &[HotbarSourceSafetyMode] = &[HotbarSourceSafetyMode::ComposerPrefill];
+const HOTBAR_SKILL_SAFETY: &[HotbarSourceSafetyMode] = &[HotbarSourceSafetyMode::DirectFire];
 const HOTBAR_DEFERRED_SAFETY: &[HotbarSourceSafetyMode] = &[
     HotbarSourceSafetyMode::Disabled,
     HotbarSourceSafetyMode::ApprovalGated,
@@ -266,17 +272,19 @@ const HOTBAR_SOURCE_DESCRIPTORS: &[HotbarSourceDescriptor] = &[
     },
     HotbarSourceDescriptor {
         category: HotbarActionCategory::Mcp,
-        boundary: HotbarSourceDispatchBoundary::Deferred,
-        safety_modes: HOTBAR_DEFERRED_SAFETY,
-        dispatch_path: "command palette / MCP manager until tool args and approvals are wired",
-        status: "exploratory",
+        boundary: HotbarSourceDispatchBoundary::ComposerPrefill,
+        safety_modes: HOTBAR_MCP_SAFETY,
+        dispatch_path: "composer prefill of the MCP tool reference; execution stays behind the \
+                        existing tool approval flow",
+        status: "dispatchable",
     },
     HotbarSourceDescriptor {
         category: HotbarActionCategory::Skill,
-        boundary: HotbarSourceDispatchBoundary::Deferred,
-        safety_modes: HOTBAR_DEFERRED_SAFETY,
-        dispatch_path: "command palette / skill command until activation receipts are wired",
-        status: "exploratory",
+        boundary: HotbarSourceDispatchBoundary::SlashCommand,
+        safety_modes: HOTBAR_SKILL_SAFETY,
+        dispatch_path: "commands::execute via the $<skill> alias (local activation with a \
+                        visible receipt cell)",
+        status: "dispatchable",
     },
     HotbarSourceDescriptor {
         category: HotbarActionCategory::Plugin,
@@ -511,6 +519,26 @@ impl HotbarActionRegistry {
         };
         self.register_source(&source);
     }
+
+    /// Register the already-discovered skills (name, description pairs from
+    /// `App::cached_skills`) as bindable hotbar actions. No filesystem I/O
+    /// happens here; the hotbar only lists skills the app already knows.
+    pub(crate) fn register_skills(&mut self, skills: &[(String, String)]) {
+        self.register_source(&SkillHotbarActionSource { skills });
+    }
+
+    /// Replace the MCP-tool hotbar actions with the tools in `snapshot`.
+    ///
+    /// Called when a live MCP discovery snapshot lands (or is refreshed) so
+    /// the hotbar only ever lists tools that are already loaded; the hotbar
+    /// itself never triggers server connections.
+    pub fn replace_mcp_tools(&mut self, snapshot: Option<&crate::mcp::McpManagerSnapshot>) {
+        self.actions
+            .retain(|_, action| action.category() != HotbarActionCategory::Mcp.as_str());
+        if let Some(snapshot) = snapshot {
+            self.register_source(&McpToolHotbarActionSource { snapshot });
+        }
+    }
 }
 
 struct BuiltinHotbarActionSource;
@@ -549,15 +577,29 @@ impl HotbarActionSource for BuiltinHotbarActionSource {
         registry.register(AppHotbarAction::new(
             "mode.agent",
             "agent",
-            "Agent mode",
-            "Switch the conversation into Agent mode.",
+            "Act mode",
+            "Switch the conversation into Act (Agent) mode.",
             AppHotbarKind::Mode(AppMode::Agent),
+        ));
+        registry.register(AppHotbarAction::new(
+            "mode.multitask",
+            "multi",
+            "Multitask mode",
+            "Switch into Multitask delegation mode.",
+            AppHotbarKind::Mode(AppMode::Multitask),
+        ));
+        registry.register(AppHotbarAction::new(
+            "mode.operate",
+            "operate",
+            "Operate mode",
+            "Switch into Operate fleet/workflow conductor mode.",
+            AppHotbarKind::Mode(AppMode::Operate),
         ));
         registry.register(AppHotbarAction::new(
             "mode.yolo",
             "yolo",
-            "YOLO mode",
-            "Switch the conversation into YOLO mode.",
+            "YOLO (deprecated)",
+            "Legacy shim: Act mode with Full Access permissions.",
             AppHotbarKind::Mode(AppMode::Yolo),
         ));
         registry.register(AppHotbarAction::new(
@@ -612,6 +654,79 @@ impl HotbarActionSource for SlashCommandHotbarActionSource {
     fn register_actions(&self, registry: &mut HotbarActionRegistry) {
         for info in commands::command_infos() {
             registry.register(SlashHotbarAction::new(info));
+        }
+    }
+}
+
+/// Adapter exposing already-discovered skills as hotbar actions (#2069).
+///
+/// Follows the slash-command source pattern: the source only lists entries an
+/// existing registry already knows about (`App::cached_skills`), and dispatch
+/// reuses the existing `$<skill>` alias through `commands::execute`, which
+/// activates the skill locally and posts a visible receipt cell.
+struct SkillHotbarActionSource<'a> {
+    skills: &'a [(String, String)],
+}
+
+impl HotbarActionSource for SkillHotbarActionSource<'_> {
+    fn descriptor(&self) -> HotbarSourceDescriptor {
+        HOTBAR_SOURCE_DESCRIPTORS
+            .iter()
+            .copied()
+            .find(|descriptor| descriptor.category == HotbarActionCategory::Skill)
+            .expect("skill hotbar source descriptor exists")
+    }
+
+    fn register_actions(&self, registry: &mut HotbarActionRegistry) {
+        let mut seen = BTreeSet::new();
+        for (name, description) in self.skills {
+            let name = name.trim();
+            // Guard against duplicate names across skill roots: the registry
+            // asserts unique action ids, and the first discovery wins (the
+            // same shadowing order the skill registry itself uses).
+            if name.is_empty() || !seen.insert(name.to_string()) {
+                continue;
+            }
+            registry.register(SkillHotbarAction::new(name, description));
+        }
+    }
+}
+
+/// Adapter exposing already-discovered MCP tools as hotbar actions (#2068).
+///
+/// Deferred-source safety: the source only lists tools from an existing
+/// discovery snapshot (enabled servers), and dispatch never executes a tool —
+/// it prefills the composer with the tool's model-visible name so the actual
+/// call still goes through the agent and the tool approval flow.
+struct McpToolHotbarActionSource<'a> {
+    snapshot: &'a crate::mcp::McpManagerSnapshot,
+}
+
+impl HotbarActionSource for McpToolHotbarActionSource<'_> {
+    fn descriptor(&self) -> HotbarSourceDescriptor {
+        HOTBAR_SOURCE_DESCRIPTORS
+            .iter()
+            .copied()
+            .find(|descriptor| descriptor.category == HotbarActionCategory::Mcp)
+            .expect("mcp hotbar source descriptor exists")
+    }
+
+    fn register_actions(&self, registry: &mut HotbarActionRegistry) {
+        let mut seen = BTreeSet::new();
+        for server in &self.snapshot.servers {
+            if !server.enabled {
+                continue;
+            }
+            for tool in &server.tools {
+                if tool.model_name.trim().is_empty() {
+                    continue;
+                }
+                let action = McpToolHotbarAction::new(&server.name, tool);
+                if !seen.insert(action.id.clone()) {
+                    continue;
+                }
+                registry.register(action);
+            }
         }
     }
 }
@@ -1071,6 +1186,163 @@ impl HotbarAction for RouteHotbarAction {
     }
 }
 
+struct SkillHotbarAction {
+    name: String,
+    id: String,
+    short_label: String,
+    description: String,
+}
+
+impl SkillHotbarAction {
+    fn new(name: &str, description: &str) -> Self {
+        let description = description.trim();
+        Self {
+            name: name.to_string(),
+            id: format!("skill.{name}"),
+            short_label: crate::tui::ui_text::truncate_line_to_width(
+                name,
+                HOTBAR_COMPACT_LABEL_MAX_WIDTH,
+            ),
+            description: if description.is_empty() {
+                format!("Activate the {name} skill for the next message.")
+            } else {
+                description.to_string()
+            },
+        }
+    }
+}
+
+impl HotbarAction for SkillHotbarAction {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn metadata(&self, _locale: Locale) -> HotbarActionMetadata {
+        HotbarActionMetadata {
+            id: self.id.clone(),
+            source_id: format!("skill:{}", self.name),
+            display_name: format!("${}", self.name),
+            compact_label: self.short_label.clone(),
+            description: self.description.clone(),
+            category: HotbarActionCategory::Skill,
+            args: HotbarArgsBehavior::None,
+            safety: HotbarSafetyClass::ExistingCommand,
+            recommendation: HotbarRecommendation::Eligible,
+        }
+    }
+
+    fn short_label(&self) -> &str {
+        &self.short_label
+    }
+
+    fn category(&self) -> &str {
+        "skill"
+    }
+
+    fn is_active(&self, app: &App) -> bool {
+        // `activate_skill` stores the full instruction block; the heading line
+        // inside it is the stable marker for which skill is armed.
+        app.active_skill
+            .as_deref()
+            .is_some_and(|instruction| instruction.contains(&format!("# Skill: {}\n", self.name)))
+    }
+
+    fn dispatch(&self, app: &mut App) -> Result<HotbarDispatch> {
+        // Same path as typing `$<name>`: activates the skill for the next
+        // message (local state plus a visible receipt cell); nothing is sent
+        // to the model until the user submits a message.
+        let input = format!("${}", self.name);
+        let result = commands::execute(&input, app);
+        Ok(dispatch_command_result(app, result))
+    }
+}
+
+struct McpToolHotbarAction {
+    server: String,
+    tool_name: String,
+    model_name: String,
+    description: Option<String>,
+    id: String,
+    short_label: String,
+}
+
+impl McpToolHotbarAction {
+    fn new(server: &str, tool: &crate::mcp::McpDiscoveredItem) -> Self {
+        Self {
+            server: server.to_string(),
+            tool_name: tool.name.clone(),
+            model_name: tool.model_name.trim().to_string(),
+            description: tool.description.clone(),
+            id: format!("mcp.{server}.{}", tool.name),
+            short_label: crate::tui::ui_text::truncate_line_to_width(
+                &tool.name,
+                HOTBAR_COMPACT_LABEL_MAX_WIDTH,
+            ),
+        }
+    }
+
+    fn prefill_composer(&self, app: &mut App) {
+        app.clear_input_recoverable();
+        app.input = format!("{} ", self.model_name);
+        app.cursor_position = app.input.chars().count();
+        app.needs_redraw = true;
+        app.status_message = Some(format!(
+            "MCP tool needs a request; complete {}",
+            app.input.trim_end()
+        ));
+    }
+}
+
+impl HotbarAction for McpToolHotbarAction {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn metadata(&self, _locale: Locale) -> HotbarActionMetadata {
+        let description = match self.description.as_deref().map(str::trim) {
+            Some(desc) if !desc.is_empty() => {
+                format!("Prefill the composer with {} — {desc}", self.model_name)
+            }
+            _ => format!(
+                "Prefill the composer with {}; the call still runs through tool approval.",
+                self.model_name
+            ),
+        };
+        HotbarActionMetadata {
+            id: self.id.clone(),
+            source_id: format!("mcp:{}", self.server),
+            display_name: format!("mcp:{}:{}", self.server, self.tool_name),
+            compact_label: self.short_label.clone(),
+            description,
+            category: HotbarActionCategory::Mcp,
+            args: HotbarArgsBehavior::Required,
+            safety: HotbarSafetyClass::RequiresApproval,
+            recommendation: HotbarRecommendation::Advanced,
+        }
+    }
+
+    fn short_label(&self) -> &str {
+        &self.short_label
+    }
+
+    fn category(&self) -> &str {
+        "mcp"
+    }
+
+    fn is_active(&self, _app: &App) -> bool {
+        false
+    }
+
+    fn dispatch(&self, app: &mut App) -> Result<HotbarDispatch> {
+        // Never execute the tool from the hotbar: prefill the composer with
+        // the model-visible tool name (same text the command palette's
+        // "> use" entry inserts) and let the user describe the call. The
+        // eventual invocation stays behind the normal tool approval flow.
+        self.prefill_composer(app);
+        Ok(HotbarDispatch::Handled)
+    }
+}
+
 fn configured_route_models_for_provider(
     config: &Config,
     provider: ApiProvider,
@@ -1091,12 +1363,12 @@ fn configured_route_models_for_provider(
     {
         push_route_model(&mut models, model);
     }
-    for model in model_completion_names_for_provider(provider)
+    for model in all_catalog_models_for_provider(provider)
         .into_iter()
         .filter(|model| !model.trim().eq_ignore_ascii_case("auto"))
         .take(1)
     {
-        push_route_model(&mut models, model);
+        push_route_model(&mut models, &model);
     }
     models
 }
@@ -1130,10 +1402,10 @@ mod tests {
 
     use super::*;
 
-    fn test_app() -> App {
+    fn test_app_with_paths(workspace: PathBuf, skills_dir: PathBuf) -> App {
         let options = TuiOptions {
             model: "deepseek-v4-pro".to_string(),
-            workspace: PathBuf::from("."),
+            workspace,
             config_path: None,
             config_profile: None,
             allow_shell: false,
@@ -1141,7 +1413,7 @@ mod tests {
             use_mouse_capture: false,
             use_bracketed_paste: true,
             max_subagents: 1,
-            skills_dir: PathBuf::from("."),
+            skills_dir,
             memory_path: PathBuf::from("memory.md"),
             notes_path: PathBuf::from("notes.txt"),
             mcp_config_path: PathBuf::from("mcp.json"),
@@ -1155,6 +1427,61 @@ mod tests {
         let mut app = App::new(options, &Config::default());
         app.ui_locale = crate::localization::Locale::En;
         app
+    }
+
+    fn test_app() -> App {
+        test_app_with_paths(PathBuf::from("."), PathBuf::from("."))
+    }
+
+    fn test_mcp_snapshot() -> crate::mcp::McpManagerSnapshot {
+        use crate::mcp::{McpDiscoveredItem, McpManagerSnapshot, McpServerSnapshot};
+        let server = |name: &str, enabled: bool, tools: Vec<McpDiscoveredItem>| McpServerSnapshot {
+            name: name.to_string(),
+            enabled,
+            required: false,
+            transport: "stdio".to_string(),
+            command_or_url: format!("{name}-server"),
+            connect_timeout: 5,
+            execute_timeout: 5,
+            read_timeout: 5,
+            connected: enabled,
+            error: None,
+            tools,
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        };
+        McpManagerSnapshot {
+            config_path: PathBuf::from("mcp.json"),
+            config_exists: true,
+            restart_required: false,
+            servers: vec![
+                server(
+                    "search",
+                    true,
+                    vec![
+                        McpDiscoveredItem {
+                            name: "web_search".to_string(),
+                            model_name: "mcp_search_web_search".to_string(),
+                            description: Some("Search the web".to_string()),
+                        },
+                        McpDiscoveredItem {
+                            name: "broken".to_string(),
+                            model_name: "  ".to_string(),
+                            description: None,
+                        },
+                    ],
+                ),
+                server(
+                    "offline",
+                    false,
+                    vec![McpDiscoveredItem {
+                        name: "other_tool".to_string(),
+                        model_name: "mcp_offline_other_tool".to_string(),
+                        description: None,
+                    }],
+                ),
+            ],
+        }
     }
 
     struct TestHotbarAction {
@@ -1204,13 +1531,13 @@ mod tests {
             HOTBAR_SOURCE_DESCRIPTORS
                 .iter()
                 .copied()
-                .find(|descriptor| descriptor.category == HotbarActionCategory::Mcp)
-                .expect("mcp descriptor exists")
+                .find(|descriptor| descriptor.category == HotbarActionCategory::Plugin)
+                .expect("plugin descriptor exists")
         }
 
         fn register_actions(&self, registry: &mut HotbarActionRegistry) {
             registry.register(TestHotbarAction {
-                id: "mcp.deferred-test",
+                id: "plugin.deferred-test",
             });
         }
     }
@@ -1334,27 +1661,53 @@ mod tests {
                 true
             ))
         );
-        for category in [
-            HotbarActionCategory::Mcp,
-            HotbarActionCategory::Skill,
-            HotbarActionCategory::Plugin,
-        ] {
-            let descriptor = descriptors
+        assert_eq!(
+            descriptors
                 .iter()
-                .find(|descriptor| descriptor.category == category)
-                .unwrap_or_else(|| panic!("missing descriptor for {category:?}"));
-            assert_eq!(descriptor.boundary, HotbarSourceDispatchBoundary::Deferred);
-            assert_eq!(descriptor.safety_modes, HOTBAR_DEFERRED_SAFETY);
-            assert_eq!(descriptor.status, "exploratory");
-            assert!(
-                !descriptor.registers_dispatchable_actions(),
-                "deferred {category:?} source must not be dispatchable"
-            );
-        }
+                .find(|descriptor| descriptor.category == HotbarActionCategory::Mcp)
+                .map(|descriptor| (
+                    descriptor.boundary,
+                    descriptor.safety_modes,
+                    descriptor.registers_dispatchable_actions()
+                )),
+            Some((
+                HotbarSourceDispatchBoundary::ComposerPrefill,
+                HOTBAR_MCP_SAFETY,
+                true
+            ))
+        );
+        assert_eq!(
+            descriptors
+                .iter()
+                .find(|descriptor| descriptor.category == HotbarActionCategory::Skill)
+                .map(|descriptor| (
+                    descriptor.boundary,
+                    descriptor.safety_modes,
+                    descriptor.registers_dispatchable_actions()
+                )),
+            Some((
+                HotbarSourceDispatchBoundary::SlashCommand,
+                HOTBAR_SKILL_SAFETY,
+                true
+            ))
+        );
+        let plugin = descriptors
+            .iter()
+            .find(|descriptor| descriptor.category == HotbarActionCategory::Plugin)
+            .expect("missing descriptor for Plugin");
+        assert_eq!(plugin.boundary, HotbarSourceDispatchBoundary::Deferred);
+        assert_eq!(plugin.safety_modes, HOTBAR_DEFERRED_SAFETY);
+        assert_eq!(plugin.status, "exploratory");
+        assert!(
+            !plugin.registers_dispatchable_actions(),
+            "deferred Plugin source must not be dispatchable"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "deferred hotbar source Mcp must not register dispatchable actions")]
+    #[should_panic(
+        expected = "deferred hotbar source Plugin must not register dispatchable actions"
+    )]
     fn deferred_sources_cannot_register_dispatchable_actions() {
         let mut registry = HotbarActionRegistry::new();
         registry.register_source(&DeferredTestHotbarSource);
@@ -1613,6 +1966,8 @@ mod tests {
             vec![
                 "filetree.toggle",
                 "mode.agent",
+                "mode.multitask",
+                "mode.operate",
                 "mode.plan",
                 "mode.yolo",
                 "palette.open",
@@ -1761,6 +2116,162 @@ mod tests {
     }
 
     #[test]
+    fn skill_source_registers_known_skills_with_dedup() {
+        let skills = vec![
+            ("demo".to_string(), "Demo skill".to_string()),
+            ("demo".to_string(), "Shadowed duplicate".to_string()),
+            ("   ".to_string(), "ignored blank name".to_string()),
+        ];
+        let mut registry = HotbarActionRegistry::new();
+        registry.register_skills(&skills);
+
+        assert_eq!(registry.len(), 1);
+        let action = registry.get("skill.demo").expect("skill action");
+        assert_eq!(action.category(), "skill");
+        let metadata = action.metadata(Locale::En);
+        assert_eq!(metadata.category, HotbarActionCategory::Skill);
+        assert_eq!(metadata.source_id, "skill:demo");
+        assert_eq!(metadata.display_name, "$demo");
+        assert_eq!(metadata.description, "Demo skill");
+        assert_eq!(metadata.args, HotbarArgsBehavior::None);
+        assert_eq!(metadata.safety, HotbarSafetyClass::ExistingCommand);
+        assert_eq!(metadata.recommendation, HotbarRecommendation::Eligible);
+        assert!(registry.metadata_validation_errors(Locale::En).is_empty());
+    }
+
+    #[test]
+    fn skill_hotbar_action_activates_skill_through_dollar_alias() {
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        let skills_dir = tempfile::TempDir::new().expect("skills dir");
+        let skill_dir = skills_dir.path().join("hotbar-demo-skill");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: hotbar-demo-skill\ndescription: Demo skill for hotbar tests\n---\n\nFollow the demo instructions.\n",
+        )
+        .expect("write SKILL.md");
+        let mut app = test_app_with_paths(
+            workspace.path().to_path_buf(),
+            skills_dir.path().to_path_buf(),
+        );
+
+        let action = app
+            .hotbar_actions
+            .get("skill.hotbar-demo-skill")
+            .expect("skill registered from the startup skill cache");
+        assert!(!action.is_active(&app));
+        assert_eq!(
+            action.dispatch(&mut app).expect("dispatch skill"),
+            HotbarDispatch::Handled
+        );
+        assert!(app.active_skill.is_some());
+        assert!(action.is_active(&app));
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("activated"))
+        );
+    }
+
+    #[test]
+    fn skill_hotbar_action_reports_unknown_skill() {
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        let skills_dir = tempfile::TempDir::new().expect("skills dir");
+        let mut app = test_app_with_paths(
+            workspace.path().to_path_buf(),
+            skills_dir.path().to_path_buf(),
+        );
+
+        let mut registry = HotbarActionRegistry::new();
+        registry.register_skills(&[(
+            "hotbar-skill-that-does-not-exist".to_string(),
+            "Stale cache entry".to_string(),
+        )]);
+        let action = registry
+            .get("skill.hotbar-skill-that-does-not-exist")
+            .expect("stale skill action");
+
+        assert_eq!(
+            action.dispatch(&mut app).expect("dispatch stale skill"),
+            HotbarDispatch::Handled
+        );
+        assert!(app.active_skill.is_none());
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Unknown skill"))
+        );
+    }
+
+    #[test]
+    fn mcp_source_registers_enabled_server_tools_only() {
+        let snapshot = test_mcp_snapshot();
+        let mut registry = HotbarActionRegistry::new();
+        registry.replace_mcp_tools(Some(&snapshot));
+
+        // Only the enabled server's tool with a model name registers: the
+        // blank-model-name tool and the disabled server's tool never do.
+        assert_eq!(registry.len(), 1);
+        let action = registry
+            .get("mcp.search.web_search")
+            .expect("mcp tool action");
+        assert_eq!(action.category(), "mcp");
+        let metadata = action.metadata(Locale::En);
+        assert_eq!(metadata.category, HotbarActionCategory::Mcp);
+        assert_eq!(metadata.source_id, "mcp:search");
+        assert_eq!(metadata.display_name, "mcp:search:web_search");
+        assert!(metadata.description.contains("mcp_search_web_search"));
+        assert!(metadata.description.contains("Search the web"));
+        assert_eq!(metadata.args, HotbarArgsBehavior::Required);
+        assert_eq!(metadata.safety, HotbarSafetyClass::RequiresApproval);
+        assert_eq!(metadata.recommendation, HotbarRecommendation::Advanced);
+        assert!(registry.metadata_validation_errors(Locale::En).is_empty());
+    }
+
+    #[test]
+    fn mcp_hotbar_action_prefills_composer_instead_of_executing() {
+        let snapshot = test_mcp_snapshot();
+        let mut registry = HotbarActionRegistry::new();
+        registry.replace_mcp_tools(Some(&snapshot));
+        let action = registry
+            .get("mcp.search.web_search")
+            .expect("mcp tool action");
+        let mut app = test_app();
+        app.input = "draft".to_string();
+        app.cursor_position = app.input.chars().count();
+
+        assert_eq!(
+            action.dispatch(&mut app).expect("dispatch mcp tool"),
+            HotbarDispatch::Handled
+        );
+        assert_eq!(app.input, "mcp_search_web_search ");
+        assert_eq!(app.cursor_position, app.input.chars().count());
+        assert_eq!(app.clear_undo_buffer.as_deref(), Some("draft"));
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("mcp_search_web_search"))
+        );
+    }
+
+    #[test]
+    fn replace_mcp_tools_refreshes_and_clears_mcp_actions() {
+        let mut registry = HotbarActionRegistry::with_builtins();
+        let baseline = registry.len();
+        let snapshot = test_mcp_snapshot();
+
+        registry.replace_mcp_tools(Some(&snapshot));
+        assert_eq!(registry.len(), baseline + 1);
+        // Re-applying a refreshed snapshot must not panic on duplicate ids.
+        registry.replace_mcp_tools(Some(&snapshot));
+        assert_eq!(registry.len(), baseline + 1);
+
+        registry.replace_mcp_tools(None);
+        assert_eq!(registry.len(), baseline);
+        assert!(registry.get("mcp.search.web_search").is_none());
+    }
+
+    #[test]
     fn mode_actions_report_active_state_and_dispatch() {
         let registry = HotbarActionRegistry::with_builtins();
         let plan = registry.get("mode.plan").expect("plan action");
@@ -1785,7 +2296,11 @@ mod tests {
         );
         assert!(app.allow_shell);
         assert!(app.trust_mode);
-        assert!(yolo.is_active(&app));
+        // YOLO is a legacy compatibility alias: entering it resolves to Agent
+        // mode with the bypass mirrors set, so the Agent action lights up.
+        assert_eq!(app.mode, AppMode::Agent);
+        assert!(app.yolo);
+        assert!(agent.is_active(&app));
     }
 
     #[test]

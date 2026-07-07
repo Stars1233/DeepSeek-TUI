@@ -1853,7 +1853,9 @@ pub fn mode(app: &mut App, arg: Option<&str>) -> CommandResult {
                 CommandResult::message(message)
             }
         }
-        None => CommandResult::error("Usage: /mode [agent|act|plan|yolo|1|2|4]"),
+        None => {
+            CommandResult::error("Usage: /mode [act|agent|plan|multitask|operate|yolo|1|2|3|5|4]")
+        }
     }
 }
 
@@ -2525,7 +2527,8 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         assert!(app.trust_mode);
         assert!(app.yolo);
         assert_eq!(app.approval_mode, ApprovalMode::Bypass);
-        assert_eq!(app.mode, AppMode::Yolo);
+        // The deprecated YOLO alias remaps to Agent mode (M6 compat shim).
+        assert_eq!(app.mode, AppMode::Agent);
     }
 
     #[test]
@@ -2542,11 +2545,26 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         let _ = mode(&mut app, Some("plan"));
         assert_eq!(app.mode, AppMode::Plan);
         let result = mode(&mut app, Some("3"));
+        assert_eq!(
+            result.action,
+            Some(AppAction::ModeChanged(AppMode::Multitask))
+        );
+        assert_eq!(app.mode, AppMode::Multitask);
+        let result = mode(&mut app, Some("5"));
+        assert_eq!(
+            result.action,
+            Some(AppAction::ModeChanged(AppMode::Operate))
+        );
+        assert_eq!(app.mode, AppMode::Operate);
+        let result = mode(&mut app, Some("9"));
         assert!(result.is_error);
-        assert_eq!(app.mode, AppMode::Plan);
+        assert_eq!(app.mode, AppMode::Operate);
         let result = mode(&mut app, Some("4"));
         assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Yolo)));
-        assert_eq!(app.mode, AppMode::Yolo);
+        // "4" still parses as the deprecated YOLO alias, which lands in Agent
+        // mode with bypass approvals (M6 compat shim).
+        assert_eq!(app.mode, AppMode::Agent);
+        assert!(app.yolo);
     }
 
     #[test]

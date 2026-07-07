@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
+use super::Status;
+
 pub const FLEET_PROTOCOL_VERSION: &str = "0.1.0";
 
 /// Globally unique identifier for a fleet run.
@@ -65,6 +67,18 @@ pub enum FleetRunStatus {
     Completed,
     Failed,
     Cancelled,
+}
+
+impl Status for FleetRunStatus {
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+    fn is_active(&self) -> bool {
+        matches!(self, Self::Pending | Self::Queued | Self::Running)
+    }
+    fn is_paused(&self) -> bool {
+        matches!(self, Self::Paused)
+    }
 }
 
 /// Specification of a single unit of work within a run.
@@ -597,6 +611,18 @@ pub enum FleetWorkerStatus {
     Unhealthy,
     Draining,
     Retired,
+}
+
+impl Status for FleetWorkerStatus {
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Retired)
+    }
+    fn is_active(&self) -> bool {
+        matches!(self, Self::Online | Self::Busy)
+    }
+    fn is_paused(&self) -> bool {
+        false
+    }
 }
 
 /// Durable inbox entry: a task waiting to be leased to a worker.

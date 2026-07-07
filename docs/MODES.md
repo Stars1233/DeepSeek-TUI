@@ -22,15 +22,20 @@ into a resumable workflow with its own progress view.
 
 Press `Tab` to complete composer menus, queue a draft as a next-turn follow-up
 while a turn is running, or cycle through the visible modes when the composer is
-otherwise idle: **Plan → Agent → YOLO → Plan**.
-Press `Shift+Tab` to cycle reasoning effort.
-Run `/mode` to open the mode picker, or switch directly with `/mode agent`,
-`/mode act`, `/mode plan`, `/mode yolo`, `/mode 1`, `/mode 2`, or `/mode 4`.
+otherwise idle: **Plan → Act → Multitask → Operate → Plan**.
+Press `Shift+Tab` to cycle permission posture (Ask → Auto-Review → Full Access).
+Press `Ctrl+T` to cycle reasoning effort.
+Run `/mode` to open the mode picker, or switch directly with `/mode act`,
+`/mode plan`, `/mode multitask`, `/mode operate`, `/mode yolo` (deprecated shim),
+`/mode 1`, `/mode 2`, `/mode 3`, `/mode 5`, or `/mode 4`.
 
 - **Plan**: design-first prompting. Read-only investigation tools stay available; shell and patch execution stay off. Use this when you want to think out loud and produce a plan to hand to a human (yourself later, or a reviewer).
-- **Agent**: multi-step tool use. In interactive TUI sessions, shell tools (`exec_shell`, `task_shell_start`, `task_shell_wait`) are available by default and approval prompts gate each call. Set top-level `allow_shell = false` to hide shell tools for a workspace/profile. File writes are allowed without a prompt.
-- **Act**: accepted as an alias for Agent mode. Saved settings still normalize to `agent` for backward compatibility.
-- **YOLO**: enables shell + trust mode and auto-approves all tools. Use only in trusted repos.
+- **Act** (Agent): multi-step tool use. In interactive TUI sessions, shell tools (`exec_shell`, `task_shell_start`, `task_shell_wait`) are available by default and approval prompts gate each call. Set top-level `allow_shell = false` to hide shell tools for a workspace/profile. File writes are allowed without a prompt.
+- **Multitask**: lighter delegation posture — spawn background sub-agents in parallel, start workflows non-blocking, and keep the operator turn responsive.
+- **Operate**: conductor posture — prefer Fleet roster + `/workflow` orchestration over solo inline tool chains; delegate by default.
+- **YOLO** (deprecated): maps to Act + Full Access permissions (`Shift+Tab` to Bypass). Use only in trusted repos.
+
+**Act** is accepted as an alias for Agent mode. Saved settings still normalize to `agent` for backward compatibility.
 
 ### Tool availability by mode
 

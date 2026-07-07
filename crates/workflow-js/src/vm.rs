@@ -159,9 +159,22 @@ impl WorkflowVm {
         args: serde_json::Value,
         driver: Arc<dyn WorkflowDriver>,
     ) -> Result<serde_json::Value, WorkflowJsError> {
+        self.run_script_with_cancel(source, args, driver, WorkflowRunCancel::new())
+            .await
+    }
+
+    /// Like [`Self::run_script`], but accepts an external cancel handle so the
+    /// host can interrupt the VM without dropping the run future.
+    pub async fn run_script_with_cancel(
+        &self,
+        source: &str,
+        args: serde_json::Value,
+        driver: Arc<dyn WorkflowDriver>,
+        cancel: WorkflowRunCancel,
+    ) -> Result<serde_json::Value, WorkflowJsError> {
         let args_json = serde_json::to_string(&args)
             .map_err(|err| WorkflowJsError::InvalidArgs(err.to_string()))?;
-        let cancel = CancelHandle::new();
+        let cancel = cancel.0;
         let (result_tx, result_rx) = oneshot::channel();
         let mut guard = RunGuard {
             cancel: cancel.clone(),
@@ -221,6 +234,26 @@ impl WorkflowVm {
 /// thread. The atomic flag feeds the QuickJS interrupt handler (sync, called
 /// mid-bytecode); the watch channel wakes host futures parked on driver
 /// completions.
+#[derive(Clone)]
+pub struct WorkflowRunCancel(CancelHandle);
+
+impl WorkflowRunCancel {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(CancelHandle::new())
+    }
+
+    pub fn cancel(&self) {
+        self.0.cancel();
+    }
+}
+
+impl Default for WorkflowRunCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 struct CancelHandle {
     flag: Arc<AtomicBool>,
@@ -299,7 +332,7 @@ async fn run_in_vm(
     let interrupt_flag = cancel.flag_arc();
     runtime
         .set_interrupt_handler(Some(Box::new(move || {
-            interrupt_flag.load(Ordering::Relaxed)
+            interrupt_flag.load(Ordering::Acquire)
         })))
         .await;
     let context = AsyncContext::full(&runtime)

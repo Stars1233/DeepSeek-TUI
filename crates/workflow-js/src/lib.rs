@@ -50,7 +50,7 @@ pub use driver::{
     normalize_profile,
 };
 pub use error::{DriverError, WorkflowJsError};
-pub use vm::{VmLimits, WorkflowVm};
+pub use vm::{VmLimits, WorkflowRunCancel, WorkflowVm};
 
 /// Maximum `task()` spawn attempts per run (design §4.3). Counted in the VM
 /// before the driver is consulted, so a runaway `loop-until-dry` terminates

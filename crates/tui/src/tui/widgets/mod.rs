@@ -29,10 +29,10 @@ use std::time::Duration;
 use crate::commands;
 #[cfg(test)]
 use crate::config::ApiProvider;
-#[cfg(test)]
-use crate::config::model_completion_names_for_provider;
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
+#[cfg(test)]
+use crate::provider_lake::all_catalog_models_for_provider;
 use crate::tui::app::{App, AppMode, ComposerDensity, VimMode};
 use crate::tui::approval::{
     ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel, ToolCategory,
@@ -619,9 +619,8 @@ impl<'a> ComposerWidget<'a> {
 
     fn mode_color(&self) -> Color {
         match self.app.mode {
-            AppMode::Agent => palette::MODE_AGENT,
-            AppMode::Auto => palette::MODE_AGENT,
-            AppMode::Yolo => palette::MODE_YOLO,
+            AppMode::Agent | AppMode::Auto | AppMode::Multitask => palette::MODE_AGENT,
+            AppMode::Yolo | AppMode::Operate => palette::MODE_YOLO,
             AppMode::Plan => palette::MODE_PLAN,
         }
     }
@@ -712,7 +711,7 @@ impl Renderable for ComposerWidget<'_> {
                         if queue_count > 0 {
                             (
                                 Some(format!("↵ send ({queue_count} queued)")),
-                                palette::DEEPSEEK_SKY,
+                                palette::WHALE_INFO,
                             )
                         } else {
                             (None, palette::TEXT_MUTED)
@@ -723,20 +722,22 @@ impl Renderable for ComposerWidget<'_> {
                             (Some("↵ offline queue".to_string()), palette::STATUS_WARNING)
                         } else {
                             let label = if queue_count > 0 {
-                                format!("↵ queue ({} waiting)", queue_count.saturating_add(1))
+                                format!(
+                                    "↵ queue ({} waiting, double-↵ to steer)",
+                                    queue_count.saturating_add(1)
+                                )
                             } else {
-                                "↵ queue for next turn".to_string()
+                                "↵ queue (double-↵ to steer)".to_string()
                             };
                             (Some(label), palette::TEXT_MUTED)
                         }
                     }
-                    // Steer and QueueFollowUp are now only reached via Ctrl+Enter override.
-                    SubmitDisposition::Steer => (
-                        Some("↵ steering (Ctrl+Enter)".to_string()),
-                        palette::DEEPSEEK_SKY,
-                    ),
+                    // Steer reached via double-tap Enter or Ctrl+Enter override.
+                    SubmitDisposition::Steer => {
+                        (Some("↵ steering".to_string()), palette::WHALE_INFO)
+                    }
                     SubmitDisposition::QueueFollowUp => (
-                        Some("↵ queued (Ctrl+Enter to steer)".to_string()),
+                        Some("↵ queued (double-↵ to steer)".to_string()),
                         palette::TEXT_MUTED,
                     ),
                 };
@@ -1021,7 +1022,7 @@ impl Renderable for ComposerWidget<'_> {
 
                 // Name column
                 let name_style = if entry.is_skill && !is_selected {
-                    Style::default().fg(palette::DEEPSEEK_SKY)
+                    Style::default().fg(palette::WHALE_INFO)
                 } else {
                     sel_style
                 };
@@ -1205,7 +1206,7 @@ impl<'a> ApprovalWidget<'a> {
             Span::styled(
                 format!(" {} ", stakes_badge_text(stakes, locale)),
                 Style::default()
-                    .fg(palette::DEEPSEEK_INK)
+                    .fg(palette::WHALE_BG)
                     .bg(palette_colors.accent)
                     .add_modifier(Modifier::BOLD),
             ),
@@ -1213,7 +1214,7 @@ impl<'a> ApprovalWidget<'a> {
             Span::styled(
                 self.request.tool_name.clone(),
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -1408,7 +1409,7 @@ impl Renderable for ApprovalWidget<'_> {
             let line = Line::from(Span::styled(
                 summary,
                 Style::default()
-                    .fg(palette::DEEPSEEK_INK)
+                    .fg(palette::WHALE_BG)
                     .bg(palette_colors.accent)
                     .add_modifier(Modifier::BOLD),
             ));
@@ -1432,7 +1433,7 @@ impl Renderable for ApprovalWidget<'_> {
         // approval is no longer a full-screen takeover (#3799).
         Clear.render(region, buf);
         Block::default()
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .render(region, buf);
 
         // Top separator rule, risk-tinted, so the prompt reads as a distinct
@@ -1605,16 +1606,8 @@ fn build_approval_controls(
     controls.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            selection_hint_prefix(locale),
-            Style::default().fg(palette::TEXT_HINT),
-        ),
-        Span::styled(
-            selection_hint_value(locale),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
             footer_controls(locale),
-            Style::default().fg(palette::TEXT_HINT),
+            Style::default().fg(palette::TEXT_MUTED),
         ),
         if request.can_save_ask_rule() {
             Span::styled(save_ask_rule_hint(locale), Style::default().fg(shortcut))
@@ -1657,7 +1650,7 @@ fn paint_left_rail(card: Rect, buf: &mut Buffer, color: Color) {
         }
         let cell = &mut buf[(rail_x, y)];
         cell.set_char('\u{2503}'); // ┃ — heavy bar so the warning reads at a glance
-        cell.set_style(Style::default().fg(color).bg(palette::DEEPSEEK_INK));
+        cell.set_style(Style::default().fg(color).bg(palette::WHALE_BG));
     }
 }
 
@@ -1673,18 +1666,18 @@ fn approval_palette(stakes: crate::tui::approval::ApprovalStakes) -> ApprovalCol
     match stakes {
         ApprovalStakes::Routine => ApprovalColors {
             border: palette::BORDER_COLOR,
-            accent: palette::DEEPSEEK_SKY,
-            shortcut: palette::DEEPSEEK_SKY,
+            accent: palette::WHALE_INFO,
+            shortcut: palette::WHALE_INFO,
         },
         // Ordinary state-touching work: a calm ask, not an alarm.
         ApprovalStakes::Elevated => ApprovalColors {
             border: palette::BORDER_COLOR,
             accent: palette::STATUS_WARNING,
-            shortcut: palette::DEEPSEEK_SKY,
+            shortcut: palette::WHALE_INFO,
         },
         ApprovalStakes::Critical => ApprovalColors {
-            border: palette::DEEPSEEK_RED,
-            accent: palette::DEEPSEEK_RED,
+            border: palette::WHALE_ERROR,
+            accent: palette::WHALE_ERROR,
             shortcut: palette::STATUS_WARNING,
         },
     }
@@ -1733,9 +1726,9 @@ fn category_label_for(category: ToolCategory, locale: Locale) -> (Cow<'static, s
         ToolCategory::FileWrite => palette::STATUS_WARNING,
         ToolCategory::Shell => palette::STATUS_ERROR,
         ToolCategory::Network => palette::STATUS_WARNING,
-        ToolCategory::McpRead => palette::DEEPSEEK_SKY,
+        ToolCategory::McpRead => palette::WHALE_INFO,
         ToolCategory::McpAction => palette::STATUS_WARNING,
-        ToolCategory::Agent => palette::DEEPSEEK_SKY,
+        ToolCategory::Agent => palette::WHALE_INFO,
         ToolCategory::Unknown => palette::STATUS_ERROR,
     };
     (label, color)
@@ -1763,7 +1756,7 @@ fn push_detail_line(lines: &mut Vec<Line<'static>>, label: &str, value: &str) {
         Span::styled(
             format!("{label:<7} "),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(value.to_string(), Style::default().fg(palette::TEXT_BODY)),
@@ -1838,7 +1831,7 @@ fn push_shell_command_lines(
         Span::styled(
             format!("{label}:"),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -1939,14 +1932,6 @@ fn save_ask_rule_hint(locale: Locale) -> &'static str {
     }
 }
 
-fn selection_hint_prefix(locale: Locale) -> Cow<'static, str> {
-    tr(locale, MessageId::ApprovalChooseHint)
-}
-
-fn selection_hint_value(locale: Locale) -> Cow<'static, str> {
-    tr(locale, MessageId::ApprovalChooseAction)
-}
-
 struct ApprovalOptionRow {
     label: Cow<'static, str>,
     key_hint: &'static str,
@@ -2041,7 +2026,7 @@ impl Renderable for ElevationWidget<'_> {
                 Span::styled(
                     &self.request.tool_name,
                     Style::default()
-                        .fg(palette::DEEPSEEK_SKY)
+                        .fg(palette::WHALE_INFO)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -2163,7 +2148,7 @@ impl Renderable for ElevationWidget<'_> {
             .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .padding(Padding::uniform(1));
 
         let paragraph = Paragraph::new(lines)
@@ -2374,7 +2359,7 @@ fn truncate_display_width(text: &str, max_width: usize) -> String {
 fn vim_mode_style(mode: VimMode) -> Style {
     let color = match mode {
         VimMode::Normal => palette::TEXT_MUTED,
-        VimMode::Insert => palette::DEEPSEEK_SKY,
+        VimMode::Insert => palette::WHALE_INFO,
         VimMode::Visual => palette::MODE_PLAN,
     };
     Style::default().fg(color).bold()
@@ -2643,10 +2628,7 @@ pub(crate) fn slash_completion_hints(
     workspace: Option<&std::path::Path>,
     api_provider: ApiProvider,
 ) -> Vec<SlashMenuEntry> {
-    let model_candidates = model_completion_names_for_provider(api_provider)
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let model_candidates = all_catalog_models_for_provider(api_provider);
     slash_completion_hints_with_model_candidates(
         input,
         limit,

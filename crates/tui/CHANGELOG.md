@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Workflow runs are now durable: every run appends to a
+  `.codewhale/workflow-runs.jsonl` journal and hydrates on startup, so
+  `workflow status` survives restarts; runs left `running` by a dead process
+  are recovered as failed (#4011). The transcript renders workflow tool
+  output as a run card (status, goal, children, progress, verification)
+  instead of a generic one-liner (#4038), and `workflow` accepts a `verify`
+  flag that runs post-completion verification gates and fails the run when
+  gates fail (#4013).
+- Hotbar sources for MCP tools and skills: MCP tool slots prefill the
+  composer (execution stays behind the normal tool-approval flow) and skill
+  slots activate through the existing `$skill` alias (#2068, #2069).
+- Mode & permission surface: Tab cycles Plan → Act → Multitask → Operate;
+  Shift+Tab cycles the Agent permission posture (Ask / Auto-Review / Full
+  Access) with a footer permission chip; Ctrl+T cycles reasoning effort and
+  Ctrl+Shift+T opens the live transcript overlay. Multitask raises the
+  default sub-agent fan-out and focuses the Agents sidebar; Operate is a
+  thin Fleet-operator mode wired to `/setup` readiness.
+- Provider lake facade: the provider/model pickers, hotbar, and model
+  inventory now enumerate configured providers' models from the bundled
+  catalog (with an `A` toggle to browse the full catalog), replacing the
+  hardcoded per-provider model table (#3830 follow-up).
+- Added Cursor-integrated-terminal dogfood evidence for the published v0.8.67
+  release, covering installed binary provenance, release/publication checks,
+  headless runtime smoke, setup QA, and remaining manual visual TUI checks.
+- README and README.zh-CN now point users to the community-maintained
+  CodeWhale for VS Code GUI frontend while clarifying that this repository's
+  `extensions/vscode/` scaffold remains the read-only Phase 0 viewer (#4035).
+
+### Fixed
+
+- Workflow correctness: completion polling fails closed instead of
+  fabricating success when a sub-agent reports no terminal status; cancel
+  interrupts the JS VM (cancel handle + abort) and blocks further spawns;
+  and `budget.spent()` reports real manager-scope usage instead of always 0.
+- Sub-agent spawns validate the model↔provider pair before dispatch:
+  inherited/faster routes remap foreign models to the provider's catalog
+  default, and explicit pins fail fast with a diagnostic instead of an
+  upstream model-not-found error.
+- TUI stability: engine event drains break every 8–16 events / 8 ms to keep
+  input live (#1830, #2317, #1198); the terminal input pump restarts after
+  stall recovery on macOS/Linux too; the startup raw-mode probe no longer
+  leaks raw mode on timeout; recovery snapshots persist every 45 s during
+  long turns and the offline queue persists on every push (#1830);
+  queue/steer paths surface toasts while streaming (#2317, #1338); and
+  modal submit errors re-open the modal instead of being swallowed (#1198).
+- app-server hardening: `/v1/chat/completions` requires the bearer token;
+  errors return real 4xx/5xx statuses; request bodies and SSE frames are
+  size-limited; stdio `config get` redacts secrets and stdio shutdown reaps
+  the runtime child; graceful shutdown on SIGTERM/Ctrl+C; constant-time
+  token comparison; dropping the runtime bridge no longer blocks the
+  runtime.
+- Policy/config/secrets: user-layer ExecPolicy rules outrank agent-layer
+  rules; chained commands no longer propose trusted-prefix amendments;
+  config and secrets writes are atomic (with fsync) on all platforms; empty
+  provider chains no longer panic.
+- Core/state: paused jobs persist as paused across restarts; unarchive
+  updates the in-memory cache; tool dispatch has a timeout; MCP
+  notifications no longer receive responses; corrupted checkpoints surface
+  errors instead of loading empty state; the session index compacts instead
+  of growing unbounded; and recording thread-goal usage no longer
+  self-deadlocks the state store.
+- Runtime compaction summaries are now persisted into `/v1` thread records so
+  engine reloads and restarts preserve compacted context. Contributed by
+  MXAntian (@MXAntian) (#4091).
+- The TUI leaves xterm alternate-scroll mode off when mouse capture is disabled,
+  preserving native terminal text selection in light-theme/no-mouse-capture
+  sessions. Contributed by Nightt (@nightt5879) (#4088, #4026).
+- The public `/api/github/feed` endpoint is now forced dynamic on Cloudflare so
+  it returns live GitHub activity instead of a build-time empty feed.
+
+### Changed
+
+- Tool-hang watchdog trimmed from 15 minutes to 10 (#1862); approval modal
+  footer hints use a higher-contrast tier (#3380); status/mode copy is
+  disclosed once across header, footer, cards, and sidebar instead of
+  repeated per layer.
+- Removed the unused `tui::whale_routes` taxonomy module and its tests.
+  Contributed by Darrell Thomas (@DarrellThomas) (#4041, #3852).
+
+### Deprecated
+
+- YOLO mode: `--yolo`, `default_mode = "yolo"`, and the hotbar YOLO action
+  now map to Act + Full Access permissions via a compatibility shim and
+  show a one-shot deprecation notice; removal is planned for 0.9.0.
+
 ## [0.8.67] - 2026-07-06
 
 ### Added

@@ -22,6 +22,7 @@
 //!   guided structured form; the `prompts/constitution.md` escape hatch is
 //!   handled separately in the prompt layer.
 
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -200,7 +201,7 @@ impl UserConstitution {
         if !bounded.working_style.is_empty() {
             body.push_str("Working style:\n");
             for item in &bounded.working_style {
-                body.push_str(&format!("- {item}\n"));
+                let _ = writeln!(body, "- {item}");
             }
             body.push('\n');
         }
@@ -208,7 +209,7 @@ impl UserConstitution {
         if !bounded.priorities.is_empty() {
             body.push_str("Standing priorities:\n");
             for item in &bounded.priorities {
-                body.push_str(&format!("- {item}\n"));
+                let _ = writeln!(body, "- {item}");
             }
             body.push('\n');
         }

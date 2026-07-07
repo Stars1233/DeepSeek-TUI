@@ -693,7 +693,6 @@ pub fn requested_model_for_provider(provider: ApiProvider, model: &str) -> Optio
 ///
 /// Returns `Ok(())` for any tuple we cannot confidently reject (the provider
 /// API remains the final authority for those).
-#[cfg(test)]
 pub fn validate_route(provider: ApiProvider, model: &str) -> Result<(), String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -1879,9 +1878,8 @@ pub struct Config {
     /// DeepSeek reasoning-effort tier: `"off" | "low" | "medium" | "high" | "max"`.
     /// Defaults to `"max"` at runtime if unset.
     pub reasoning_effort: Option<String>,
-    pub tools_file: Option<String>,
-    /// Native tool catalog controls. `tools_file` is the legacy external
-    /// schema path; this table controls built-in tool loading policy.
+    /// Native tool catalog controls. This table controls built-in
+    /// tool loading policy.
     #[serde(default)]
     pub tools: Option<ToolsConfig>,
     pub skills_dir: Option<String>,
@@ -5511,7 +5509,6 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         default_text_model: override_cfg.default_text_model.or(base.default_text_model),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
-        tools_file: override_cfg.tools_file.or(base.tools_file),
         tools: override_cfg.tools.or(base.tools),
         skills_dir: override_cfg.skills_dir.or(base.skills_dir),
         mcp_config_path: override_cfg.mcp_config_path.or(base.mcp_config_path),

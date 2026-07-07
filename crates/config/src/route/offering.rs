@@ -119,21 +119,13 @@ const OFFERING_SEEDS: &[OfferingSeed] = &[
 
 /// Return the bundled offering seam as owned [`ProviderModelOffering`] rows.
 ///
-/// Owned because the newtypes wrap `String`; the seed table stays `&'static`.
+/// Formerly derived from a hand-curated `OFFERING_SEEDS` table; now empty because
+/// every seed row is covered by the bundled Models.dev catalog
+/// ([`crate::catalog::bundled_catalog_offerings`]), which carries the same
+/// canonical-model joins via `base_model` plus honest limits and pricing that the
+/// seeds lacked (#3830 P1 OFFERING_SEEDS dedupe).
 #[must_use]
 pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
-    OFFERING_SEEDS
-        .iter()
-        .map(|seed| ProviderModelOffering {
-            provider: ProviderId::from(seed.provider),
-            canonical_model: seed.canonical_model.map(ModelId::from),
-            wire_model_id: WireModelId::from(seed.wire_model_id),
-            endpoint_key: seed.endpoint_key.to_string(),
-            default_for_provider: seed.default_for_provider,
-            limits: RouteLimits::default(),
-            // The bundled seam carries no sourced cost, so pricing is honestly
-            // unknown here (never a fabricated zero).
-            pricing: PricingSku::UnknownOrStale,
-        })
-        .collect()
+    // The hand-seam is now empty: the catalog is the single source of truth.
+    Vec::new()
 }

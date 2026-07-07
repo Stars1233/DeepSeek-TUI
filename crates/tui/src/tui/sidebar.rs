@@ -1855,7 +1855,7 @@ fn sidebar_tool_row_from_cell(cell: &HistoryCell) -> Option<SidebarToolRow> {
                 &exec.command,
                 exec.status,
                 exec.output_summary.as_deref(),
-                exec.output.as_deref(),
+                exec.output.as_deref().or(exec.live_output.as_deref()),
             ),
             duration_ms: exec.duration_ms.or_else(|| {
                 (exec.status == ToolStatus::Running).then(|| {
@@ -2739,7 +2739,7 @@ pub fn subagent_panel_lines(
 fn subagent_panel_rows(
     summary: &SidebarSubagentSummary,
     rows: &[SidebarAgentRow],
-    locale: Locale,
+    _locale: Locale,
     content_width: usize,
     max_rows: usize,
     theme: &palette::UiTheme,
@@ -2809,7 +2809,7 @@ fn subagent_panel_rows(
         let tree_prefix = agent_tree_prefix(row);
         let label = format!(
             "{tree_prefix}{marker} {}",
-            sidebar_agent_status_sentence(row, locale)
+            sidebar_agent_row_label(row, content_width.max(1))
         );
         let label = if sidebar_agent_status_is_running(row.status.as_str()) {
             label_with_stop_target(&label, content_width.max(1))
@@ -2904,108 +2904,27 @@ fn sidebar_agent_status_is_running(status: &str) -> bool {
     )
 }
 
-fn sidebar_agent_status_sentence(row: &SidebarAgentRow, locale: Locale) -> String {
-    let verb = match locale {
-        Locale::En => match row.status.as_str() {
-            "queued" => "is queued",
-            "starting" => "is starting",
-            "running" => "is working",
-            "waiting" => "is waiting",
-            "model wait" => "is thinking",
-            "tool" => "is using tools",
-            "done" => "is done",
-            "canceled" => "was cancelled",
-            "failed" => "failed",
-            "interrupted" => "was interrupted",
-            "budget" => "hit budget",
-            _ => row.status.as_str(),
-        },
-        Locale::Ja => match row.status.as_str() {
-            "queued" => "は待機中",
-            "starting" => "は開始中",
-            "running" => "は作業中",
-            "waiting" => "は待機中",
-            "model wait" => "は思考中",
-            "tool" => "はツール使用中",
-            "done" => "は完了",
-            "canceled" => "はキャンセル済み",
-            "failed" => "は失敗",
-            "interrupted" => "は中断",
-            "budget" => "は予算上限",
-            _ => row.status.as_str(),
-        },
-        Locale::ZhHans => match row.status.as_str() {
-            "queued" => "正在排队",
-            "starting" => "正在启动",
-            "running" => "正在工作",
-            "waiting" => "正在等待",
-            "model wait" => "正在思考",
-            "tool" => "正在使用工具",
-            "done" => "已完成",
-            "canceled" => "已取消",
-            "failed" => "失败",
-            "interrupted" => "已中断",
-            "budget" => "已到预算上限",
-            _ => row.status.as_str(),
-        },
-        Locale::ZhHant => match row.status.as_str() {
-            "queued" => "正在排隊",
-            "starting" => "正在啟動",
-            "running" => "正在工作",
-            "waiting" => "正在等待",
-            "model wait" => "正在思考",
-            "tool" => "正在使用工具",
-            "done" => "已完成",
-            "canceled" => "已取消",
-            "failed" => "失敗",
-            "interrupted" => "已中斷",
-            "budget" => "已到預算上限",
-            _ => row.status.as_str(),
-        },
-        Locale::PtBr => match row.status.as_str() {
-            "queued" => "esta na fila",
-            "starting" => "esta iniciando",
-            "running" => "esta trabalhando",
-            "waiting" => "esta aguardando",
-            "model wait" => "esta pensando",
-            "tool" => "esta usando ferramentas",
-            "done" => "terminou",
-            "canceled" => "foi cancelado",
-            "failed" => "falhou",
-            "interrupted" => "foi interrompido",
-            "budget" => "atingiu o limite",
-            _ => row.status.as_str(),
-        },
-        Locale::Es419 => match row.status.as_str() {
-            "queued" => "esta en cola",
-            "starting" => "esta iniciando",
-            "running" => "esta trabajando",
-            "waiting" => "esta esperando",
-            "model wait" => "esta pensando",
-            "tool" => "esta usando herramientas",
-            "done" => "termino",
-            "canceled" => "se cancelo",
-            "failed" => "fallo",
-            "interrupted" => "se interrumpio",
-            "budget" => "llego al limite",
-            _ => row.status.as_str(),
-        },
-        Locale::Vi => match row.status.as_str() {
-            "queued" => "dang xep hang",
-            "starting" => "dang bat dau",
-            "running" => "dang lam viec",
-            "waiting" => "dang doi",
-            "model wait" => "dang suy nghi",
-            "tool" => "dang dung cong cu",
-            "done" => "da xong",
-            "canceled" => "da huy",
-            "failed" => "that bai",
-            "interrupted" => "bi gian doan",
-            "budget" => "het ngan sach",
-            _ => row.status.as_str(),
-        },
-    };
-    format!("{} {verb}", row.name)
+fn sidebar_agent_row_label(row: &SidebarAgentRow, max_width: usize) -> String {
+    let detail = row
+        .objective
+        .as_deref()
+        .filter(|objective| !objective.trim().is_empty())
+        .map(summarize_tool_output)
+        .or_else(|| {
+            // Progress is only a live substitute for a missing objective;
+            // terminal rows would resurface stale in-flight detail.
+            if sidebar_agent_status_is_terminal(row.status.as_str()) {
+                return None;
+            }
+            row.progress
+                .as_deref()
+                .filter(|progress| !progress.trim().is_empty())
+                .map(summarize_tool_output)
+        });
+    match detail {
+        Some(detail) => truncate_line_to_width(&format!("{} — {}", row.name, detail), max_width),
+        None => truncate_line_to_width(&row.name, max_width),
+    }
 }
 
 fn subagent_panel_hover_texts(
@@ -3182,32 +3101,16 @@ fn render_context_panel(f: &mut Frame, area: Rect, app: &mut App) {
     ]));
 
     // ── Token usage ──────────────────────────────────────────────
+    // Context % is disclosed in the header; the sidebar keeps the raw token
+    // counts for at-a-glance reference without duplicating the bar.
     let total_tokens = app.session.total_conversation_tokens;
     let window = crate::route_budget::route_context_window_tokens(
         app.api_provider,
         app.effective_model_for_budget(),
         app.active_route_limits,
     );
-    let pct = if window > 0 {
-        ((total_tokens as f64 / window as f64) * 100.0).clamp(0.0, 100.0)
-    } else {
-        0.0
-    };
-    let bar_width = content_width.min(20);
-    let filled = ((pct / 100.0) * bar_width as f64) as usize;
-    let bar = format!(
-        "[{}{}] {:.0}%",
-        "█".repeat(filled),
-        "░".repeat(bar_width.saturating_sub(filled)),
-        pct
-    );
     lines.push(Line::from(Span::styled(
-        format!(
-            "context: {}/{} tokens  {}",
-            total_tokens,
-            window,
-            truncate_line_to_width(&bar, content_width.saturating_sub(32).max(8))
-        ),
+        format!("context: {total_tokens}/{window} tokens"),
         Style::default().fg(theme.text_muted),
     )));
 
@@ -3937,10 +3840,6 @@ mod tests {
         assert!(
             rendered.contains("critic") || rendered.contains("Agent 1"),
             "pinned sidebar should render the child agent label: {rendered:?}"
-        );
-        assert!(
-            rendered.contains("critic is working"),
-            "pinned sidebar should render localized child status: {rendered:?}"
         );
         assert!(
             !rendered.contains("checking sidebar visibility"),
@@ -5794,8 +5693,7 @@ mod tests {
             text[1]
         );
         assert!(
-            text.iter()
-                .any(|l| l.contains("[~] check-docs-mcp is working")),
+            text.iter().any(|l| l.contains("[~] check-docs-mcp")),
             "running row missing: {text:?}",
         );
         assert!(

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -62,6 +62,10 @@ mod legacy_deepseek_compat {
         PathBuf::from(".deepseek/events.jsonl")
     }
 }
+
+/// Upper bound on JSON request bodies accepted by the HTTP app-server.
+const MAX_HTTP_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SSE_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 const DEFAULT_CORS_ORIGINS: &[&str] = &[
     "http://localhost",
@@ -213,8 +217,34 @@ pub async fn run(options: AppServerOptions) -> Result<()> {
     let app = app_router(state, &options.cors_origins);
 
     let listener = tokio::net::TcpListener::bind(options.listen).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 fn app_router(state: AppState, cors_origins: &[String]) -> Router {
@@ -225,6 +255,10 @@ fn app_router(state: AppState, cors_origins: &[String]) -> Router {
         .route("/tool", post(tool_handler))
         .route("/jobs", get(jobs_handler))
         .route("/mcp/startup", post(mcp_startup_handler))
+        .route(
+            "/v1/chat/completions",
+            post(chat_completions::chat_completions_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_app_server_token,
@@ -232,11 +266,8 @@ fn app_router(state: AppState, cors_origins: &[String]) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
-        .route(
-            "/v1/chat/completions",
-            post(chat_completions::chat_completions_handler),
-        )
         .merge(protected_routes)
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
         .layer(cors_layer(cors_origins))
         .with_state(state)
 }
@@ -259,7 +290,7 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
                     None,
                     JsonRpcError::parse_error(format!("invalid json: {err}")),
                 );
-                writer.write_all(response.to_string().as_bytes()).await?;
+                writer.write_all(&serde_json::to_vec(&response)?).await?;
                 writer.write_all(b"\n").await?;
                 writer.flush().await?;
                 continue;
@@ -275,7 +306,7 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
                 request.id,
                 JsonRpcError::invalid_request("jsonrpc version must be 2.0"),
             );
-            writer.write_all(response.to_string().as_bytes()).await?;
+            writer.write_all(&serde_json::to_vec(&response)?).await?;
             writer.write_all(b"\n").await?;
             writer.flush().await?;
             continue;
@@ -291,7 +322,7 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
         {
             Ok(dispatch) => {
                 let encoded = jsonrpc_result(request.id, dispatch.result);
-                writer.write_all(encoded.to_string().as_bytes()).await?;
+                writer.write_all(&serde_json::to_vec(&encoded)?).await?;
                 writer.write_all(b"\n").await?;
                 writer.flush().await?;
                 if dispatch.should_exit {
@@ -302,7 +333,7 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
             Err(err) => jsonrpc_error(request.id, err),
         };
 
-        writer.write_all(response.to_string().as_bytes()).await?;
+        writer.write_all(&serde_json::to_vec(&response)?).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
     }
@@ -321,47 +352,53 @@ async fn healthz() -> Json<Value> {
 async fn thread_handler(
     State(state): State<AppState>,
     Json(req): Json<ThreadRequest>,
-) -> Json<ThreadResponse> {
+) -> (StatusCode, Json<ThreadResponse>) {
     let mut runtime = state.runtime.write().await;
     match runtime.handle_thread(req).await {
-        Ok(res) => Json(res),
-        Err(err) => Json(ThreadResponse {
-            thread_id: "error".to_string(),
-            status: format!("error:{err}"),
-            thread: None,
-            threads: Vec::new(),
-            goal: None,
-            model: None,
-            model_provider: None,
-            cwd: None,
-            approval_policy: None,
-            sandbox: None,
-            events: Vec::new(),
-            data: json!({}),
-        }),
+        Ok(res) => (StatusCode::OK, Json(res)),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ThreadResponse {
+                thread_id: "error".to_string(),
+                status: format!("error:{err}"),
+                thread: None,
+                threads: Vec::new(),
+                goal: None,
+                model: None,
+                model_provider: None,
+                cwd: None,
+                approval_policy: None,
+                sandbox: None,
+                events: Vec::new(),
+                data: json!({}),
+            }),
+        ),
     }
 }
 
 async fn prompt_handler(
     State(state): State<AppState>,
     Json(req): Json<PromptRequest>,
-) -> Json<PromptResponse> {
+) -> (StatusCode, Json<PromptResponse>) {
     let mut runtime = state.runtime.write().await;
     let overrides = CliRuntimeOverrides::default();
     match runtime.handle_prompt(req, &overrides).await {
-        Ok(res) => Json(res),
-        Err(err) => Json(PromptResponse {
-            output: err.to_string(),
-            model: "unknown".to_string(),
-            events: Vec::new(),
-        }),
+        Ok(res) => (StatusCode::OK, Json(res)),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(PromptResponse {
+                output: err.to_string(),
+                model: "unknown".to_string(),
+                events: Vec::new(),
+            }),
+        ),
     }
 }
 
 async fn tool_handler(
     State(state): State<AppState>,
     Json(req): Json<ToolCallRequest>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let cwd = req
         .cwd
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -382,8 +419,11 @@ async fn tool_handler(
     // reads instead of serializing every request behind one Mutex.
     let runtime = state.runtime.read().await;
     match runtime.invoke_tool(req.call, approval_mode, &cwd).await {
-        Ok(value) => Json(value),
-        Err(err) => Json(json!({ "ok": false, "error": err.to_string() })),
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        ),
     }
 }
 
@@ -404,8 +444,27 @@ async fn mcp_startup_handler(State(state): State<AppState>) -> Json<Value> {
 async fn app_handler(
     State(state): State<AppState>,
     Json(req): Json<AppRequest>,
-) -> Json<AppResponse> {
-    Json(process_app_request(&state, req, AppTransport::Http).await)
+) -> (StatusCode, Json<AppResponse>) {
+    let response = process_app_request(&state, req, AppTransport::Http).await;
+    (app_response_status(&response), Json(response))
+}
+
+fn app_response_status(response: &AppResponse) -> StatusCode {
+    if response.ok {
+        return StatusCode::OK;
+    }
+    if response.data.get("request_id").is_some() {
+        StatusCode::CONFLICT
+    } else if response
+        .data
+        .get("error")
+        .and_then(Value::as_str)
+        .is_some_and(|err| err.contains("failed to load config"))
+    {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::BAD_REQUEST
+    }
 }
 
 fn build_state(config_path: Option<PathBuf>, auth_token: Option<String>) -> Result<AppState> {
@@ -540,7 +599,7 @@ async fn require_app_server_token(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|raw| raw.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected);
+        .is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()));
 
     if authorized {
         next.run(req).await
@@ -556,6 +615,18 @@ async fn require_app_server_token(
         )
             .into_response()
     }
+}
+
+/// Compares the full length of both inputs regardless of where they first
+/// differ, so auth failures don't leak the matching prefix length via timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= usize::from(x ^ y);
+    }
+    diff == 0
 }
 
 fn params_or_object(params: Value) -> Value {
@@ -958,6 +1029,11 @@ impl RuntimeBridge {
 
         while let Some(chunk) = response.chunk().await? {
             buffer.extend_from_slice(&chunk);
+            if buffer.len() > MAX_SSE_FRAME_BYTES {
+                bail!(
+                    "runtime SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes without a frame delimiter"
+                );
+            }
             while let Some(frame_bytes) = take_sse_frame(&mut buffer) {
                 let Some((event_name, frame_data)) = parse_sse_frame(&frame_bytes) else {
                     continue;
@@ -1025,12 +1101,22 @@ impl RuntimeBridge {
     }
 }
 
+impl RuntimeBridge {
+    /// Kills the managed runtime child and reaps it on a detached thread so
+    /// neither an explicit shutdown nor Drop blocks a Tokio runtime thread.
+    fn shutdown_child(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
+
 impl Drop for RuntimeBridge {
     fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.shutdown_child();
     }
 }
 
@@ -1066,7 +1152,7 @@ fn turn_terminal_status(payload: &Value) -> TurnTerminalStatus {
 }
 
 async fn emit_stdio_event<W: AsyncWrite + Unpin>(writer: &mut W, event: Value) -> Result<()> {
-    writer.write_all(event.to_string().as_bytes()).await?;
+    writer.write_all(&serde_json::to_vec(&event)?).await?;
     writer.write_all(b"\n").await?;
     writer.flush().await?;
     Ok(())
@@ -1421,10 +1507,15 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                 should_exit: false,
             }
         }
-        "shutdown" => StdioDispatchResult {
-            result: json!({"ok": true, "status": "stopped"}),
-            should_exit: true,
-        },
+        "shutdown" => {
+            if let Some(bridge) = state.stdio_bridge.lock().await.take() {
+                bridge.lock().await.shutdown_child();
+            }
+            StdioDispatchResult {
+                result: json!({"ok": true, "status": "stopped"}),
+                should_exit: true,
+            }
+        }
         _ => return Err(JsonRpcError::method_not_found(method)),
     };
     Ok(outcome)
@@ -1433,7 +1524,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
 async fn process_app_request(
     state: &AppState,
     req: AppRequest,
-    transport: AppTransport,
+    _transport: AppTransport,
 ) -> AppResponse {
     match req {
         AppRequest::Capabilities => AppResponse {
@@ -1449,10 +1540,7 @@ async fn process_app_request(
         },
         AppRequest::ConfigGet { key } => {
             let cfg = state.config.read().await;
-            let value = match transport {
-                AppTransport::Http => cfg.get_display_value(&key),
-                AppTransport::Stdio => cfg.get_value(&key),
-            };
+            let value = cfg.get_display_value(&key);
             AppResponse {
                 ok: true,
                 data: json!({ "key": key, "value": value }),
@@ -2130,7 +2218,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stdio_transport_keeps_raw_config_get_for_legacy_clients() {
+    async fn stdio_transport_redacts_config_get_secrets() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.toml");
         fs::write(&config_path, "").expect("write config");
@@ -2149,7 +2237,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.data["value"], "sk-deepseek-secret");
+        assert_eq!(response.data["value"], "sk-d***cret");
     }
 
     #[tokio::test]

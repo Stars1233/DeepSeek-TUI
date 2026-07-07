@@ -34,9 +34,9 @@ use checklist::{
 #[cfg(test)]
 use checklist::{ChecklistChange, ChecklistItemSnapshot, ChecklistSnapshot};
 use constants::{
-    ASSISTANT_GLYPH, TOOL_CARD_SUMMARY_LINES, TOOL_COMMAND_LINE_LIMIT, TOOL_DONE_SYMBOL,
-    TOOL_FAILED_SYMBOL, TOOL_HEADER_SUMMARY_LIMIT, TOOL_OUTPUT_LINE_LIMIT, TRANSCRIPT_RAIL,
-    USER_GLYPH,
+    ASSISTANT_GLYPH, FOREGROUND_SHELL_WAIT_HINT, TOOL_CARD_SUMMARY_LINES, TOOL_COMMAND_LINE_LIMIT,
+    TOOL_DONE_SYMBOL, TOOL_FAILED_SYMBOL, TOOL_HEADER_SUMMARY_LIMIT, TOOL_OUTPUT_LINE_LIMIT,
+    TRANSCRIPT_RAIL, USER_GLYPH,
 };
 #[cfg(test)]
 use constants::{TOOL_RUNNING_SYMBOLS, TOOL_STATUS_SYMBOL_MS};
@@ -656,6 +656,13 @@ impl ExecCell {
         self.render(width, low_motion, RenderMode::Live)
     }
 
+    /// Foreground `exec_shell` blocking the turn — eligible for Ctrl+B detach.
+    fn is_foreground_shell_wait(&self) -> bool {
+        self.status == ToolStatus::Running
+            && self.source == ExecSource::Assistant
+            && self.interaction.is_none()
+    }
+
     pub(super) fn render(
         &self,
         width: u16,
@@ -664,10 +671,14 @@ impl ExecCell {
     ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let command_summary = command_header_summary(&self.command);
-        let header_summary = self
-            .interaction
-            .as_deref()
-            .or(Some(command_summary.as_str()));
+        let compact_foreground_wait = self.is_foreground_shell_wait();
+        let header_summary = if compact_foreground_wait {
+            Some(FOREGROUND_SHELL_WAIT_HINT)
+        } else {
+            self.interaction
+                .as_deref()
+                .or(Some(command_summary.as_str()))
+        };
         lines.push(render_tool_header_with_summary(
             "Shell",
             header_summary,
@@ -676,6 +687,14 @@ impl ExecCell {
             self.started_at,
             low_motion,
         ));
+
+        // Foreground shell waits block the turn but do not need a verbose
+        // transcript card — spinner + running badge + Ctrl+B hint only.
+        // Command, live output, and artifact paths belong in the Tasks sidebar
+        // and `/jobs` detail surfaces.
+        if compact_foreground_wait {
+            return wrap_card_rail(lines);
+        }
 
         // A successful shell call is rarely worth its full body — collapse it
         // to the single header line in live mode. The bottom shell strip owns
@@ -806,14 +825,18 @@ impl ExploringCell {
             ToolStatus::Running
         };
         let header_summary = exploring_header_summary(&self.entries);
+        let multi_entry = self.entries.len() > 1;
+        let header_state = if multi_entry {
+            ""
+        } else if all_done {
+            tool_status_label(status)
+        } else {
+            "running"
+        };
         lines.push(render_tool_header_with_summary(
             "Workspace",
             header_summary.as_deref(),
-            if all_done {
-                tool_status_label(status)
-            } else {
-                "running"
-            },
+            header_state,
             status,
             None,
             low_motion,
@@ -849,23 +872,32 @@ impl ExploringCell {
             );
             lines.push(Line::styled(
                 format!("  {dots}  {counts}"),
-                Style::default().fg(palette::DEEPSEEK_SKY),
+                Style::default().fg(palette::WHALE_INFO),
             ));
         }
 
         for entry in &self.entries {
-            let prefix = match entry.status {
-                ToolStatus::Running => "live",
-                ToolStatus::Success => "done",
-                ToolStatus::Hydrated => "loaded",
-                ToolStatus::Failed => "issue",
-            };
-            lines.extend(render_compact_kv(
-                prefix,
-                &entry.label,
-                tool_value_style(),
-                width,
-            ));
+            if multi_entry {
+                lines.extend(render_card_detail_line(
+                    None,
+                    &entry.label,
+                    tool_value_style(),
+                    width,
+                ));
+            } else {
+                let prefix = match entry.status {
+                    ToolStatus::Running => "live",
+                    ToolStatus::Success => "done",
+                    ToolStatus::Hydrated => "loaded",
+                    ToolStatus::Failed => "issue",
+                };
+                lines.extend(render_compact_kv(
+                    prefix,
+                    &entry.label,
+                    tool_value_style(),
+                    width,
+                ));
+            }
         }
         lines
     }
@@ -1272,9 +1304,9 @@ impl GenericToolCell {
             return lines;
         }
 
-        // #dogfood 0.8.67: give the `workflow` tool a purpose-built run card
-        // (run_id, status, goal, children, progress, schema errors) instead of
-        // collapsing to a one-line generic header or dumping the raw JSON record.
+        // #4038: give the `workflow` tool a purpose-built run card (run_id,
+        // status, goal, children, progress, schema errors) instead of
+        // collapsing to a one-line generic header or dumping raw JSON.
         if let Some(lines) = self.try_render_as_workflow(width, low_motion) {
             return lines;
         }
@@ -1457,12 +1489,14 @@ impl GenericToolCell {
         ))
     }
 
-    /// #dogfood 0.8.67: render the `workflow` tool as a compact run card rather
-    /// than the generic one-line header (live) or a large JSON dump
-    /// (transcript). Fields are parsed defensively from the tool's JSON output,
-    /// which is either a single `WorkflowRunRecord` or a `{action:"status",
+    /// Render the `workflow` tool as a compact run card rather than the
+    /// generic one-line header (live) or a large JSON dump (transcript).
+    /// Fields are parsed defensively from the tool's JSON output, which is
+    /// either a single `WorkflowRunRecord` or a `{action:"status",
     /// runs:[...]}` list; anything that does not parse falls back to the
-    /// generic renderer. Full precision (#4038 live overlay) is future work.
+    /// generic renderer. The header owns the lifecycle label (Wave 5c #7);
+    /// the body deliberately carries no `status:` KV. Full live overlay
+    /// (#4038) is future work.
     fn try_render_as_workflow(&self, width: u16, low_motion: bool) -> Option<Vec<Line<'static>>> {
         if self.name != "workflow" {
             return None;
@@ -1534,14 +1568,6 @@ impl GenericToolCell {
             None,
             low_motion,
         ));
-        if let Some(status) = value.get("status").and_then(serde_json::Value::as_str) {
-            lines.extend(render_compact_kv(
-                "status",
-                status,
-                tool_value_style(),
-                width,
-            ));
-        }
         if let Some(goal) = value
             .get("workflow_goal")
             .and_then(serde_json::Value::as_str)
@@ -1571,6 +1597,18 @@ impl GenericToolCell {
             lines.extend(render_card_detail_line(
                 Some("progress"),
                 &format!("{} ({} events)", truncate_text(last, 160), progress.len()),
+                tool_value_style(),
+                width,
+            ));
+        }
+        if let Some(verification) = value.get("verification")
+            && let Some(summary) = verification
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+        {
+            lines.extend(render_card_detail_line(
+                Some("verification"),
+                &truncate_text(summary, 200),
                 tool_value_style(),
                 width,
             ));

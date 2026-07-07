@@ -158,9 +158,6 @@ memory_path = "~/.codewhale/memory.md"
 # enabled = true            # turn the feature on (default: false)
 # Override the env-var equivalent: `DEEPSEEK_MEMORY=on`
 
-# Parsed but currently unused (reserved for future versions):
-# tools_file = "./tools.json"
-
 # Xiaomi MiMo speech/TTS defaults. Also configurable with
 # XIAOMI_MIMO_SPEECH_OUTPUT_DIR / MIMO_SPEECH_OUTPUT_DIR.
 [speech]

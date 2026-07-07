@@ -607,7 +607,7 @@ impl ToolSpec for UpdateGoalTool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -628,12 +628,20 @@ mod tests {
             .await
             .expect("create goal");
         assert!(created.success);
-        assert!(created.content.contains("\"status\": \"active\""));
+        let created_json: Value = serde_json::from_str(&created.content).expect("created json");
+        assert_eq!(
+            created_json.get("status").and_then(Value::as_str),
+            Some("active")
+        );
 
         let get = GetGoalTool::new(state.clone());
         let current = get.execute(json!({}), &ctx).await.expect("get goal");
         assert!(current.content.contains("ship the runtime slice"));
-        assert!(current.content.contains("\"token_budget\": 1200"));
+        let current_json: Value = serde_json::from_str(&current.content).expect("current json");
+        assert_eq!(
+            current_json.get("token_budget").and_then(Value::as_u64),
+            Some(1200)
+        );
 
         let update = UpdateGoalTool::new(state.clone());
         let completed = update
@@ -651,7 +659,12 @@ mod tests {
             )
             .await
             .expect("complete goal");
-        assert!(completed.content.contains("\"status\": \"complete\""));
+        let completed_json: Value =
+            serde_json::from_str(&completed.content).expect("completed json");
+        assert_eq!(
+            completed_json.get("status").and_then(Value::as_str),
+            Some("complete")
+        );
         assert!(completed.content.contains("focused tests passed"));
         assert!(!state.lock().expect("goal lock").is_active());
     }
@@ -696,8 +709,19 @@ mod tests {
             .await
             .expect("non-verifiable goal should complete");
 
-        assert!(completed.content.contains("\"status\": \"complete\""));
-        assert!(completed.content.contains("\"status\": \"not_applicable\""));
+        let completed_json: Value =
+            serde_json::from_str(&completed.content).expect("completed json");
+        assert_eq!(
+            completed_json.get("status").and_then(Value::as_str),
+            Some("complete")
+        );
+        assert_eq!(
+            completed_json
+                .get("completion_verification")
+                .and_then(|verification| verification.get("status"))
+                .and_then(Value::as_str),
+            Some("not_applicable")
+        );
         assert!(!state.lock().expect("goal lock").is_active());
     }
 

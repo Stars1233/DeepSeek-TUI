@@ -438,7 +438,7 @@ fn modal_block() -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette::BORDER_COLOR))
-        .style(Style::default().bg(palette::DEEPSEEK_INK))
+        .style(Style::default().bg(palette::WHALE_BG))
         .padding(Padding::uniform(1))
 }
 
@@ -743,7 +743,7 @@ impl CommandPaletteView {
         Line::from(vec![Span::styled(
             format!("  {title} ({count})  "),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         )])
     }
@@ -1736,7 +1736,7 @@ mod tests {
             assert!(!text.contains('X'), "{w}x{h}: background bleed-through");
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
 

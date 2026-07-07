@@ -202,7 +202,7 @@ impl ModalView for FleetRosterView {
             )
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .padding(Padding::uniform(1));
 
         let inner = block.inner(popup_area);
@@ -219,7 +219,7 @@ impl ModalView for FleetRosterView {
         let header = vec![
             Line::from(Span::styled(
                 "The saved party",
-                Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+                Style::default().fg(palette::WHALE_INFO).bold(),
             )),
             Line::from(Span::styled(
                 "Built-ins < config [fleet.profiles] < project .codewhale/agents. s edits.",
@@ -336,7 +336,7 @@ impl FleetRosterView {
 fn detail_field(lines: &mut Vec<Line<'static>>, label: &str, body: String) {
     lines.push(Line::from(Span::styled(
         label.to_string(),
-        Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+        Style::default().fg(palette::WHALE_INFO).bold(),
     )));
     lines.push(Line::from(Span::styled(
         body,

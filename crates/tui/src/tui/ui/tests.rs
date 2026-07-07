@@ -2543,7 +2543,7 @@ fn active_tool_status_label_summarizes_live_tool_group() {
     );
     app.active_cell = Some(active);
 
-    let label = active_tool_status_label(&app).expect("status label");
+    let label = active_tool_status_label(&app, true).expect("status label");
 
     assert!(label.contains("cargo test"));
     assert!(label.contains("1 active"));
@@ -2689,7 +2689,7 @@ fn active_tool_status_label_strips_shell_wrappers_from_ci_polling() {
     );
     app.active_cell = Some(active);
 
-    let label = active_tool_status_label(&app).expect("status label");
+    let label = active_tool_status_label(&app, true).expect("status label");
 
     assert!(label.contains("gh pr checks 1611"), "label: {label}");
     assert!(!label.contains("cd /tmp"), "label: {label}");
@@ -2716,7 +2716,7 @@ fn active_tool_status_label_counts_foreground_rlm_work() {
     );
     app.active_cell = Some(active);
 
-    let label = active_tool_status_label(&app).expect("status label");
+    let label = active_tool_status_label(&app, true).expect("status label");
 
     assert!(label.contains("rlm"), "label: {label}");
     assert!(!label.contains("tool rlm"), "label: {label}");
@@ -2867,7 +2867,9 @@ async fn mode_change_update_notifies_engine() {
             auto_approve,
             approval_mode,
         } => {
-            assert_eq!(mode, crate::tui::app::AppMode::Yolo);
+            // The deprecated YOLO alias lands in Agent mode with full-access
+            // compat policies (M6 shim); the engine sees the remapped mode.
+            assert_eq!(mode, crate::tui::app::AppMode::Agent);
             assert!(allow_shell);
             assert!(trust_mode);
             assert!(auto_approve);
@@ -5608,7 +5610,7 @@ fn stall_reason_provider_wait_reports_zero_running_for_planned_fanout() {
 
     // A fanout plan exists (card seeded with pending workers) but no child
     // agent has launched yet: the reason must say 0 running explicitly.
-    let card = crate::tui::widgets::agent_card::FanoutCard::new("rlm", app.ui_locale)
+    let card = crate::tui::widgets::agent_card::FanoutCard::new("rlm")
         .with_workers(["task:a", "task:b", "task:c", "task:d"]);
     app.history
         .push(HistoryCell::SubAgent(SubAgentCell::Fanout(card)));
@@ -5729,15 +5731,13 @@ fn format_context_budget_caps_overflow_display() {
 }
 
 #[test]
-fn footer_state_label_shows_idle_busy_and_prefers_compacting() {
-    // The footer should expose a steady idle/busy state chip without reviving
-    // the old misleading "thinking" label. Compacting still wins because it
-    // is a less-common, distinct state.
+fn footer_state_label_shows_idle_ready_and_prefers_compacting() {
+    // Header ● Live owns coarse busy state during streaming turns.
     let mut app = create_test_app();
     assert_eq!(footer_state_label(&app).0, "idle");
 
     app.is_loading = true;
-    assert_eq!(footer_state_label(&app).0, "busy");
+    assert_eq!(footer_state_label(&app).0, "ready");
     assert_ne!(footer_state_label(&app).0, "thinking");
 
     app.is_compacting = true;
@@ -6016,25 +6016,25 @@ fn slow_external_url_command() -> Command {
 }
 
 #[test]
-fn footer_status_line_spans_show_mode_and_model_idle_and_active() {
+fn footer_status_line_spans_show_model_idle_and_active() {
     let mut app = create_test_app();
     app.model = "deepseek-v4-flash".to_string();
-    // Pin Agent mode regardless of user settings on the host machine.
-    let _ = app.set_mode(crate::tui::app::AppMode::Agent);
 
     let idle = spans_text(&footer_status_line_spans(&app, 60));
-    assert!(idle.contains("agent"));
     assert!(idle.contains("deepseek-v4-flash"));
     assert!(idle.contains("\u{00B7}"));
     assert!(idle.contains("idle"));
+    assert!(!idle.contains("act"));
+    assert!(!idle.contains("agent"));
 
-    // is_loading uses the state chip, not a misleading "thinking" text label.
-    // The mode + model still render unchanged.
+    // Header ● Live owns coarse busy state; footer defers to action detail.
     app.is_loading = true;
     let active = spans_text(&footer_status_line_spans(&app, 60));
-    assert!(active.contains("agent"));
     assert!(active.contains("deepseek-v4-flash"));
-    assert!(active.contains("busy"));
+    assert!(
+        !active.contains("busy"),
+        "footer must not repeat coarse busy when header streams: {active}"
+    );
     assert!(
         !active.contains("thinking"),
         "footer must not show a `thinking` text label while loading"
@@ -7518,6 +7518,88 @@ async fn enter_while_model_waiting_steers_instead_of_queueing() {
     );
 }
 
+#[test]
+fn engine_drain_budget_respects_event_and_time_limits() {
+    let start = Instant::now();
+    assert!(!engine_drain_budget_exhausted(0, start, start));
+    assert!(!engine_drain_budget_exhausted(1, start, start));
+    assert!(engine_drain_budget_exhausted(
+        MAX_ENGINE_EVENTS_PER_DRAIN,
+        start,
+        start
+    ));
+    assert!(engine_drain_budget_exhausted(
+        1,
+        start,
+        start + ENGINE_DRAIN_TIME_BUDGET
+    ));
+}
+
+#[test]
+fn throttled_recovery_snapshot_persists_during_loading_turns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "in-progress turn"));
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+
+    let mut last_snapshot_at = None;
+    let t0 = Instant::now();
+    maybe_throttled_recovery_snapshot(&mut app, t0, &mut last_snapshot_at);
+    assert!(last_snapshot_at.is_some());
+    let snapshot = build_session_snapshot(&app, &manager);
+    assert_eq!(snapshot.messages.len(), 1);
+
+    maybe_throttled_recovery_snapshot(
+        &mut app,
+        t0 + RECOVERY_SNAPSHOT_INTERVAL / 2,
+        &mut last_snapshot_at,
+    );
+    maybe_throttled_recovery_snapshot(
+        &mut app,
+        t0 + RECOVERY_SNAPSHOT_INTERVAL,
+        &mut last_snapshot_at,
+    );
+}
+
+#[tokio::test]
+async fn steer_failure_queues_message_and_surfaces_toast() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    let engine = crate::core::engine::mock_engine_handle();
+    drop(engine.rx_steer);
+    let queued = crate::tui::app::QueuedMessage::new("follow up while busy".to_string(), None);
+
+    attempt_steer_with_queue_fallback(&mut app, &engine.handle, queued).await;
+
+    assert_eq!(app.queued_message_count(), 1);
+    let toast = app.status_toasts.back().expect("steer failure toast");
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    assert!(toast.text.contains("Steer failed"));
+}
+
+#[tokio::test]
+async fn streaming_enter_queue_pushes_visible_toast() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.streaming_message_index = Some(0);
+    let config = Config::default();
+    let engine = crate::core::engine::mock_engine_handle();
+    let queued = build_queued_message(&mut app, "follow up during stream".to_string());
+
+    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
+        .await
+        .expect("streaming submit queues");
+
+    assert_eq!(app.queued_message_count(), 1);
+    let toast = app.status_toasts.back().expect("queue toast");
+    assert_eq!(toast.level, StatusToastLevel::Info);
+    assert!(toast.text.contains("Queued follow-up"));
+}
+
 #[tokio::test]
 async fn numeric_plan_choice_still_queues_follow_up_when_busy() {
     let mut app = create_test_app();
@@ -7534,7 +7616,13 @@ async fn numeric_plan_choice_still_queues_follow_up_when_busy() {
 
     assert!(handled);
     assert!(!app.plan_prompt_pending);
-    assert_eq!(app.mode, AppMode::Yolo);
+    // Plan choice 2 (accept in YOLO) lands in Agent mode + bypass approvals
+    // via the M6 compat shim.
+    assert_eq!(app.mode, AppMode::Agent);
+    assert_eq!(
+        app.approval_mode,
+        crate::tui::approval::ApprovalMode::Bypass
+    );
     assert_eq!(app.queued_message_count(), 1);
     assert_eq!(
         app.queued_messages
@@ -10865,14 +10953,13 @@ fn build_pending_input_preview_includes_current_context_chips() {
 }
 
 #[test]
-fn render_footer_from_with_default_items_renders_mode_and_model() {
-    // Default footer composition should show the mode chip and model
-    // identifier — whatever the configured default model is.
+fn render_footer_from_with_default_items_renders_model_without_mode() {
+    // Header owns mode; footer shows model/cost/status only.
     let mut app = create_test_app();
     app.session.session_cost = 0.00005;
     let items = crate::config::StatusItem::default_footer();
     let props = render_footer_from(&app, &items, None);
-    assert_eq!(props.mode_label, "agent");
+    assert!(props.mode_label.is_empty(), "footer should not repeat mode");
     assert!(!props.model.is_empty(), "footer should show a model name");
     // Tiny but real costs should render instead of disappearing as "$0.00".
     assert!(!props.cost.is_empty());
@@ -10978,7 +11065,7 @@ fn render_footer_from_drops_only_unselected_clusters() {
         .filter(|item| *item != crate::config::StatusItem::Cost)
         .collect();
     let props = render_footer_from(&app, &items, None);
-    assert_eq!(props.mode_label, "agent");
+    assert!(props.mode_label.is_empty());
     assert!(!props.model.is_empty(), "footer should show a model name");
     assert!(
         props.cost.is_empty(),
@@ -12406,8 +12493,8 @@ fn agent_progress_redraw_coalesces_once_per_agent_per_drain() {
 #[test]
 fn six_worker_progress_storm_keeps_input_render_and_cancel_live() {
     const _: () = assert!(
-        MAX_ENGINE_EVENTS_PER_DRAIN <= 128,
-        "engine event drains must stay bounded so high sub-agent fanout cannot monopolize the UI tick"
+        MAX_ENGINE_EVENTS_PER_DRAIN >= 8 && MAX_ENGINE_EVENTS_PER_DRAIN <= 16,
+        "engine event drains must stay small so terminal input is polled frequently during long runs"
     );
 
     let t0 = Instant::now();
@@ -12534,6 +12621,136 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
     input.resume_after_child_terminal();
     assert!(!input.paused.load(std::sync::atomic::Ordering::Acquire));
     assert!(!input.paused_ack.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
+fn input_pump_restart_detaches_wedged_thread_and_installs_fresh_parts() {
+    // A "wedged" pump thread blocked forever on a channel recv stands in for
+    // a crossterm `event::read` that never returns (stalled Windows console
+    // poll, or a Unix tty that stopped delivering bytes). Joining it would
+    // hang the event loop, so `detach_current_thread` must return
+    // immediately and only flag it to stop.
+    let (block_tx, block_rx) = std::sync::mpsc::channel::<()>();
+    let wedged = std::thread::spawn(move || {
+        let _ = block_rx.recv();
+    });
+
+    let (old_tx, old_rx) = std::sync::mpsc::channel();
+    let old_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut pump = TerminalInputPump {
+        rx: old_rx,
+        stop: std::sync::Arc::clone(&old_stop),
+        paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused_ack: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        handle: Some(wedged),
+        last_alive_at: std::cell::Cell::new(
+            Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .unwrap_or_else(Instant::now),
+        ),
+    };
+
+    pump.detach_current_thread();
+    assert!(
+        old_stop.load(std::sync::atomic::Ordering::Acquire),
+        "detach must flag the old pump thread to stop"
+    );
+    assert!(
+        pump.handle.is_none(),
+        "detach must drop the wedged handle without joining it"
+    );
+
+    // Install replacement parts. A trivial thread stands in for the fresh
+    // crossterm pump; spawning the real one needs an interactive terminal.
+    let (new_tx, new_rx) = std::sync::mpsc::channel();
+    pump.install_parts(TerminalInputPumpParts {
+        rx: new_rx,
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused_ack: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        handle: std::thread::spawn(|| {}),
+    });
+
+    assert!(pump.handle.is_some(), "fresh pump thread must be adopted");
+    assert!(
+        !pump.stop.load(std::sync::atomic::Ordering::Acquire),
+        "fresh pump must not start in a stopped state"
+    );
+    assert!(
+        pump.stalled_for(Instant::now()) < Duration::from_secs(30),
+        "install must reset the liveness clock"
+    );
+
+    new_tx
+        .send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::NONE,
+        ))))
+        .expect("send event on replacement channel");
+    let event = pump
+        .try_recv()
+        .expect("replacement channel readable")
+        .expect("replacement channel delivers the event");
+    assert!(
+        matches!(event, Event::Key(key) if key.code == KeyCode::Char('k')),
+        "restarted pump must deliver events from the replacement channel"
+    );
+
+    // The old channel is orphaned by the swap: a wedged thread that finally
+    // wakes fails its send and exits instead of feeding stale events.
+    assert!(
+        old_tx.send(TerminalInputMessage::Heartbeat).is_err(),
+        "old pump channel must be disconnected after restart"
+    );
+
+    drop(block_tx); // release the wedged stand-in thread
+}
+
+#[test]
+fn raw_mode_probe_handshake_elects_exactly_one_side_sequentially() {
+    // Task enables raw mode first, probe timeout fires second: the timeout
+    // side sees `enabled` and takes responsibility for disabling.
+    let enabled = std::sync::atomic::AtomicBool::new(false);
+    let abandoned = std::sync::atomic::AtomicBool::new(false);
+    let task_disables = raw_mode_probe_handshake(&enabled, &abandoned);
+    let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
+    assert!(!task_disables, "task ran first, so it must not disable");
+    assert!(
+        caller_disables,
+        "timed-out caller must undo the late enable"
+    );
+
+    // Probe timeout fires first, task finishes enabling second: the task
+    // side sees `abandoned` and disables its own late enable.
+    let enabled = std::sync::atomic::AtomicBool::new(false);
+    let abandoned = std::sync::atomic::AtomicBool::new(false);
+    let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
+    let task_disables = raw_mode_probe_handshake(&enabled, &abandoned);
+    assert!(!caller_disables, "caller ran first, so it must not disable");
+    assert!(
+        task_disables,
+        "late-finishing task must undo its own enable"
+    );
+}
+
+#[test]
+fn raw_mode_probe_handshake_never_leaks_under_concurrent_race() {
+    // Race both sides on real threads: no interleaving may leave raw mode
+    // leaked, i.e. at least one side must observe the other's flag.
+    for _ in 0..200 {
+        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_enabled = std::sync::Arc::clone(&enabled);
+        let task_abandoned = std::sync::Arc::clone(&abandoned);
+        let task =
+            std::thread::spawn(move || raw_mode_probe_handshake(&task_enabled, &task_abandoned));
+        let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
+        let task_disables = task.join().expect("handshake task side");
+        assert!(
+            task_disables || caller_disables,
+            "at least one side must take responsibility for disabling raw mode"
+        );
+    }
 }
 
 #[test]

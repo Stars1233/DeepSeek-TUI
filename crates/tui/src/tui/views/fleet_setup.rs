@@ -531,7 +531,7 @@ impl ModalView for FleetSetupView {
             )
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .padding(Padding::uniform(1));
 
         let inner = block.inner(popup_area);
@@ -598,7 +598,7 @@ impl FleetSetupView {
         let lines = vec![
             Line::from(Span::styled(
                 title,
-                Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+                Style::default().fg(palette::WHALE_INFO).bold(),
             )),
             Line::from(Span::styled(
                 subtitle,
@@ -624,7 +624,7 @@ impl FleetSetupView {
         let section = |lines: &mut Vec<Line>, label: &str, body: String| {
             lines.push(Line::from(Span::styled(
                 label.to_string(),
-                Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+                Style::default().fg(palette::WHALE_INFO).bold(),
             )));
             lines.push(Line::from(Span::styled(
                 body,

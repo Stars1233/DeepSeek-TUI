@@ -359,6 +359,9 @@ pub struct Settings {
     /// launch nudge (see `App::maybe_show_feature_intro`) so returning users
     /// see it exactly once and never on subsequent launches.
     pub feature_intro_shown: bool,
+    /// One-time YOLO deprecation toast has been shown. Suppresses the repeat
+    /// toast after the first sighting per install (persisted across sessions).
+    pub yolo_deprecation_shown: bool,
 }
 
 impl Default for Settings {
@@ -404,6 +407,7 @@ impl Default for Settings {
             prefer_external_pdftotext: false,
             workspace_follow_symlinks: false,
             feature_intro_shown: false,
+            yolo_deprecation_shown: false,
         }
     }
 }

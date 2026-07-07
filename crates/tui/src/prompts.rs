@@ -877,6 +877,8 @@ pub const PLAYFUL_PERSONALITY: &str = include_str!("prompts/personalities/playfu
 pub const AGENT_MODE: &str = include_str!("prompts/modes/agent.md");
 pub const PLAN_MODE: &str = include_str!("prompts/modes/plan.md");
 pub const YOLO_MODE: &str = include_str!("prompts/modes/yolo.md");
+pub const MULTITASK_MODE: &str = include_str!("prompts/modes/multitask.md");
+pub const OPERATE_MODE: &str = include_str!("prompts/modes/operate.md");
 
 /// Approval-policy overlays — whether tool calls are auto-approved,
 /// require confirmation, or are blocked.

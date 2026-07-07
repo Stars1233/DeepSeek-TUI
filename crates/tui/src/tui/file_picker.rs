@@ -347,7 +347,7 @@ impl ModalView for FilePickerView {
             .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .padding(Padding::uniform(1));
 
         let inner = block.inner(popup_area);
@@ -366,13 +366,13 @@ impl ModalView for FilePickerView {
         let mut lines: Vec<Line<'static>> = Vec::new();
         // Query line.
         lines.push(Line::from(vec![
-            Span::styled("> ", Style::default().fg(palette::DEEPSEEK_SKY).bold()),
+            Span::styled("> ", Style::default().fg(palette::WHALE_INFO).bold()),
             Span::raw(self.query.clone()),
             Span::styled(
                 " ",
                 Style::default()
-                    .fg(palette::DEEPSEEK_INK)
-                    .bg(palette::DEEPSEEK_SKY),
+                    .fg(palette::WHALE_BG)
+                    .bg(palette::WHALE_INFO),
             ),
         ]));
         lines.push(Line::from(""));
@@ -908,7 +908,7 @@ mod tests {
             );
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
             for (y, row) in rows.iter().enumerate() {

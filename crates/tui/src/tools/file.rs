@@ -10,6 +10,7 @@ use super::spec::{
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
+#[cfg(feature = "pdf")]
 use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -454,10 +455,18 @@ fn read_pdf(path: &Path, pages: Option<&str>) -> Result<ToolResult, ToolError> {
     if prefer_external {
         read_pdf_via_pdftotext(path, page_range)
     } else {
-        read_pdf_via_pdf_extract(path, page_range)
+        #[cfg(feature = "pdf")]
+        {
+            read_pdf_via_pdf_extract(path, page_range)
+        }
+        #[cfg(not(feature = "pdf"))]
+        {
+            read_pdf_via_pdftotext(path, page_range)
+        }
     }
 }
 
+#[cfg(feature = "pdf")]
 fn read_pdf_via_pdf_extract(
     path: &Path,
     page_range: Option<(u32, u32)>,
@@ -2241,7 +2250,11 @@ mod tests {
         assert!(result.content.contains("file1.txt"));
         assert!(result.content.contains("file2.txt"));
         assert!(result.content.contains("subdir"));
-        assert!(result.content.contains("\"is_dir\": true"));
+        let entries: Value = serde_json::from_str(&result.content).expect("list_dir json");
+        assert!(entries.as_array().expect("entries").iter().any(|entry| {
+            entry.get("name").and_then(Value::as_str) == Some("subdir")
+                && entry.get("is_dir").and_then(Value::as_bool) == Some(true)
+        }));
     }
 
     #[tokio::test]

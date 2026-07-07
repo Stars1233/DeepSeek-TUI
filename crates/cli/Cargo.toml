@@ -35,6 +35,7 @@ reqwest = { workspace = true, features = ["blocking"] }
 rustls.workspace = true
 semver.workspace = true
 tokio.workspace = true
+mimalloc.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tracing.workspace = true

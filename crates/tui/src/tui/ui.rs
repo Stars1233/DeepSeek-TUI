@@ -176,7 +176,9 @@ const TURN_STALL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(300);
 const TURN_STALL_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
 /// Running tools can legitimately exceed the silent-turn timeout, but a tool
 /// with no progress heartbeat or output beyond this ceiling is treated as hung.
-const TOOL_HANG_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(900);
+// Must stay comfortably above `turn_stall_watchdog_timeout` so a running tool
+// gets extra grace beyond the turn-stall threshold (#1862 trimmed 15m → 10m).
+const TOOL_HANG_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(600);
 // Forced repaint cadence while a turn is live (model loading, compacting,
 // sub-agents running). Drives the footer water-spout animation as well as
 // the per-tool spinner pulse — keep this fast enough that the whale-spout
@@ -338,7 +340,12 @@ const TERMINAL_INPUT_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_INPUT_RECOVERY_COOLDOWN: Duration = Duration::from_secs(10);
 const TERMINAL_INPUT_CHILD_PAUSE_TIMEOUT: Duration = Duration::from_millis(500);
 const TERMINAL_INPUT_CHILD_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(5);
-const MAX_ENGINE_EVENTS_PER_DRAIN: usize = 128;
+/// Upper bound on engine events processed before yielding to terminal input.
+const MAX_ENGINE_EVENTS_PER_DRAIN: usize = 16;
+/// Wall-clock budget for one engine drain batch (#1830 / #2317 input fairness).
+const ENGINE_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(8);
+/// Throttled in-progress checkpoint while a turn is live (#1830 progress loss).
+const RECOVERY_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(45);
 
 enum TerminalInputMessage {
     Event(Event),
@@ -523,18 +530,36 @@ impl TerminalInputPump {
         self.mark_alive();
     }
 
-    #[cfg(target_os = "windows")]
+    /// Replace a wedged pump thread with a freshly spawned one.
+    ///
+    /// The old thread may be blocked forever inside crossterm's blocking
+    /// `event::read` (a stalled Windows console poll, or a Unix tty that
+    /// stopped delivering bytes), so it can never be joined. Instead it is
+    /// detached: `stop` is flagged and the `JoinHandle` dropped, so if the
+    /// thread ever wakes it exits on its own (its send fails once `rx` is
+    /// replaced, and the stop flag covers the poll loop).
     fn restart_detached(&mut self) -> io::Result<()> {
+        self.detach_current_thread();
+        let parts = Self::spawn_parts()?;
+        self.install_parts(parts);
+        Ok(())
+    }
+
+    /// Flag the current pump thread to stop and drop its handle without
+    /// joining (the thread may be wedged in a blocking terminal read).
+    fn detach_current_thread(&mut self) {
         self.stop.store(true, Ordering::Release);
         let _ = self.handle.take();
-        let parts = Self::spawn_parts()?;
+    }
+
+    /// Adopt freshly spawned pump parts and reset the liveness clock.
+    fn install_parts(&mut self, parts: TerminalInputPumpParts) {
         self.rx = parts.rx;
         self.stop = parts.stop;
         self.paused = parts.paused;
         self.paused_ack = parts.paused_ack;
         self.handle = Some(parts.handle);
         self.last_alive_at.set(Instant::now());
-        Ok(())
     }
 }
 
@@ -580,6 +605,21 @@ fn drain_terminal_input_queue(
     pending.clear();
     while input.try_recv()?.is_some() {}
     Ok(())
+}
+
+fn collect_pending_terminal_events(
+    input: &TerminalInputPump,
+    pending: &mut VecDeque<Event>,
+) -> io::Result<()> {
+    while let Some(event) = input.try_recv()? {
+        pending.push_back(event);
+    }
+    Ok(())
+}
+
+fn engine_drain_budget_exhausted(events_drained: usize, started: Instant, now: Instant) -> bool {
+    events_drained >= MAX_ENGINE_EVENTS_PER_DRAIN
+        || now.saturating_duration_since(started) >= ENGINE_DRAIN_TIME_BUDGET
 }
 
 fn open_setup_checkpoint_if_due(app: &mut App, config: &Config, skip_onboarding: bool) -> bool {
@@ -686,10 +726,26 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
             .unwrap_or(osc8_default_on),
     );
 
-    // Terminal probe with timeout to prevent hanging on unresponsive terminals
+    // Terminal probe with timeout to prevent hanging on unresponsive terminals.
+    //
+    // The blocking task cannot be cancelled once the timeout fires, so a slow
+    // `enable_raw_mode` may still succeed *after* we've bailed out, leaking
+    // raw mode. Both sides run `raw_mode_probe_handshake`; whichever observes
+    // the other's flag disables raw mode again.
     let probe_timeout = terminal_probe_timeout(config);
+    let probe_abandoned = Arc::new(AtomicBool::new(false));
+    let probe_enabled = Arc::new(AtomicBool::new(false));
+    let task_abandoned = Arc::clone(&probe_abandoned);
+    let task_enabled = Arc::clone(&probe_enabled);
     let enable_raw = tokio::task::spawn_blocking(move || {
-        enable_raw_mode().map_err(|e| anyhow::anyhow!("Failed to enable raw mode: {e}"))
+        let result =
+            enable_raw_mode().map_err(|e| anyhow::anyhow!("Failed to enable raw mode: {e}"));
+        if result.is_ok() && raw_mode_probe_handshake(&task_enabled, &task_abandoned) {
+            // The probe timed out while we were blocked; the caller already
+            // gave up, so undo the late enable instead of leaking raw mode.
+            let _ = disable_raw_mode();
+        }
+        result
     });
 
     match tokio::time::timeout(probe_timeout, enable_raw).await {
@@ -697,6 +753,11 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
             inner_result??; // propagate both join and raw-mode errors
         }
         Err(_) => {
+            if raw_mode_probe_handshake(&probe_abandoned, &probe_enabled) {
+                // The blocking task finished enabling raw mode right as the
+                // timeout fired and may have missed the abandoned flag.
+                let _ = disable_raw_mode();
+            }
             tracing::warn!(
                 "Terminal probe timed out after {}ms - terminal may be unresponsive",
                 probe_timeout.as_millis()
@@ -1054,6 +1115,20 @@ fn resume_hint_text() -> &'static str {
     "To continue this session, execute codewhale run --continue"
 }
 
+/// One side of the raw-mode probe abandonment handshake between the startup
+/// probe timeout and the blocking `enable_raw_mode` task finishing late.
+///
+/// Each side publishes its own flag (`publish`), then checks whether the
+/// other side's flag (`check`) is already up; a `true` return means this
+/// side must disable raw mode again. `SeqCst` ordering guarantees that when
+/// both sides run, at least one observes the other's flag, so a raw-mode
+/// enable landing after the probe timeout is always undone. Both sides
+/// observing each other is fine — a duplicate `disable_raw_mode` is a no-op.
+fn raw_mode_probe_handshake(publish: &AtomicBool, check: &AtomicBool) -> bool {
+    publish.store(true, Ordering::SeqCst);
+    check.load(Ordering::SeqCst)
+}
+
 fn terminal_probe_timeout(config: &Config) -> Duration {
     let timeout_ms = config
         .tui
@@ -1392,7 +1467,9 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         max_admitted_subagents: config
             .max_admitted_subagents_for_provider(provider)
             .max(max_subagents),
-        launch_concurrency: config.launch_concurrency_for_provider(provider),
+        launch_concurrency: config
+            .launch_concurrency_for_provider(provider)
+            .max(app.mode.mode_delegation_launch_floor()),
         subagents_enabled: config.subagents_enabled_for_provider(provider),
         features: config.features(),
         auto_review_policy: config.auto_review_policy(),
@@ -1851,14 +1928,12 @@ async fn run_event_loop(
     let mut last_focus_recovery = Instant::now()
         .checked_sub(Duration::from_secs(60))
         .unwrap_or_else(Instant::now);
-    #[cfg(target_os = "windows")]
     let mut terminal_input = TerminalInputPump::spawn()?;
-    #[cfg(not(target_os = "windows"))]
-    let terminal_input = TerminalInputPump::spawn()?;
     let mut pending_terminal_events: VecDeque<Event> = VecDeque::new();
     let mut last_terminal_input_recovery = Instant::now()
         .checked_sub(TERMINAL_INPUT_RECOVERY_COOLDOWN)
         .unwrap_or_else(Instant::now);
+    let mut last_recovery_snapshot_at: Option<Instant> = None;
 
     // Fire-and-forget version check — runs once per session in the
     // background. On success, a short status toast advertises the update
@@ -2047,6 +2122,10 @@ async fn run_event_loop(
             deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
         }
 
+        // #1830/#2317: service any already-arrived terminal keys before a
+        // potentially long engine batch so composer/modal input stays live.
+        collect_pending_terminal_events(&terminal_input, &mut pending_terminal_events)?;
+
         // First, poll for engine events (non-blocking)
         let mut received_engine_event = false;
         let mut transcript_batch_updated = false;
@@ -2061,7 +2140,14 @@ async fn run_event_loop(
         {
             let mut rx = engine_handle.rx_event.write().await;
             let mut progress_redraw_agents: HashSet<String> = HashSet::new();
-            for _ in 0..MAX_ENGINE_EVENTS_PER_DRAIN {
+            let drain_started = Instant::now();
+            let mut events_drained = 0usize;
+            loop {
+                if events_drained > 0
+                    && engine_drain_budget_exhausted(events_drained, drain_started, Instant::now())
+                {
+                    break;
+                }
                 let event = match rx.try_recv() {
                     Ok(event) => event,
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
@@ -3226,6 +3312,7 @@ async fn run_event_loop(
                         }
                     }
                     EngineEvent::UserInputRequired { id, request } => {
+                        app.pending_user_input_prompt = Some((id.clone(), request.clone()));
                         app.view_stack.push(UserInputView::new(id.clone(), request));
                         if let Some((method, _, _)) = crate::tui::notifications::settings(config) {
                             let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
@@ -3306,6 +3393,7 @@ async fn run_event_loop(
                         }
                     }
                 }
+                events_drained = events_drained.saturating_add(1);
             }
         }
         if let Some(previous_provider) = fallback_after_engine_error {
@@ -3422,6 +3510,7 @@ async fn run_event_loop(
         if reconcile_turn_liveness(app, Instant::now(), has_running_agents) {
             app.needs_redraw = true;
         }
+        maybe_throttled_recovery_snapshot(app, Instant::now(), &mut last_recovery_snapshot_at);
         let history_has_live_motion = history_has_live_motion(&app.history);
         let active_cell_has_live_motion = active_cell_has_live_motion(app);
         if should_tick_status_animation(
@@ -3586,11 +3675,14 @@ async fn run_event_loop(
                     app.use_mouse_capture,
                     app.use_bracketed_paste,
                 );
-                #[cfg(target_os = "windows")]
                 match terminal_input.restart_detached() {
                     Ok(()) => {
                         app.push_status_toast(
-                            "Recovered terminal input after a stalled Windows console poll.",
+                            if cfg!(target_os = "windows") {
+                                "Recovered terminal input after a stalled Windows console poll."
+                            } else {
+                                "Recovered terminal input after a stalled terminal read."
+                            },
                             StatusToastLevel::Warning,
                             None,
                         );
@@ -3604,16 +3696,14 @@ async fn run_event_loop(
                         );
                     }
                 }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    app.push_status_toast(
-                        "Terminal input heartbeat stalled; terminal modes were refreshed.",
-                        StatusToastLevel::Warning,
-                        None,
-                    );
-                }
                 terminal_input.mark_alive();
                 last_terminal_input_recovery = now;
+                if app.is_loading
+                    || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
+                {
+                    persist_recovery_snapshot(app);
+                    last_recovery_snapshot_at = Some(now);
+                }
                 force_terminal_repaint = true;
                 app.needs_redraw = true;
             }
@@ -4386,6 +4476,13 @@ async fn run_event_loop(
                 KeyCode::Char('t') | KeyCode::Char('T')
                     if key.modifiers == KeyModifiers::CONTROL =>
                 {
+                    app.cycle_effort();
+                    continue;
+                }
+                KeyCode::Char('t') | KeyCode::Char('T')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.modifiers.contains(KeyModifiers::SHIFT) =>
+                {
                     toggle_live_transcript_overlay(app);
                     continue;
                 }
@@ -4780,7 +4877,9 @@ async fn run_event_loop(
                     }
                 }
                 KeyCode::BackTab => {
-                    app.cycle_effort();
+                    if app.cycle_approval_posture() {
+                        sync_mode_update(app, &engine_handle).await;
+                    }
                 }
                 // Transcript-nav shortcuts now require Alt, leaving most bare
                 // letters free to insert as text. Before v0.8.30, bare `g`,
@@ -4871,15 +4970,7 @@ async fn run_event_loop(
                             } else {
                                 build_queued_message(app, input)
                             };
-                            if let Err(err) =
-                                steer_user_message(app, &engine_handle, queued.clone()).await
-                            {
-                                app.queue_message(queued);
-                                app.status_message = Some(format!(
-                                    "Steer failed ({err}); {} queued follow-up(s) — /queue send <n>",
-                                    app.queued_message_count()
-                                ));
-                            }
+                            attempt_steer_with_queue_fallback(app, &engine_handle, queued).await;
                         }
                     }
                 }
@@ -4932,15 +5023,12 @@ async fn run_event_loop(
                             };
                             if app.is_loading {
                                 // Engine is busy — steer into the current turn.
-                                if let Err(err) =
-                                    steer_user_message(app, &engine_handle, queued.clone()).await
-                                {
-                                    app.queue_message(queued);
-                                    app.status_message = Some(format!(
-                                        "Steer failed ({err}); {} queued follow-up(s) — /queue send <n>",
-                                        app.queued_message_count()
-                                    ));
-                                }
+                                attempt_steer_with_queue_fallback(
+                                    app,
+                                    &engine_handle,
+                                    queued.clone(),
+                                )
+                                .await;
                             } else {
                                 // Engine is idle — send as a regular message
                                 // so the content is not lost to rx_steer's
@@ -5883,7 +5971,7 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
     {
         recover_stalled_runtime_turn(
             app,
-            "Tool stalled with no progress for 15m — recovered; the command may still be running in the background. Use exec_shell_cancel or retry.",
+            "Tool stalled with no progress for 10m — recovered; the command may still be running in the background. Use exec_shell_cancel or retry.",
             StatusToastLevel::Error,
         );
         return true;
@@ -5911,6 +5999,28 @@ fn persist_recovery_snapshot(app: &mut App) {
         }
         persistence_actor::persist(PersistRequest::SessionSnapshot(session));
     }
+}
+
+fn maybe_throttled_recovery_snapshot(
+    app: &mut App,
+    now: Instant,
+    last_snapshot_at: &mut Option<Instant>,
+) {
+    if !app.is_loading && !matches!(app.runtime_turn_status.as_deref(), Some("in_progress")) {
+        return;
+    }
+    if last_snapshot_at
+        .is_some_and(|last| now.saturating_duration_since(last) < RECOVERY_SNAPSHOT_INTERVAL)
+    {
+        return;
+    }
+    persist_recovery_snapshot(app);
+    *last_snapshot_at = Some(now);
+}
+
+fn enqueue_offline_message(app: &mut App, message: QueuedMessage) {
+    app.queue_message(message);
+    persist_offline_queue_state(app);
 }
 
 fn recover_stalled_runtime_turn(app: &mut App, message: &str, level: StatusToastLevel) {
@@ -6534,11 +6644,13 @@ fn queue_current_draft_for_next_turn(app: &mut App) -> bool {
     } else {
         build_queued_message(app, input)
     };
-    app.queue_message(queued);
-    app.status_message = Some(format!(
-        "{} queued follow-up(s) — ↑ edit last, /queue send <n>",
+    enqueue_offline_message(app, queued);
+    let toast = format!(
+        "{} queued follow-up(s) — sends after current output; ↑ edit last, /queue send <n>",
         app.queued_message_count()
-    ));
+    );
+    app.status_message = Some(toast.clone());
+    app.push_status_toast(toast, StatusToastLevel::Info, Some(3_000));
     true
 }
 
@@ -8678,6 +8790,9 @@ async fn handle_mcp_ui_action(
             // (#502).
             app.mcp_configured_count = snapshot.servers.len();
             app.mcp_snapshot = Some(snapshot.clone());
+            // #2068: keep the hotbar's MCP-tool actions in sync with the tools
+            // that are actually loaded; the hotbar never connects on its own.
+            app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
             open_mcp_manager_pager(app, &snapshot);
         }
         Err(err) => add_mcp_message(app, format!("MCP snapshot failed: {err}")),
@@ -8852,6 +8967,7 @@ async fn steer_user_message(
     engine_handle: &EngineHandle,
     message: QueuedMessage,
 ) -> Result<()> {
+    let paused_snapshot = snapshot_steer_paused_state(app);
     let paused_note = prepare_paused_command_message(app, engine_handle, &message.display);
     let cwd = std::env::current_dir().ok();
     let references = crate::tui::file_mention::context_references_from_input(
@@ -8865,7 +8981,11 @@ async fn steer_user_message(
     }
     let message_index = app.api_messages.len();
 
-    engine_handle.steer(content.clone()).await?;
+    if let Err(err) = engine_handle.steer(content.clone()).await {
+        restore_steer_paused_state(app, &paused_snapshot);
+        engine_handle.set_paused(paused_snapshot.paused);
+        return Err(err);
+    }
     app.last_submitted_prompt = Some(message.display.clone());
 
     // Flush any streaming thinking/tool content into history before
@@ -8891,17 +9011,76 @@ async fn steer_user_message(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct SteerPausedSnapshot {
+    paused: bool,
+    pausable: bool,
+    paused_quarry: Option<String>,
+    quarry: Option<String>,
+    tokens_used: u64,
+    time_used_seconds: u64,
+    continuation_count: u32,
+}
+
+fn snapshot_steer_paused_state(app: &App) -> SteerPausedSnapshot {
+    SteerPausedSnapshot {
+        paused: app.paused,
+        pausable: app.pausable,
+        paused_quarry: app.paused_quarry.clone(),
+        quarry: app.hunt.quarry.clone(),
+        tokens_used: app.hunt.tokens_used,
+        time_used_seconds: app.hunt.time_used_seconds,
+        continuation_count: app.hunt.continuation_count,
+    }
+}
+
+fn restore_steer_paused_state(app: &mut App, snapshot: &SteerPausedSnapshot) {
+    app.paused = snapshot.paused;
+    app.pausable = snapshot.pausable;
+    app.paused_quarry = snapshot.paused_quarry.clone();
+    app.hunt.quarry = snapshot.quarry.clone();
+    app.hunt.tokens_used = snapshot.tokens_used;
+    app.hunt.time_used_seconds = snapshot.time_used_seconds;
+    app.hunt.continuation_count = snapshot.continuation_count;
+}
+
+async fn attempt_steer_with_queue_fallback(
+    app: &mut App,
+    engine_handle: &EngineHandle,
+    message: QueuedMessage,
+) {
+    match steer_user_message(app, engine_handle, message.clone()).await {
+        Ok(()) => {
+            app.push_status_toast(
+                "Steering into current turn",
+                StatusToastLevel::Info,
+                Some(1_500),
+            );
+        }
+        Err(err) => {
+            enqueue_offline_message(app, message);
+            let status = format!(
+                "Steer failed ({err}); {} queued follow-up(s) — /queue send <n>",
+                app.queued_message_count()
+            );
+            app.status_message = Some(status.clone());
+            app.push_status_toast(status, StatusToastLevel::Warning, Some(4_000));
+        }
+    }
+}
+
 /// Park a draft on the queued-messages bucket for dispatch after TurnComplete.
 /// Unlike a steer, the message is NOT forwarded immediately — it waits for
 /// the current turn to finish, then dispatches as a normal user message.
 async fn queue_follow_up(app: &mut App, message: QueuedMessage) -> Result<()> {
     let display = message.display.clone();
-    app.queue_message(message);
-    app.status_message = Some(format!(
-        "Queued: {} ({} total) — ↑ to edit",
-        display,
+    enqueue_offline_message(app, message);
+    let toast = format!(
+        "Queued: {display} ({} total) — sends after current output; ↑ to edit",
         app.queued_message_count()
-    ));
+    );
+    app.status_message = Some(toast.clone());
+    app.push_status_toast(toast, StatusToastLevel::Info, Some(3_000));
     Ok(())
 }
 
@@ -8911,40 +9090,37 @@ async fn submit_or_steer_message(
     engine_handle: &EngineHandle,
     message: QueuedMessage,
 ) -> Result<()> {
-    match app.decide_submit_disposition() {
+    match app
+        .enter_with_double_tap()
+        .unwrap_or(SubmitDisposition::Immediate)
+    {
         SubmitDisposition::Immediate => {
             dispatch_user_message(app, config, engine_handle, message).await
         }
         SubmitDisposition::Queue => {
             let count = app.queued_message_count().saturating_add(1);
-            app.queue_message(message);
-            if app.offline_mode {
-                app.status_message = Some(format!(
-                    "Offline: {count} queued follow-up(s) — ↑ edit last, /queue send <n>"
-                ));
+            enqueue_offline_message(app, message);
+            let (status, toast) = if app.offline_mode {
+                (
+                    format!("Offline: {count} queued follow-up(s) — ↑ edit last, /queue send <n>"),
+                    format!("Offline: queued follow-up ({count} total)"),
+                )
             } else {
-                app.status_message = Some(format!(
-                    "{count} queued follow-up(s) — ↑ edit last, /queue send <n>"
-                ));
-            }
+                (
+                    format!(
+                        "{count} queued follow-up(s) — sends after current output; ↑ edit last, /queue send <n>"
+                    ),
+                    format!("Queued follow-up ({count} total) — sends after current output"),
+                )
+            };
+            app.status_message = Some(status);
+            app.push_status_toast(toast, StatusToastLevel::Info, Some(3_000));
             Ok(())
         }
         // Steer: reached via Enter when busy-but-waiting (v0.8.44), or
         // via Ctrl+Enter override in any busy state.
         SubmitDisposition::Steer => {
-            if let Err(err) = steer_user_message(app, engine_handle, message.clone()).await {
-                app.queue_message(message);
-                app.status_message = Some(format!(
-                    "Steer failed ({err}); {} queued follow-up(s) — /queue send <n>",
-                    app.queued_message_count()
-                ));
-            } else {
-                app.push_status_toast(
-                    "Steering into current turn",
-                    StatusToastLevel::Info,
-                    Some(1_500),
-                );
-            }
+            attempt_steer_with_queue_fallback(app, engine_handle, message).await;
             Ok(())
         }
         SubmitDisposition::QueueFollowUp => queue_follow_up(app, message).await,
@@ -9415,7 +9591,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
                     .fg(palette::TEXT_MUTED)
             } else {
                 Style::default()
-                    .bg(palette::DEEPSEEK_SLATE)
+                    .bg(palette::WHALE_PANEL)
                     .fg(palette::TEXT_MUTED)
             };
 
@@ -9672,7 +9848,7 @@ fn open_backtrack_overlay(app: &mut App) {
     app.needs_redraw = true;
 }
 
-/// Toggle the live transcript overlay on `Ctrl+T`. Closes the overlay if it's
+/// Toggle the live transcript overlay on `Ctrl+Shift+T`. Closes the overlay if it's
 /// already on top; otherwise pushes a fresh one in sticky-tail mode.
 fn toggle_live_transcript_overlay(app: &mut App) {
     if app.view_stack.top_kind() == Some(ModalKind::LiveTranscript) {
@@ -9949,7 +10125,27 @@ async fn handle_view_events(
                 }
             }
             ViewEvent::UserInputSubmitted { tool_id, response } => {
-                let _ = engine_handle.submit_user_input(tool_id, response).await;
+                match engine_handle
+                    .submit_user_input(tool_id.clone(), response)
+                    .await
+                {
+                    Ok(()) => {
+                        app.pending_user_input_prompt = None;
+                    }
+                    Err(err) => {
+                        tracing::warn!(tool_id = %tool_id, error = %err, "user input submit failed");
+                        if let Some((id, request)) = app.pending_user_input_prompt.clone() {
+                            app.view_stack.push(UserInputView::new(id, request));
+                        }
+                        app.push_status_toast(
+                            format!("Failed to submit response: {err}"),
+                            StatusToastLevel::Error,
+                            None,
+                        );
+                        app.status_message =
+                            Some(format!("Failed to submit response: {err} — try again"));
+                    }
+                }
             }
             ViewEvent::UserInputCancelled { tool_id } => {
                 let _ = engine_handle.cancel_user_input(tool_id).await;
@@ -11600,7 +11796,7 @@ fn terminal_event_needs_viewport_recapture(evt: &Event) -> bool {
 
 pub(crate) fn status_color(level: StatusToastLevel) -> ratatui::style::Color {
     match level {
-        StatusToastLevel::Info => palette::DEEPSEEK_SKY,
+        StatusToastLevel::Info => palette::WHALE_INFO,
         StatusToastLevel::Success => palette::STATUS_SUCCESS,
         StatusToastLevel::Warning => palette::STATUS_WARNING,
         StatusToastLevel::Error => palette::STATUS_ERROR,

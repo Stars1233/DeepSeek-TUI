@@ -87,7 +87,7 @@ pub(crate) fn render_modal_surface(area: Rect, popup_area: Rect, buf: &mut Buffe
 
     Clear.render(popup_area, buf);
     Block::default()
-        .style(Style::default().bg(palette::DEEPSEEK_INK))
+        .style(Style::default().bg(palette::WHALE_BG))
         .render(popup_area, buf);
 }
 
@@ -96,7 +96,7 @@ fn render_modal_backdrop(area: Rect, buf: &mut Buffer) {
         for x in area.left()..area.right() {
             buf[(x, y)]
                 .set_symbol(" ")
-                .set_style(Style::default().bg(palette::DEEPSEEK_INK));
+                .set_style(Style::default().bg(palette::WHALE_BG));
         }
     }
 }
@@ -164,7 +164,7 @@ impl ActionHint {
             Span::styled(
                 format!(" {} ", self.key),
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1930,8 +1930,8 @@ fn render_config_editor_value_line(
     ));
 
     let cursor_style = Style::default()
-        .fg(palette::DEEPSEEK_INK)
-        .bg(palette::DEEPSEEK_SKY)
+        .fg(palette::WHALE_BG)
+        .bg(palette::WHALE_INFO)
         .bold();
     let selected_style = Style::default()
         .fg(palette::SELECTION_TEXT)
@@ -2099,7 +2099,7 @@ impl ModalView for ConfigView {
         let base_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .padding(Padding::uniform(1));
 
         let inner = base_block.inner(popup_area);
@@ -2118,7 +2118,7 @@ impl ModalView for ConfigView {
             };
             lines.push(Line::from(vec![Span::styled(
                 edit_title,
-                Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+                Style::default().fg(palette::WHALE_INFO).bold(),
             )]));
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
@@ -2215,7 +2215,7 @@ impl ModalView for ConfigView {
                     ConfigListItem::Section(section) => {
                         lines.push(Line::from(Span::styled(
                             format!("  {}", section.label(self.locale)),
-                            Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+                            Style::default().fg(palette::WHALE_INFO).bold(),
                         )));
                     }
                     ConfigListItem::Row(idx) => {
@@ -2311,7 +2311,7 @@ impl ModalView for ConfigView {
             )]))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .padding(Padding::uniform(1));
 
         let inner = block.inner(popup_area);
@@ -2550,13 +2550,13 @@ impl ModalView for SubAgentsView {
                 ("Running", running.len(), palette::STATUS_WARNING),
                 ("Completed", completed.len(), palette::STATUS_SUCCESS),
                 ("Interrupted", interrupted.len(), palette::STATUS_WARNING),
-                ("Failed", failed.len(), palette::DEEPSEEK_RED),
+                ("Failed", failed.len(), palette::WHALE_ERROR),
                 ("Cancelled", cancelled.len(), palette::TEXT_MUTED),
             ];
 
             lines.push(Line::from(Span::styled(
                 "Fleet workers",
-                Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+                Style::default().fg(palette::WHALE_INFO).bold(),
             )));
             lines.push(Line::from(Span::styled(
                 "Sub-agent roles are Fleet worker roles.",
@@ -2629,7 +2629,7 @@ impl ModalView for SubAgentsView {
             append_subagent_group(
                 &mut lines,
                 "Failed",
-                palette::DEEPSEEK_RED.into(),
+                palette::WHALE_ERROR.into(),
                 &failed,
                 content_width,
             );
@@ -2662,13 +2662,13 @@ impl ModalView for SubAgentsView {
             .title_bottom(
                 Line::from(Span::styled(
                     scroll_indicator,
-                    Style::default().fg(palette::DEEPSEEK_SKY),
+                    Style::default().fg(palette::WHALE_INFO),
                 ))
                 .alignment(Alignment::Right),
             )
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
+            .style(Style::default().bg(palette::WHALE_BG))
             .padding(Padding::uniform(1));
 
         let inner = block.inner(popup_area);
@@ -2748,7 +2748,7 @@ fn append_subagent_group(
             let detail = truncate_view_text(detail, max_len);
             lines.push(Line::from(vec![
                 Span::styled("    reason: ", Style::default().fg(palette::TEXT_MUTED)),
-                Span::styled(detail, Style::default().fg(palette::DEEPSEEK_RED)),
+                Span::styled(detail, Style::default().fg(palette::WHALE_ERROR)),
             ]));
         }
 
@@ -2757,7 +2757,7 @@ fn append_subagent_group(
             let role = truncate_view_text(role, max_len);
             lines.push(Line::from(vec![
                 Span::styled("    role: ", Style::default().fg(palette::TEXT_MUTED)),
-                Span::styled(role, Style::default().fg(palette::DEEPSEEK_SKY)),
+                Span::styled(role, Style::default().fg(palette::WHALE_INFO)),
             ]));
         }
 
@@ -2776,7 +2776,7 @@ fn append_subagent_group(
             let branch_detail = truncate_view_text(&branch_detail, max_len);
             lines.push(Line::from(vec![
                 Span::styled("    git: ", Style::default().fg(palette::TEXT_MUTED)),
-                Span::styled(branch_detail, Style::default().fg(palette::DEEPSEEK_SKY)),
+                Span::styled(branch_detail, Style::default().fg(palette::WHALE_INFO)),
             ]));
         }
 
@@ -2824,7 +2824,7 @@ fn format_agent_status(
     use ratatui::style::Style;
 
     match status {
-        SubAgentStatus::Running => ("running", Style::default().fg(palette::DEEPSEEK_SKY), None),
+        SubAgentStatus::Running => ("running", Style::default().fg(palette::WHALE_INFO), None),
         SubAgentStatus::Completed => (
             "completed",
             Style::default().fg(palette::WHALE_ACCENT_PRIMARY),
@@ -2843,7 +2843,7 @@ fn format_agent_status(
         ),
         SubAgentStatus::Failed(reason) => (
             "failed",
-            Style::default().fg(palette::DEEPSEEK_RED),
+            Style::default().fg(palette::WHALE_ERROR),
             Some(reason.as_str()),
         ),
     }
@@ -2936,7 +2936,7 @@ mod tests {
             );
             assert_eq!(
                 buf[(w / 2, h / 2)].bg,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
                 "{w}x{h}: modal interior must be opaque"
             );
             for (y, row) in rows.iter().enumerate() {
@@ -3220,7 +3220,7 @@ mod tests {
     #[test]
     fn subagent_view_agents_includes_live_fanout_workers_when_cache_is_empty() {
         let mut app = create_test_app();
-        let mut card = FanoutCard::new("rlm", app.ui_locale).with_workers(["chunk_1", "chunk_2"]);
+        let mut card = FanoutCard::new("rlm").with_workers(["chunk_1", "chunk_2"]);
         card.upsert_worker("chunk_1", AgentLifecycle::Completed);
         card.upsert_worker("chunk_2", AgentLifecycle::Running);
         app.add_message(HistoryCell::SubAgent(SubAgentCell::Fanout(card)));
@@ -4059,7 +4059,7 @@ base_url = "https://api.xiaomimimo.com/v1"
                 );
                 assert_eq!(
                     cell.bg,
-                    palette::DEEPSEEK_INK,
+                    palette::WHALE_BG,
                     "backdrop at ({x},{y}) must be opaque"
                 );
             }

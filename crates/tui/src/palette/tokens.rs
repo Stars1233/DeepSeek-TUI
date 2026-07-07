@@ -64,18 +64,6 @@ pub const WHALE_TOOL_OUTPUT_RGB: (u8, u8, u8) = (194, 208, 224); // #C2D0E0
 pub const WHALE_TOOL_SURFACE_RGB: (u8, u8, u8) = (28, 40, 62); // #1C283E
 pub const WHALE_TOOL_ACTIVE_RGB: (u8, u8, u8) = (38, 54, 80); // #263650
 
-// Backward-compatible aliases for existing downstream users.
-#[allow(dead_code)]
-#[deprecated(
-    since = "0.8.61",
-    note = "use WHALE_ACCENT_PRIMARY_RGB instead; this alias will be removed after the rename window"
-)]
-pub const DEEPSEEK_BLUE_RGB: (u8, u8, u8) = WHALE_ACCENT_PRIMARY_RGB;
-pub const DEEPSEEK_SKY_RGB: (u8, u8, u8) = WHALE_INFO_RGB;
-pub const DEEPSEEK_INK_RGB: (u8, u8, u8) = WHALE_BG_RGB;
-pub const DEEPSEEK_SLATE_RGB: (u8, u8, u8) = WHALE_PANEL_RGB;
-pub const DEEPSEEK_RED_RGB: (u8, u8, u8) = WHALE_ERROR_RGB;
-
 pub const LIGHT_SURFACE_RGB: (u8, u8, u8) = (246, 248, 251); // #F6F8FB
 pub const LIGHT_PANEL_RGB: (u8, u8, u8) = (236, 242, 248); // #ECF2F8
 pub const LIGHT_ELEVATED_RGB: (u8, u8, u8) = (219, 229, 240); // #DBE5F0
@@ -213,24 +201,10 @@ pub const WHALE_ACCENT_PRIMARY: Color = Color::Rgb(
     WHALE_ACCENT_PRIMARY_RGB.1,
     WHALE_ACCENT_PRIMARY_RGB.2,
 );
-#[allow(dead_code)]
-#[deprecated(
-    since = "0.8.61",
-    note = "use WHALE_ACCENT_PRIMARY instead; this alias will be removed after the rename window"
-)]
-pub const DEEPSEEK_BLUE: Color = WHALE_ACCENT_PRIMARY;
-/// Now maps to the secondary accent (Seafoam) for backward compat.
-pub const DEEPSEEK_SKY: Color =
-    Color::Rgb(DEEPSEEK_SKY_RGB.0, DEEPSEEK_SKY_RGB.1, DEEPSEEK_SKY_RGB.2);
-pub const DEEPSEEK_INK: Color =
-    Color::Rgb(DEEPSEEK_INK_RGB.0, DEEPSEEK_INK_RGB.1, DEEPSEEK_INK_RGB.2);
-pub const DEEPSEEK_SLATE: Color = Color::Rgb(
-    DEEPSEEK_SLATE_RGB.0,
-    DEEPSEEK_SLATE_RGB.1,
-    DEEPSEEK_SLATE_RGB.2,
-);
-pub const DEEPSEEK_RED: Color =
-    Color::Rgb(DEEPSEEK_RED_RGB.0, DEEPSEEK_RED_RGB.1, DEEPSEEK_RED_RGB.2);
+pub const WHALE_INFO: Color = Color::Rgb(WHALE_INFO_RGB.0, WHALE_INFO_RGB.1, WHALE_INFO_RGB.2);
+pub const WHALE_BG: Color = Color::Rgb(WHALE_BG_RGB.0, WHALE_BG_RGB.1, WHALE_BG_RGB.2);
+pub const WHALE_PANEL: Color = Color::Rgb(WHALE_PANEL_RGB.0, WHALE_PANEL_RGB.1, WHALE_PANEL_RGB.2);
+pub const WHALE_ERROR: Color = Color::Rgb(WHALE_ERROR_RGB.0, WHALE_ERROR_RGB.1, WHALE_ERROR_RGB.2);
 
 pub const LIGHT_SURFACE: Color = Color::Rgb(
     LIGHT_SURFACE_RGB.0,
@@ -524,4 +498,4 @@ pub const SELECTION_BG: Color = Color::Rgb(
     WHALE_SELECTION_RGB.2,
 );
 #[allow(dead_code)]
-pub const COMPOSER_BG: Color = DEEPSEEK_SLATE;
+pub const COMPOSER_BG: Color = WHALE_PANEL;

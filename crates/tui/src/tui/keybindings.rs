@@ -223,9 +223,14 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Submission,
     },
     KeybindingEntry {
-        chord: "Ctrl+T",
+        chord: "Ctrl+Shift+T",
         description_id: crate::localization::MessageId::KbLiveTranscript,
         section: KeybindingSection::Submission,
+    },
+    KeybindingEntry {
+        chord: "Ctrl+T",
+        description_id: crate::localization::MessageId::KbCycleThinking,
+        section: KeybindingSection::Modes,
     },
     KeybindingEntry {
         chord: "Esc Esc",
@@ -234,8 +239,13 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
     },
     // --- Modes ---
     KeybindingEntry {
-        chord: "Tab / Shift+Tab",
+        chord: "Tab",
         description_id: crate::localization::MessageId::KbCompleteCycleModes,
+        section: KeybindingSection::Modes,
+    },
+    KeybindingEntry {
+        chord: "Shift+Tab",
+        description_id: crate::localization::MessageId::KbCyclePermissions,
         section: KeybindingSection::Modes,
     },
     KeybindingEntry {

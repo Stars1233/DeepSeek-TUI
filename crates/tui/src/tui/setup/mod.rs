@@ -2849,7 +2849,7 @@ impl ModalView for SetupWizardView {
             )))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_SLATE))
+            .style(Style::default().bg(palette::WHALE_PANEL))
             .padding(Padding::new(2, 2, 1, 1));
         let inner = block.inner(popup_area);
         block.render(popup_area, buf);
@@ -2960,7 +2960,7 @@ impl ModalView for SetupWizardView {
             Line::from(Span::styled(
                 tr(self.locale, spec.title_id()).to_string(),
                 Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
+                    .fg(palette::WHALE_INFO)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -5665,7 +5665,7 @@ mod tests {
                 "{w}x{h}: background bleed-through into setup modal"
             );
             assert!(
-                [palette::DEEPSEEK_INK, palette::DEEPSEEK_SLATE].contains(&buf[(w / 2, h / 2)].bg),
+                [palette::WHALE_BG, palette::WHALE_PANEL].contains(&buf[(w / 2, h / 2)].bg),
                 "{w}x{h}: modal interior must be opaque"
             );
             for (y, row) in rows.iter().enumerate() {
@@ -6077,7 +6077,7 @@ mod tests {
         assert!(text.contains("Fleet roster:"));
         assert!(text.contains("3 Fleet members"));
         assert!(text.contains("plan limit not probed"));
-        assert!(text.contains("It does not probe plan limits"));
+        assert!(text.contains("Enter records this Operate/Fleet snapshot."));
     }
 
     #[test]
@@ -6137,7 +6137,7 @@ mod tests {
         assert!(text.contains("configured_slots=2"));
         assert!(text.contains("Bindable actions:"));
         assert!(text.contains("13 bindable actions"));
-        assert!(text.contains("without changing config"));
+        assert!(text.contains("Press H to customize slots; Enter records this Hotbar snapshot."));
     }
 
     #[test]
@@ -6204,7 +6204,7 @@ mod tests {
         assert!(text.contains("/tmp/skills"));
         assert!(text.contains("Tools dir:"));
         assert!(text.contains("Plugins dir:"));
-        assert!(text.contains("without creating directories or connecting to servers"));
+        assert!(text.contains("Enter records this Tools/MCP snapshot."));
     }
 
     #[test]
@@ -6271,7 +6271,7 @@ mod tests {
         assert!(text.contains("feishu"));
         assert!(text.contains("Remote mode:"));
         assert!(text.contains("--apply not implemented"));
-        assert!(text.contains("without generating a bundle"));
+        assert!(text.contains("Press R to preview; Enter records this Remote snapshot."));
     }
 
     #[test]
@@ -6341,9 +6341,7 @@ mod tests {
         assert!(text.contains("Constitution:"));
         assert!(text.contains("Memory:"));
         assert!(text.contains("Notes:"));
-        assert!(
-            text.contains("does not create directories, read file contents, or rewrite config")
-        );
+        assert!(text.contains("Enter records this Persistence snapshot."));
     }
 
     #[test]

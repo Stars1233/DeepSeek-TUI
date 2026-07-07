@@ -1125,10 +1125,6 @@ impl ToolRegistryBuilder {
             .with_tool(Arc::new(TodoAddTool::checklist(todo_list.clone())))
             .with_tool(Arc::new(TodoUpdateTool::checklist(todo_list.clone())))
             .with_tool(Arc::new(TodoListTool::checklist(todo_list.clone())))
-            .with_tool(Arc::new(TodoWriteTool::new(todo_list.clone())))
-            .with_tool(Arc::new(TodoAddTool::new(todo_list.clone())))
-            .with_tool(Arc::new(TodoUpdateTool::new(todo_list.clone())))
-            .with_tool(Arc::new(TodoListTool::new(todo_list)))
     }
 
     /// Include the plan tool with a shared `PlanState`.
@@ -1254,7 +1250,7 @@ impl ToolSpec for McpToolAdapter {
             .call_tool(&self.name, input)
             .await
             .map_err(|e| ToolError::execution_failed(format!("MCP tool failed: {e}")))?;
-        let content = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+        let content = serde_json::to_string(&result).unwrap_or_else(|_| result.to_string());
         Ok(ToolResult::success(content))
     }
 }
@@ -1346,10 +1342,6 @@ mod tests {
             .with_todo_tool(crate::tools::todo::new_shared_todo_list())
             .build(ctx);
 
-        for alias in ["todo_write", "todo_add", "todo_update", "todo_list"] {
-            assert!(registry.contains(alias), "{alias} should remain callable");
-        }
-
         let api_names = registry
             .to_api_tools()
             .into_iter()
@@ -1365,12 +1357,6 @@ mod tests {
             assert!(
                 api_names.iter().any(|name| name == canonical),
                 "{canonical} should stay model-visible"
-            );
-        }
-        for alias in ["todo_write", "todo_add", "todo_update", "todo_list"] {
-            assert!(
-                api_names.iter().all(|name| name != alias),
-                "{alias} should be hidden from the model catalog"
             );
         }
     }

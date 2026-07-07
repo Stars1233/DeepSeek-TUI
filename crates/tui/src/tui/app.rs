@@ -166,8 +166,11 @@ pub enum AppMode {
     Agent,
     #[allow(dead_code)]
     Auto,
+    /// Legacy compatibility alias; resolves to [`Self::Agent`] + bypass approvals.
     Yolo,
     Plan,
+    Multitask,
+    Operate,
 }
 
 /// One row in the per-turn cache-telemetry ring (`/cache` debug surface, #263).
@@ -914,20 +917,23 @@ const MAX_COMPOSER_DISPLAY_CHARS: usize = 4_000;
 const MAX_DRAFT_HISTORY: usize = 50;
 
 impl AppMode {
-    /// Keyboard cycle order: Plan -> Agent -> YOLO -> Plan.
+    /// Keyboard cycle order: Plan -> Act -> Multitask -> Operate -> Plan.
     ///
     /// `Auto` remains an internal variant while the real implementation is
     /// redesigned; do not expose it through user-facing mode selection (#3733).
-    pub const CYCLE: [Self; 3] = [Self::Plan, Self::Agent, Self::Yolo];
+    /// `Yolo` is kept for parse/back-compat only and is not in the Tab cycle.
+    pub const CYCLE: [Self; 4] = [Self::Plan, Self::Agent, Self::Multitask, Self::Operate];
 
     /// User-facing picker / numeric command order.
-    pub const CHOICES: [Self; 3] = [Self::Agent, Self::Plan, Self::Yolo];
+    pub const CHOICES: [Self; 4] = [Self::Agent, Self::Plan, Self::Multitask, Self::Operate];
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "agent" | "act" | "auto" | "1" => Some(Self::Agent),
             "plan" | "2" => Some(Self::Plan),
+            "multitask" | "multi" | "3" => Some(Self::Multitask),
+            "operate" | "operation" | "ops" | "5" => Some(Self::Operate),
             "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions" => {
                 Some(Self::Yolo)
             }
@@ -947,26 +953,32 @@ impl AppMode {
             Self::Auto => "agent",
             Self::Yolo => "yolo",
             Self::Plan => "plan",
+            Self::Multitask => "multitask",
+            Self::Operate => "operate",
         }
     }
 
     /// Short label used in the UI footer.
     pub fn label(self) -> &'static str {
         match self {
-            AppMode::Agent => "AGENT",
-            AppMode::Auto => "AGENT",
+            AppMode::Agent => "ACT",
+            AppMode::Auto => "ACT",
             AppMode::Yolo => "YOLO",
             AppMode::Plan => "PLAN",
+            AppMode::Multitask => "MULTITASK",
+            AppMode::Operate => "OPERATE",
         }
     }
 
     #[must_use]
     pub fn display_name(self) -> &'static str {
         match self {
-            AppMode::Agent => "Agent",
-            AppMode::Auto => "Agent",
+            AppMode::Agent => "Act",
+            AppMode::Auto => "Act",
             AppMode::Yolo => "YOLO",
             AppMode::Plan => "Plan",
+            AppMode::Multitask => "Multitask",
+            AppMode::Operate => "Operate",
         }
     }
 
@@ -975,9 +987,35 @@ impl AppMode {
         match self {
             AppMode::Agent => '1',
             AppMode::Plan => '2',
+            AppMode::Multitask => '3',
             AppMode::Auto => '1',
             AppMode::Yolo => '4',
+            AppMode::Operate => '5',
         }
+    }
+
+    #[must_use]
+    pub fn uses_agent_baseline(self) -> bool {
+        matches!(
+            self,
+            Self::Agent | Self::Auto | Self::Multitask | Self::Operate
+        )
+    }
+
+    /// Wave 7 M4/M5: delegation modes get a higher parallel launch floor so
+    /// background fan-out is not throttled to a single slot when config is low.
+    #[must_use]
+    pub fn mode_delegation_launch_floor(self) -> usize {
+        match self {
+            Self::Multitask | Self::Operate => 4,
+            _ => 1,
+        }
+    }
+
+    /// Whether entering this mode should emphasize the Agents sidebar panel.
+    #[must_use]
+    pub fn prefers_agents_sidebar(self) -> bool {
+        matches!(self, Self::Multitask | Self::Operate)
     }
 
     /// Localized short name for the mode picker (user-facing surface only).
@@ -989,6 +1027,8 @@ impl AppMode {
                 AppMode::Agent | AppMode::Auto => MessageId::AppModeAgent,
                 AppMode::Yolo => MessageId::AppModeYolo,
                 AppMode::Plan => MessageId::AppModePlan,
+                AppMode::Multitask => MessageId::AppModeMultitask,
+                AppMode::Operate => MessageId::AppModeOperate,
             },
         )
     }
@@ -1002,6 +1042,8 @@ impl AppMode {
                 AppMode::Agent | AppMode::Auto => MessageId::AppModeAgentHint,
                 AppMode::Plan => MessageId::AppModePlanHint,
                 AppMode::Yolo => MessageId::AppModeYoloHint,
+                AppMode::Multitask => MessageId::AppModeMultitaskHint,
+                AppMode::Operate => MessageId::AppModeOperateHint,
             },
         )
     }
@@ -1010,9 +1052,13 @@ impl AppMode {
     /// Description shown in help or onboarding text.
     pub fn description(self) -> &'static str {
         match self {
-            AppMode::Agent | AppMode::Auto => "Agent mode - autonomous task execution with tools",
-            AppMode::Yolo => "YOLO mode - full tool access without approvals",
+            AppMode::Agent | AppMode::Auto => "Act mode - autonomous task execution with tools",
+            AppMode::Yolo => "YOLO mode - full tool access without approvals (deprecated)",
             AppMode::Plan => "Plan mode - design before implementing",
+            AppMode::Multitask => "Multitask mode - light delegation; operator stays responsive",
+            AppMode::Operate => {
+                "Operate mode - Fleet operator conductor; workers execute, you monitor"
+            }
         }
     }
 
@@ -1548,6 +1594,9 @@ pub struct App {
     pub next_history_revision: u64,
     pub api_messages: Vec<Message>,
     pub is_loading: bool,
+    /// Timestamp of the most recent Enter while the engine was busy.
+    /// Used by `enter_with_double_tap()` to detect a double-tap within 500 ms.
+    pub last_enter_instant: Option<Instant>,
     /// Whether the once-per-turn provider-wait incident (#3095) has already
     /// been logged for the current turn.
     pub provider_wait_incident_logged: bool,
@@ -1812,6 +1861,10 @@ pub struct App {
     pub hooks: HookExecutor,
     #[allow(dead_code)]
     pub yolo: bool,
+    /// One-shot YOLO→Act+Bypass migration notice for this session (#0.8.68 M6).
+    yolo_compat_notified: bool,
+    /// One-shot Shift+Tab/Ctrl+T rebinding notice for this session (#0.8.68 M3).
+    keybinding_migration_notified: bool,
     /// Durable Agent-era permission baseline that Plan/YOLO derive from and
     /// restore to (#3386). Refreshed from the live fields whenever the user
     /// leaves Agent mode; see [`base_policy_for_mode`] and `set_mode`.
@@ -1829,6 +1882,8 @@ pub struct App {
     pub approval_mode: ApprovalMode,
     // Modal view stack (approval/help/etc.)
     pub view_stack: ViewStack,
+    /// Last `request_user_input` prompt, retained so a failed modal submit can reopen (#1198).
+    pub pending_user_input_prompt: Option<(String, crate::tools::user_input::UserInputRequest)>,
     /// Esc-Esc backtrack state machine (#133). `Inactive` by default; first
     /// Esc primes, second Esc opens the live-transcript overlay scoped to
     /// previous user messages so the user can rewind a turn.
@@ -2489,17 +2544,15 @@ impl App {
             })
         };
 
-        // Start in YOLO mode if --yolo flag was passed
+        // Start in Act mode with bypass approvals when --yolo or default_mode=yolo.
         let preferred_mode = AppMode::from_setting(&settings.default_mode);
-        let initial_mode = if yolo {
-            AppMode::Yolo
-        } else if start_in_agent_mode {
+        let yolo_compat = yolo || (preferred_mode == AppMode::Yolo && !start_in_agent_mode);
+        let initial_mode = if yolo_compat || start_in_agent_mode {
             AppMode::Agent
         } else {
             preferred_mode
         };
-        let needs_workspace_trust =
-            initial_mode != AppMode::Yolo && crate::tui::onboarding::needs_trust(&workspace);
+        let needs_workspace_trust = !yolo_compat && crate::tui::onboarding::needs_trust(&workspace);
         let onboarding = initial_onboarding_state(
             skip_onboarding,
             was_onboarded,
@@ -2533,15 +2586,18 @@ impl App {
             .and_then(ApprovalMode::from_config_value)
             .unwrap_or_default();
         let mode_prefs = ModeSessionPrefs {
-            agent_allow_shell: if matches!(initial_mode, AppMode::Yolo) {
+            agent_allow_shell: if yolo_compat || matches!(initial_mode, AppMode::Yolo) {
                 config.interactive_allow_shell()
             } else {
                 allow_shell
             },
             agent_trust_mode: false,
+            // The YOLO-compat launch elevates the *live* approval mirror to
+            // Bypass below; the durable Agent baseline keeps the configured
+            // policy so a YOLO -> Agent downshift restores it.
             agent_approval_mode: configured_approval_mode,
         };
-        let allow_shell = allow_shell || matches!(initial_mode, AppMode::Yolo);
+        let allow_shell = allow_shell || yolo_compat || matches!(initial_mode, AppMode::Yolo);
         let shell_manager = new_shared_shell_manager(workspace.clone());
 
         // Initialize hooks executor from config, merged with project-local
@@ -2579,13 +2635,16 @@ impl App {
             crate::mcp::load_config_with_workspace(&mcp_config_path, &workspace)
                 .map(|cfg| cfg.servers.len())
                 .unwrap_or(0);
-        let hotbar_actions = HotbarActionRegistry::with_configured_routes(
+        let mut hotbar_actions = HotbarActionRegistry::with_configured_routes(
             config,
             provider,
             &model,
             &provider_models,
         );
-        Self {
+        // #2069: expose the already-discovered skills as bindable hotbar
+        // actions. Reuses the startup skill cache, so no extra filesystem I/O.
+        hotbar_actions.register_skills(&cached_skills);
+        let mut app = Self {
             mode: initial_mode,
             hotbar_actions,
             composer: ComposerState {
@@ -2626,6 +2685,7 @@ impl App {
             next_history_revision: 1,
             api_messages: Vec::new(),
             is_loading: false,
+            last_enter_instant: None,
             provider_wait_incident_logged: false,
             prompt_suggestion: None,
             prompt_suggestion_gen: std::sync::atomic::AtomicU64::new(0),
@@ -2735,12 +2795,14 @@ impl App {
             api_key_input: String::new(),
             api_key_cursor: 0,
             hooks,
-            yolo: initial_mode == AppMode::Yolo,
+            yolo: yolo_compat,
+            yolo_compat_notified: false,
+            keybinding_migration_notified: false,
             mode_prefs,
             clipboard: ClipboardHandler::new(),
             approval_session_approved: HashSet::new(),
             approval_session_denied: HashSet::new(),
-            approval_mode: if matches!(initial_mode, AppMode::Yolo) {
+            approval_mode: if yolo_compat || matches!(initial_mode, AppMode::Yolo) {
                 ApprovalMode::Bypass
             } else {
                 config
@@ -2750,10 +2812,11 @@ impl App {
                     .unwrap_or_default()
             },
             view_stack: ViewStack::new(),
+            pending_user_input_prompt: None,
             backtrack: crate::tui::backtrack::BacktrackState::new(),
             current_session_id: None,
             session_artifacts: Vec::new(),
-            trust_mode: initial_mode == AppMode::Yolo,
+            trust_mode: yolo_compat || initial_mode == AppMode::Yolo,
             translation_enabled: false,
             status_items: config
                 .tui
@@ -2860,7 +2923,11 @@ impl App {
             receipt_text: None,
             receipt_started_at: None,
             tool_evidence: Vec::new(),
+        };
+        if yolo_compat {
+            app.notify_yolo_compat_once();
         }
+        app
     }
 
     fn discover_cached_skills(
@@ -2982,13 +3049,19 @@ impl App {
     }
 
     pub fn set_mode(&mut self, mode: AppMode) -> bool {
+        let requested_mode = mode;
+        let mode = match mode {
+            AppMode::Yolo => AppMode::Agent,
+            other => other,
+        };
+        let yolo_compat = requested_mode == AppMode::Yolo;
         let previous_mode = self.mode;
-        if previous_mode == mode {
+        if previous_mode == mode && !yolo_compat && !self.yolo {
             return false;
         }
 
         self.mode = mode;
-        self.status_message = Some(format!("Switched to {} mode", mode.label()));
+        // Mode chip lives in the header — skip redundant status/toast copy.
 
         // Mode cycling is untangled from permission policy (#3386). The user
         // only edits the durable permission surface while in Agent mode, so
@@ -2998,7 +3071,7 @@ impl App {
         // cross-mode hops (Plan -> YOLO, YOLO -> Plan) do not touch the baseline,
         // so YOLO's elevated authority never bleeds into the restored Agent
         // surface (#3279).
-        if previous_mode == AppMode::Agent {
+        if previous_mode.uses_agent_baseline() && !self.yolo {
             self.mode_prefs = ModeSessionPrefs {
                 agent_allow_shell: self.allow_shell,
                 agent_trust_mode: self.trust_mode,
@@ -3006,20 +3079,29 @@ impl App {
             };
         }
 
-        // Derive the effective permission policy for the incoming mode from the
-        // single source of truth and apply it to the live mirrors in one block.
-        // Plan's write-blocking still comes from `self.mode` in turn_loop; this
-        // also keeps the TUI approval surface (which reads `self.approval_mode`
-        // without consulting `self.mode`) consistent with the active mode.
-        let policy = base_policy_for_mode(mode, &self.mode_prefs);
-        self.allow_shell = policy.allow_shell;
-        self.trust_mode = policy.trust_mode;
-        self.approval_mode = policy.approval_mode;
-        self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
+        if yolo_compat {
+            // Transient full-access mirrors for legacy YOLO entry points; do not
+            // persist trust/shell elevation into the durable Agent baseline.
+            self.allow_shell = true;
+            self.trust_mode = true;
+            self.approval_mode = ApprovalMode::Bypass;
+            self.yolo = true;
+            self.notify_yolo_compat_once();
+        } else {
+            let policy = base_policy_for_mode(mode, &self.mode_prefs);
+            self.allow_shell = policy.allow_shell;
+            self.trust_mode = policy.trust_mode;
+            self.approval_mode = policy.approval_mode;
+            self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
+        }
 
         if mode != AppMode::Plan {
             self.plan_prompt_pending = false;
             self.plan_tool_used_in_turn = false;
+        }
+
+        if mode.prefers_agents_sidebar() {
+            self.set_sidebar_focus(SidebarFocus::Agents);
         }
 
         // Execute mode change hooks
@@ -3031,6 +3113,45 @@ impl App {
         let _ = self.hooks.execute(HookEvent::ModeChange, &context);
         self.needs_redraw = true;
         true
+    }
+
+    fn notify_yolo_compat_once(&mut self) {
+        if self.yolo_compat_notified {
+            return;
+        }
+        self.yolo_compat_notified = true;
+        // Per-install suppression: check the persisted flag so the toast
+        // appears exactly once across sessions, not every launch.
+        if let Ok(settings) = crate::settings::Settings::load() {
+            if settings.yolo_deprecation_shown {
+                return;
+            }
+        }
+        // Persist the flag best-effort; toast still fires even if the write
+        // fails (retries on the next attempt).
+        if let Ok(mut settings) = crate::settings::Settings::load() {
+            settings.yolo_deprecation_shown = true;
+            let _ = settings.save();
+        }
+        self.push_status_toast(
+            "YOLO mode is deprecated — use Act + Bypass permissions (Shift+Tab)".to_string(),
+            StatusToastLevel::Warning,
+            Some(8_000),
+        );
+    }
+
+    /// One-release migration notice for the Shift+Tab/Ctrl+T rebinding: users
+    /// pressing Shift+Tab expecting the old thinking cycle land here first.
+    fn notify_keybinding_migration_once(&mut self) {
+        if self.keybinding_migration_notified {
+            return;
+        }
+        self.keybinding_migration_notified = true;
+        self.push_status_toast(
+            "Shift+Tab now cycles permissions — reasoning effort moved to Ctrl+T".to_string(),
+            StatusToastLevel::Info,
+            Some(8_000),
+        );
     }
 
     /// Whether mode/thinking selection is locked because a turn is in flight.
@@ -3052,7 +3173,7 @@ impl App {
         }
     }
 
-    /// Cycle through modes: Plan → Agent → YOLO → Plan.
+    /// Cycle through modes: Plan → Act → Multitask → Operate → Plan.
     pub fn cycle_mode(&mut self) {
         if self.reject_setting_change_while_busy("Mode") {
             return;
@@ -3081,15 +3202,28 @@ impl App {
             .cycle_next_for_provider(self.api_provider);
         self.last_effective_reasoning_effort = None;
         self.needs_redraw = true;
-        self.push_status_toast(
-            format!(
-                "Thinking: {}",
-                self.reasoning_effort
-                    .display_label_for_provider(self.api_provider)
-            ),
-            StatusToastLevel::Info,
-            Some(1_500),
-        );
+        // Effort chip in the header is canonical — no duplicate toast.
+    }
+
+    /// Cycle the durable Agent permission posture: Ask → Auto-Review → Bypass.
+    pub fn cycle_approval_posture(&mut self) -> bool {
+        if self.reject_setting_change_while_busy("Permissions") {
+            return false;
+        }
+        let next = self.mode_prefs.agent_approval_mode.cycle_permission_next();
+        self.mode_prefs.agent_approval_mode = next;
+        if self.mode.uses_agent_baseline() {
+            let policy = base_policy_for_mode(self.mode, &self.mode_prefs);
+            self.allow_shell = policy.allow_shell;
+            self.trust_mode = policy.trust_mode;
+            self.approval_mode = policy.approval_mode;
+            self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
+        }
+        self.needs_redraw = true;
+        // Footer permission chip is canonical — no status toast for the new
+        // value, only the one-shot rebinding notice.
+        self.notify_keybinding_migration_once();
+        true
     }
 
     /// Execute hooks for a specific event with the given context
@@ -4040,6 +4174,9 @@ impl App {
         if message.trim().is_empty() {
             return;
         }
+        if Self::is_mode_switch_status_message(&message) {
+            return;
+        }
 
         let (level, ttl_ms, sticky) = Self::classify_status_text(&message);
         if sticky {
@@ -4052,10 +4189,6 @@ impl App {
                     .is_some_and(|toast| matches!(toast.level, StatusToastLevel::Error))
             {
                 self.clear_sticky_status();
-            }
-            if Self::is_mode_switch_status_message(&message) {
-                self.status_toasts
-                    .retain(|toast| !Self::is_mode_switch_status_message(&toast.text));
             }
             self.push_status_toast(message, level, ttl_ms);
         }
@@ -5537,17 +5670,16 @@ impl App {
 
     /// Decide how to route a fresh composer submit.
     ///
-    /// #382 / v0.8.44: when the model is busy but not actively streaming
-    /// (waiting on tool results, sub-agents, or shell commands), Enter tries
-    /// to steer into the current turn. If steering fails, the message queues.
-    /// During active streaming, Enter always queues to avoid interrupting
-    /// in-flight reasoning. Ctrl+Enter forces Steer in all busy states.
+    /// v0.8.68: streaming output queues. Busy-but-waiting turns steer so
+    /// Enter can amend the active turn before output starts. A double-tap
+    /// Enter within 500 ms triggers Steer while streaming; Ctrl+Enter forces
+    /// Steer in all busy states.
     ///
     /// Truth table:
-    ///   offline=F, busy=F           → Immediate
-    ///   offline=F, busy=T+streaming → Queue
-    ///   offline=F, busy=T+waiting   → Steer (fallback Queue)
-    ///   offline=T, busy=*           → Queue
+    ///   offline=F, busy=F → Immediate
+    ///   offline=F, busy=T, streaming=F → Steer
+    ///   offline=F, busy=T, streaming=T → Queue (double-tap → Steer)
+    ///   offline=T, busy=* → Queue
     #[must_use]
     pub fn decide_submit_disposition(&self) -> SubmitDisposition {
         if self.offline_mode {
@@ -5556,14 +5688,40 @@ impl App {
         if !self.is_loading {
             return SubmitDisposition::Immediate;
         }
-        // Busy but not streaming text: model is waiting on tool results or
-        // sub-agents — steer so the new message reaches the engine promptly
-        // instead of sitting in the queue until the current turn finishes.
         if self.streaming_message_index.is_none() {
             return SubmitDisposition::Steer;
         }
-        // Actively streaming: queue to avoid interrupting in-flight reasoning.
+        // Streaming: queue the message. Double-tap Enter within 500 ms
+        // triggers Steer via enter_with_double_tap(); see the ui.rs submit
+        // handler.
         SubmitDisposition::Queue
+    }
+
+    /// Process an Enter keypress with double-tap steering detection.
+    ///
+    /// When the engine is busy, the first Enter queues the message. A second
+    /// Enter within 500 ms triggers Steer (interrupt the current turn to
+    /// inject the new instruction immediately). When idle, Enter submits
+    /// immediately.
+    #[must_use]
+    pub fn enter_with_double_tap(&mut self) -> Option<SubmitDisposition> {
+        let disposition = self.decide_submit_disposition();
+        match disposition {
+            SubmitDisposition::Queue => {
+                if let Some(instant) = self.last_enter_instant
+                    && instant.elapsed() < Duration::from_millis(500)
+                {
+                    self.last_enter_instant = None;
+                    return Some(SubmitDisposition::Steer);
+                }
+                self.last_enter_instant = Some(Instant::now());
+                Some(SubmitDisposition::Queue)
+            }
+            other => {
+                self.last_enter_instant = None;
+                Some(other)
+            }
+        }
     }
 
     /// Mark the in-flight streaming Assistant cell as interrupted: prepend
