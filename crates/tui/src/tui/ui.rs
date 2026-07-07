@@ -317,9 +317,9 @@ enum TranslationEvent {
 // plus ratatui's `terminal.clear()` are sufficient to repaint cleanly.
 const TERMINAL_ORIGIN_RESET: &[u8] = b"\x1b[r\x1b[?6l\x1b[H";
 // Xterm alternate-scroll mode keeps wheel events inside the alternate-screen
-// viewport. Crossterm's mouse-capture command does not enable this DEC private
-// mode, so terminals can still scroll the host scrollback if mouse capture is
-// disabled, dropped during focus changes, or unavailable in the host.
+// viewport when mouse capture is requested but unavailable or temporarily
+// dropped. Leave it off with `--no-mouse-capture` so the host terminal owns
+// raw mouse selection behavior end-to-end.
 const ENABLE_ALT_SCROLL_MODE: &[u8] = b"\x1b[?1007h";
 const DISABLE_ALT_SCROLL_MODE: &[u8] = b"\x1b[?1007l";
 /// Begin synchronized update (DEC 2026): tell the terminal to defer
@@ -11562,9 +11562,13 @@ pub(crate) fn recover_terminal_modes<W: Write>(
 
     pop_keyboard_enhancement_flags(writer);
     push_keyboard_enhancement_flags(writer);
-    enable_alternate_scroll_mode(writer);
-    if use_mouse_capture && let Err(err) = execute!(writer, EnableMouseCapture) {
-        tracing::debug!(?err, "EnableMouseCapture ignored");
+    if use_mouse_capture {
+        enable_alternate_scroll_mode(writer);
+        if let Err(err) = execute!(writer, EnableMouseCapture) {
+            tracing::debug!(?err, "EnableMouseCapture ignored");
+        }
+    } else {
+        disable_alternate_scroll_mode(writer);
     }
     if use_bracketed_paste {
         try_enable_bracketed_paste_mode(writer);

@@ -218,8 +218,16 @@ fn recover_terminal_modes_emits_expected_csi_sequences_with_gating() {
         "Kitty keyboard disambiguation flag must be re-pushed regardless of gating"
     );
     assert!(
-        on.contains("\x1b[?1007h") && off.contains("\x1b[?1007h"),
-        "alternate-scroll mode must be re-armed regardless of mouse-capture gating"
+        on.contains("\x1b[?1007h"),
+        "alternate-scroll mode must be re-armed when mouse capture is active"
+    );
+    assert!(
+        !off.contains("\x1b[?1007h"),
+        "alternate-scroll mode must stay off when mouse capture is disabled"
+    );
+    assert!(
+        off.contains("\x1b[?1007l"),
+        "alternate-scroll mode must be reset when mouse capture is disabled"
     );
 
     assert!(

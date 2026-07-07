@@ -6,7 +6,7 @@ use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post
 use std::collections::HashSet;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tempfile::tempdir;
+use tempfile::{Builder as TempDirBuilder, tempdir};
 
 fn make_assignment() -> SubAgentAssignment {
     SubAgentAssignment::new("prompt".to_string(), Some("worker".to_string()))
@@ -3562,11 +3562,26 @@ fn git_repo_root_discovers_one_level_nested_repo_from_harness() {
 
 #[test]
 fn git_repo_root_reports_attempted_paths_when_no_repo_found() {
-    let empty = tempdir().expect("empty dir");
-    let err = git_repo_root(empty.path()).expect_err("missing repo should fail cleanly");
+    let repo_root = git_repo_root(&std::env::current_dir().expect("current dir"))
+        .expect("test should run inside the checkout");
+    let harness = TempDirBuilder::new()
+        .prefix(".codewhale-no-repo-")
+        .tempdir_in(repo_root.parent().expect("repo parent"))
+        .expect("empty harness outside checkout");
+    let empty = harness
+        .path()
+        .join("isolated")
+        .join("a")
+        .join("b")
+        .join("c")
+        .join("d")
+        .join("empty");
+    std::fs::create_dir_all(&empty).expect("empty nested dir");
+    let expected = empty.canonicalize().expect("canonical empty dir");
+    let err = git_repo_root(&empty).expect_err("missing repo should fail cleanly");
     let message = err.to_string();
     assert!(
-        message.contains("Tried:") && message.contains(empty.path().to_string_lossy().as_ref()),
+        message.contains("Tried:") && message.contains(expected.to_string_lossy().as_ref()),
         "expected friendly attempted-path error, got: {message}"
     );
 }
