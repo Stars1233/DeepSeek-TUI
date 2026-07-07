@@ -129,8 +129,16 @@ fn should_keep_mcp_tool_loaded(name: &str) -> bool {
     )
 }
 
-pub(super) fn apply_mcp_tool_deferral(catalog: &mut [Tool], mode: AppMode) {
+pub(super) fn apply_mcp_tool_deferral(
+    catalog: &mut [Tool],
+    mode: AppMode,
+    always_load: &HashSet<String>,
+) {
     for tool in catalog {
+        if always_load.contains(&tool.name) {
+            tool.defer_loading = Some(false);
+            continue;
+        }
         tool.defer_loading =
             Some(mode != AppMode::Yolo && !should_keep_mcp_tool_loaded(&tool.name));
     }
@@ -169,7 +177,7 @@ pub(super) fn build_model_tool_catalog_with_surface(
     surface_budget: ToolSurfaceBudget,
 ) -> Vec<Tool> {
     apply_native_tool_deferral(&mut native_tools, always_load);
-    apply_mcp_tool_deferral(&mut mcp_tools, mode);
+    apply_mcp_tool_deferral(&mut mcp_tools, mode, always_load);
     apply_tool_surface_budget(&mut native_tools, surface_budget, always_load);
     apply_tool_surface_budget(&mut mcp_tools, surface_budget, always_load);
     // Sort each partition by name for prefix-cache stability (#263). The
