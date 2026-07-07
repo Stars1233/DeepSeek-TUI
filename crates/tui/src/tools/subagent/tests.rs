@@ -3519,16 +3519,55 @@ fn parse_spawn_request_accepts_worktree_isolation() {
 }
 
 #[test]
-fn parse_spawn_request_rejects_cwd_with_worktree_isolation() {
+fn parse_spawn_request_accepts_cwd_with_worktree_isolation() {
     let input = json!({
         "prompt": "build feature A",
         "cwd": ".worktrees/manual",
         "worktree": true
     });
-    let err = parse_spawn_request(&input).expect_err("cwd and worktree should conflict");
+    let parsed = parse_spawn_request(&input).expect("cwd and worktree may be combined");
+    assert!(parsed.worktree.is_some());
+    assert!(parsed.cwd.is_some());
+}
+
+#[test]
+fn git_repo_root_finds_repo_from_direct_cwd() {
+    let repo = init_subagent_git_repo();
+    let root = git_repo_root(repo.path()).expect("direct repo cwd should resolve");
+    assert_eq!(
+        root.canonicalize().expect("canonical root"),
+        repo.path().canonicalize().expect("canonical repo")
+    );
+}
+
+#[test]
+fn git_repo_root_discovers_one_level_nested_repo_from_harness() {
+    let repo = init_subagent_git_repo();
+    let harness = tempdir().expect("harness dir");
+    let nested = harness.path().join("CodeWhale");
+    Command::new("git")
+        .args([
+            "clone",
+            repo.path().to_str().unwrap(),
+            nested.to_str().unwrap(),
+        ])
+        .output()
+        .expect("clone nested repo");
+    let root = git_repo_root(harness.path()).expect("harness cwd should discover nested repo");
+    assert_eq!(
+        root.canonicalize().expect("canonical root"),
+        nested.canonicalize().expect("canonical nested")
+    );
+}
+
+#[test]
+fn git_repo_root_reports_attempted_paths_when_no_repo_found() {
+    let empty = tempdir().expect("empty dir");
+    let err = git_repo_root(empty.path()).expect_err("missing repo should fail cleanly");
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("either cwd or worktree"),
-        "unexpected error: {err}"
+        message.contains("Tried:") && message.contains(empty.path().to_string_lossy().as_ref()),
+        "expected friendly attempted-path error, got: {message}"
     );
 }
 

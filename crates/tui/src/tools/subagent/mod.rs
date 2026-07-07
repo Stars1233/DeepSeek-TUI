@@ -4233,9 +4233,7 @@ async fn run_subagent_task(task: SubAgentTask) {
             let raw = summarize_subagent_result(res);
             let (summary, truncated) = stamp_subagent_summary(&raw);
             let sentinel = match &res.status {
-                SubAgentStatus::Failed(error) => {
-                    subagent_failed_sentinel(&task.agent_id, error)
-                }
+                SubAgentStatus::Failed(error) => subagent_failed_sentinel(&task.agent_id, error),
                 _ => subagent_done_sentinel(&task.agent_id, res, truncated),
             };
             (summary, sentinel)
@@ -5790,11 +5788,6 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
 
     let cwd = parse_optional_cwd(input)?;
     let worktree = parse_optional_worktree_request(input)?;
-    if cwd.is_some() && worktree.is_some() {
-        return Err(ToolError::invalid_input(
-            "Use either cwd or worktree isolation, not both".to_string(),
-        ));
-    }
     let model = parse_optional_subagent_model(input, "model")?;
     let explicit_model_strength = optional_input_str(input, &["model_strength", "modelStrength"])
         .map(SubAgentModelStrength::parse)
@@ -6426,18 +6419,28 @@ fn prepare_child_workspace(
     parent_workspace: &Path,
     request: &SpawnRequest,
 ) -> Result<Option<PathBuf>, ToolError> {
-    if let Some(requested_cwd) = request.cwd.as_ref() {
-        return validate_existing_child_cwd(parent_workspace, requested_cwd).map(Some);
-    }
+    let discovery_anchor = if let Some(requested_cwd) = request.cwd.as_ref() {
+        validate_existing_child_cwd(parent_workspace, requested_cwd)?
+    } else {
+        parent_workspace
+            .canonicalize()
+            .unwrap_or_else(|_| parent_workspace.to_path_buf())
+    };
+
     if let Some(worktree) = request.worktree.as_ref() {
         return create_isolated_worktree(
-            parent_workspace,
+            &discovery_anchor,
             worktree,
             request.session_name.as_deref(),
             &request.agent_type,
         )
         .map(Some);
     }
+
+    if request.cwd.is_some() {
+        return Ok(Some(discovery_anchor));
+    }
+
     Ok(None)
 }
 
@@ -6518,18 +6521,72 @@ fn create_isolated_worktree(
 }
 
 fn git_repo_root(workspace: &Path) -> Result<PathBuf, ToolError> {
-    let output = run_git_checked(
-        workspace,
-        &["rev-parse".to_string(), "--show-toplevel".to_string()],
-        "resolve git repository root",
-    )?;
-    let root = output.trim();
-    if root.is_empty() {
-        return Err(ToolError::invalid_input(
-            "worktree=true requires a git repository workspace".to_string(),
-        ));
+    let start = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut paths_tried = Vec::new();
+    let mut current = Some(start.as_path());
+
+    while let Some(dir) = current {
+        paths_tried.push(dir.display().to_string());
+
+        if let Some(root) = try_git_toplevel(dir) {
+            return Ok(root);
+        }
+
+        if let Ok(entries) = fs::read_dir(dir) {
+            let mut nested_roots = Vec::new();
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if !child.is_dir() || !path_looks_like_git_checkout(&child) {
+                    continue;
+                }
+                if let Some(root) = try_git_toplevel(&child) {
+                    nested_roots.push(root);
+                }
+            }
+            match nested_roots.len() {
+                0 => {}
+                1 => return Ok(nested_roots.into_iter().next().expect("single nested root")),
+                _ => {
+                    let repos = nested_roots
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(ToolError::invalid_input(format!(
+                        "Multiple git repositories found under {}. Specify cwd to disambiguate: {repos}",
+                        dir.display()
+                    )));
+                }
+            }
+        }
+
+        current = dir.parent();
     }
-    Ok(PathBuf::from(root))
+
+    Err(ToolError::invalid_input(format!(
+        "worktree=true requires a git repository. Tried: {}",
+        paths_tried.join(", ")
+    )))
+}
+
+fn path_looks_like_git_checkout(path: &Path) -> bool {
+    let git_path = path.join(".git");
+    git_path.is_dir() || git_path.is_file()
+}
+
+fn try_git_toplevel(path: &Path) -> Option<PathBuf> {
+    let output = Git::output(&["rev-parse", "--show-toplevel"], path).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
 }
 
 fn validate_git_branch_name(repo_root: &Path, branch: &str) -> Result<(), ToolError> {
@@ -7300,9 +7357,7 @@ fn summarize_subagent_result(result: &SubAgentResult) -> String {
     }
     match (&result.status, result.result.as_ref()) {
         (SubAgentStatus::Completed, Some(text)) => text.clone(),
-        (SubAgentStatus::Completed, None) => {
-            "Completed (no final summary returned)".to_string()
-        }
+        (SubAgentStatus::Completed, None) => "Completed (no final summary returned)".to_string(),
         (SubAgentStatus::Interrupted(error), _) => format!("Interrupted: {error}"),
         (SubAgentStatus::Cancelled, _) => "Cancelled".to_string(),
         (SubAgentStatus::BudgetExhausted, _) => "Token budget exhausted".to_string(),
