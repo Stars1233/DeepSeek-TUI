@@ -543,6 +543,32 @@ fn rlm_eval_required_approval_ignores_generic_auto_approve() {
 }
 
 #[test]
+fn start_mcp_server_approval_is_non_bypassable_even_under_auto_approve() {
+    // Security invariant (#3866): the LLM can request a runtime MCP server
+    // start, which spawns a child process / opens a network connection. That
+    // must never run without explicit user approval — not even in YOLO /
+    // auto-approve mode. The gate must force approval regardless of
+    // `auto_approve`, so an unapproved start cannot reach `execute` (and thus
+    // cannot spawn). A generic `Required` tool, by contrast, is auto-approved
+    // when `auto_approve` is set — this asserts `start_mcp_server` is treated
+    // as non-bypassable, not merely "Required".
+    assert!(
+        registered_tool_approval_required("start_mcp_server", ApprovalRequirement::Required, true),
+        "start_mcp_server must require approval even when auto_approve is enabled"
+    );
+    assert!(
+        registered_tool_approval_required("start_mcp_server", ApprovalRequirement::Required, false),
+        "start_mcp_server must require approval when auto_approve is disabled"
+    );
+    // Sanity contrast: an ordinary Required tool is bypassable under auto-approve.
+    assert!(!registered_tool_approval_required(
+        "exec_shell",
+        ApprovalRequirement::Required,
+        true
+    ));
+}
+
+#[test]
 fn generic_required_tools_keep_auto_approve_behavior() {
     assert!(!registered_tool_approval_required(
         "exec_shell",

@@ -83,6 +83,7 @@ tar = "0.4"
 flate2 = "1.1"
 sha2.workspace = true
 rust-i18n = "4.1.0"
+shell-words = "1.1.1"
 mimalloc.workspace = true
 
 [build-dependencies]

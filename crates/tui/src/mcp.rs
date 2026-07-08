@@ -2155,7 +2155,6 @@ impl McpPool {
     ///
     /// Returns `Err` if a server with the same name already exists as a static config
     /// or a dynamic config. The caller should surface the error to the LLM/user.
-    #[allow(dead_code)] // Public API for MCP consumers
     pub fn add_runtime_server_config(
         &self,
         name: String,
