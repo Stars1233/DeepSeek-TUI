@@ -31,8 +31,9 @@ If you want named reusable workers, open the TUI and run:
 /fleet setup
 ```
 
-Pick a role, pick a model class, review the permissions/tools/route posture,
-and ratify the rendered TOML. Ratified profiles are saved under
+Pick a role, choose whether that profile inherits the operator route or pins a
+specific provider/model/thinking tier, review the permissions/tools/route
+posture, and ratify the rendered TOML. Ratified profiles are saved under
 `.codewhale/agents/<role>.toml`. Fleet task specs can reference those profiles
 with `worker.agent_profile` or the shorter `worker.profile` alias.
 
@@ -67,7 +68,7 @@ one bounded docs-note worker. It keeps secrets disabled and caps trust at
         "role": "reviewer",
         "profile": "reviewer",
         "tools": ["rg", "sed", "git"],
-        "model_class": "fast"
+        "model": "deepseek-v4-flash"
       },
       "workspace": {
         "required_files": ["docs/FLEET.md", "docs/WORKFLOW_AUTHORING.md"],
@@ -93,8 +94,7 @@ one bounded docs-note worker. It keeps secrets disabled and caps trust at
       "instructions": "Write a concise Markdown note with the missing Fleet + Workflow tutorial steps. Do not edit public docs unless explicitly asked.",
       "worker": {
         "role": "builder",
-        "tools": ["rg", "sed"],
-        "model_class": "inherit"
+        "tools": ["rg", "sed"]
       },
       "workspace": {
         "required_files": ["docs/FLEET.md"],
@@ -123,7 +123,8 @@ Common task fields:
 | `worker.role` | Built-in or custom role intent, such as `reviewer`, `builder`, `read-only`, or `smoke-runner`. |
 | `worker.profile` / `worker.agent_profile` | Ratified Fleet roster profile from `.codewhale/agents/`. |
 | `worker.tools` | Tool names the task expects the worker to use. |
-| `worker.model_class`, `worker.loadout`, `worker.model` | Routing hints or explicit model intent. Route resolution still owns provider/model validation. |
+| `worker.model` | Preferred explicit model pin. Route resolution still owns provider/model validation. |
+| `worker.model_class`, `worker.loadout` | Compatibility routing hints for older task specs; prefer `worker.profile` plus saved profile route pins for new specs. |
 | `workspace.required_files` | Files that must exist before the task starts. |
 | `workspace.writable_paths` | Paths the task is allowed to write when the effective runtime posture allows writing. |
 | `workspace.environment` | Required or allowlisted environment variables, by name only. |

@@ -43,20 +43,21 @@ logs and adapter logs are stored under `.codewhale/fleet/` and
 
 `/fleet setup` (also `/fleet setup edit` / `new`) opens an in-TUI wizard for
 authoring a reusable agent-team profile. Bare `/fleet` and the
-`roster`/`roles`/`profiles`/`loadout`/`party` aliases open the roster (the saved
-profiles). `/fleet status` opens the worker-status view; `/subagents` is a
+`roster`/`roles`/`profiles`/`party` aliases open the roster (the saved profiles).
+`/fleet status` opens the worker-status view; `/subagents` is a
 compatibility shortcut for that status view.
 
 The wizard is progressive: you make one focused choice at a time — a **role**,
 then a **model** (`inherit`, or a concrete model from *any configured
-provider*, not only the one the parent session is currently using) — and then
-review the full posture (model/route, permissions, tools, workspace/org
-scope, and review policy) before doing anything. Picking a concrete model
-pins its provider explicitly: the saved profile records both `model` and
-`provider` fields, so the route it names doesn't depend on whichever provider
-happens to be active when the profile is later loaded. Pressing **Enter**
-("start") on the review step previews the exact starter profile TOML inline
-on that same screen; nothing is written until you ratify it.
+provider*, not only the one the parent session is currently using), then a
+**thinking tier** (`inherit`, `off`, `low`, `medium`, `high`, `max`, or `auto`)
+— and then review the full posture (route, thinking, permissions, tools,
+workspace/org scope, and review policy) before doing anything. Picking a
+concrete model pins its provider explicitly: the saved profile records both
+`model` and `provider` fields, so the route it names doesn't depend on
+whichever provider happens to be active when the profile is later loaded.
+Pressing **Enter** ("start") on the review step previews the exact starter
+profile TOML inline on that same screen; nothing is written until you ratify it.
 
 When a provider is configured, the review step also offers model-assisted
 drafting behind a ratify gate:
@@ -123,7 +124,7 @@ calls, it drafts a Workflow script/IR, presents the run plan according to the
 active permission mode, and the runtime compiles it into typed Fleet work.
 
 Fleet remains the sub-agent config surface. It owns slot count, role profiles,
-model/loadout selection, tool posture, launch concurrency, and the ledger.
+saved route pins or inheritance, tool posture, launch concurrency, and the ledger.
 Workflow owns only the orchestration plan: branch, sequence, loop, expand,
 review, and reduce decisions. The workflow script must not get direct shell,
 filesystem, network, provider-secret, cancellation, or TUI authority; workers
