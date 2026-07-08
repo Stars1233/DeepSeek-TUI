@@ -1132,14 +1132,23 @@ impl ToolRegistryBuilder {
         )
     }
 
-    /// Include the todo tool with a shared `TodoList`.
+    /// Include the todo / work-progress tools with a shared `TodoList`.
+    ///
+    /// `work_update` is the sole model-visible progress surface (#4132).
+    /// `checklist_*` and `todo_*` remain registered as hidden compat aliases
+    /// so saved transcripts and older prompts still replay.
     #[must_use]
     pub fn with_todo_tool(self, todo_list: super::todo::SharedTodoList) -> Self {
         use super::todo::{TodoAddTool, TodoListTool, TodoUpdateTool, TodoWriteTool};
-        self.with_tool(Arc::new(TodoWriteTool::checklist(todo_list.clone())))
+        self.with_tool(Arc::new(TodoWriteTool::work_update(todo_list.clone())))
+            .with_tool(Arc::new(TodoWriteTool::checklist(todo_list.clone())))
+            .with_tool(Arc::new(TodoWriteTool::todo(todo_list.clone())))
             .with_tool(Arc::new(TodoAddTool::checklist(todo_list.clone())))
+            .with_tool(Arc::new(TodoAddTool::todo(todo_list.clone())))
             .with_tool(Arc::new(TodoUpdateTool::checklist(todo_list.clone())))
+            .with_tool(Arc::new(TodoUpdateTool::todo(todo_list.clone())))
             .with_tool(Arc::new(TodoListTool::checklist(todo_list.clone())))
+            .with_tool(Arc::new(TodoListTool::todo(todo_list.clone())))
     }
 
     /// Include the plan tool with a shared `PlanState`.
@@ -1368,21 +1377,44 @@ mod tests {
             .with_todo_tool(crate::tools::todo::new_shared_todo_list())
             .build(ctx);
 
+        // Canonical + legacy spellings stay callable for replay.
+        for name in [
+            "work_update",
+            "checklist_write",
+            "checklist_add",
+            "checklist_update",
+            "checklist_list",
+            "todo_write",
+            "todo_add",
+            "todo_update",
+            "todo_list",
+        ] {
+            assert!(registry.contains(name), "{name} should remain callable");
+        }
+
         let api_names = registry
             .to_api_tools()
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
 
-        for canonical in [
+        assert!(
+            api_names.iter().any(|name| name == "work_update"),
+            "work_update should be the sole model-visible progress surface"
+        );
+        for hidden in [
             "checklist_write",
             "checklist_add",
             "checklist_update",
             "checklist_list",
+            "todo_write",
+            "todo_add",
+            "todo_update",
+            "todo_list",
         ] {
             assert!(
-                api_names.iter().any(|name| name == canonical),
-                "{canonical} should stay model-visible"
+                api_names.iter().all(|name| name != hidden),
+                "{hidden} should be hidden from the model catalog"
             );
         }
     }

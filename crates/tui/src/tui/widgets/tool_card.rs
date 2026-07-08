@@ -216,6 +216,7 @@ fn is_known_metadata_tool_name(name: &str) -> bool {
     matches!(
         name,
         "update_plan"
+            | "work_update"
             | "todo_write"
             | "todo_add"
             | "todo_update"

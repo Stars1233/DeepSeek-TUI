@@ -96,8 +96,10 @@ pub fn get_tool_category(name: &str) -> ToolCategory {
         name,
         "read_file"
             | "list_dir"
+            | "work_update"
             | "todo_write"
             | "todo_read"
+            | "checklist_write"
             | "note"
             | "update_plan"
             | "search"

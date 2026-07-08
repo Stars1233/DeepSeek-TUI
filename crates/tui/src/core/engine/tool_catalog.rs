@@ -41,7 +41,6 @@ pub(super) fn is_tool_search_tool(name: &str) -> bool {
 pub(super) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
     "agent",
     "apply_patch",
-    "checklist_write",
     "edit_file",
     "exec_interact",
     "exec_shell",
@@ -65,6 +64,7 @@ pub(super) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
     "update_plan",
     "wait_for_dev_server",
     "web_search",
+    "work_update",
     "write_file",
 ];
 
@@ -669,7 +669,7 @@ pub(super) fn missing_tool_error_message(tool_name: &str, catalog: &[Tool]) -> S
         return format!(
             "Tool '{tool_name}' is not available in the current tool catalog. \
              Checklist entries are not separate tool calls — write the whole list \
-             in one `checklist_write` call with an `items` array of \
+             in one `work_update` call with a `todos` array of \
              {{content, status}} objects."
         );
     }
@@ -935,9 +935,9 @@ fn likely_field_corrections(
     } else if has_received("replacement") && has_expected("replace") {
         corrections.push("replacement -> replace".to_string());
     }
-    if tool_name == "checklist_update" && has_received("todos") {
+    if matches!(tool_name, "checklist_update" | "todo_update") && has_received("todos") {
         corrections.push(
-            "Use checklist_write to replace the full list, or retry checklist_update with id and status."
+            "Use work_update to replace the full list, or retry checklist_update/todo_update with id and status."
                 .to_string(),
         );
     }

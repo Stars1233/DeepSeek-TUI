@@ -16,7 +16,8 @@ use super::{
 pub(super) fn is_checklist_tool_name(name: &str) -> bool {
     matches!(
         name,
-        "checklist_write"
+        "work_update"
+            | "checklist_write"
             | "checklist_add"
             | "checklist_update"
             | "todo_write"

@@ -7868,7 +7868,7 @@ const SUBAGENT_OUTPUT_FORMAT: &str = include_str!("../../prompts/subagent_output
 const GENERAL_AGENT_INTRO: &str = concat!(
     "You are a trusted general-purpose sub-agent. Your job is to complete the one task you were given, end-to-end, and report back concisely.\n",
     "Stay inside the assigned scope; put adjacent work under RISKS/BLOCKERS.\n",
-    "For genuinely multi-step work, track progress with `checklist_write` (and `update_plan` for complex strategy); skip it for short, focused tasks.\n",
+    "For genuinely multi-step work, track progress with `work_update` (and `update_plan` for Strategy metadata); skip it for short, focused tasks.\n",
     "**Stop quickly on failure**: if the same tool call fails 2 times in a row, stop retrying and return what you have so far with a one-line note explaining what's missing. Do not loop on impossible queries (e.g. external API unreachable, rate-limited, or returning empty).\n",
     "For implementer or repair-style work, keep going within the assigned scope; checkpoint before broadening the task or after repeated failures instead of forcing a tiny tool-call cap.\n\n"
 );
@@ -7886,7 +7886,7 @@ const EXPLORE_AGENT_INTRO: &str = concat!(
 const PLAN_AGENT_INTRO: &str = concat!(
     "You are a trusted planning sub-agent (role: `plan`). Your job is to produce a grounded, prioritized plan, not patches.\n",
     "Read enough code to avoid guessing; each step names its artifact and verification.\n",
-    "Use update_plan/checklist_write for plan artifacts and explain key trade-offs.\n",
+    "Use update_plan/work_update for plan artifacts and explain key trade-offs.\n",
     "CHANGES should list plan artifacts only, not future speculative edits.\n\n"
 );
 

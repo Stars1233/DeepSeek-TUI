@@ -11801,7 +11801,7 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
 #[test]
 fn checklist_write_renders_dedicated_card() {
     let cell = GenericToolCell {
-        name: "checklist_write".to_string(),
+        name: "work_update".to_string(),
         status: ToolStatus::Success,
         input_summary: None,
         output: Some(

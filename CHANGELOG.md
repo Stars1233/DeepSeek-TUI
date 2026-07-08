@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OFFERING_SEEDS` hand table so the bundled Models.dev catalog is the sole
   seed source; pickers show a compact `stale` / `cache failed` chrome chip when
   the Models.dev layer is past TTL or last refresh failed.
-
+- Make `work_update` the sole model-facing To-do / Work progress tool (#4132).
+  `checklist_*` and `todo_*` remain registered as hidden compat aliases for
+  transcript replay; `update_plan` stays Strategy metadata/context/route, not
+  a second checklist. Mode/approval prompts nudge the single surface.
 - Demote the bundled Models.dev snapshot to an offline/stale fallback after
   live catalog refresh (#4188). ProviderLake precedence is live Models.dev >
   bundled seed > legacy hardcoded completion names; pickers, inventory, and

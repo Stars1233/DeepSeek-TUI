@@ -2859,8 +2859,12 @@ mod tests {
             ("plan", PLAN_MODE),
             ("yolo", YOLO_MODE),
         ] {
-            let word_count = prompt.split_whitespace().count();
-            let estimated_tokens = crate::compaction::estimate_text_tokens_conservative(prompt);
+            // Measure semantic size on LF so Windows autocrlf checkouts do not
+            // inflate char/3 token estimates via extra `\r` bytes.
+            let normalized = prompt.replace("\r\n", "\n").replace('\r', "\n");
+            let word_count = normalized.split_whitespace().count();
+            let estimated_tokens =
+                crate::compaction::estimate_text_tokens_conservative(&normalized);
             let max_words = if name == "agent" { 800 } else { 350 };
             let max_tokens = if name == "agent" { 1600 } else { 700 };
 
@@ -2881,7 +2885,7 @@ mod tests {
                 "## Runtime Policy Reference",
             ] {
                 assert!(
-                    !prompt.contains(forbidden),
+                    !normalized.contains(forbidden),
                     "{name} mode prompt duplicated shared base section {forbidden:?}"
                 );
             }

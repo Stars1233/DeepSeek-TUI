@@ -1675,6 +1675,8 @@ mod tests {
         assert_eq!(get_tool_category("read_file"), ToolCategory::Safe);
         assert_eq!(get_tool_category("list_dir"), ToolCategory::Safe);
         assert_eq!(get_tool_category("todo_write"), ToolCategory::Safe);
+        assert_eq!(get_tool_category("work_update"), ToolCategory::Safe);
+        assert_eq!(get_tool_category("checklist_write"), ToolCategory::Safe);
         assert_eq!(get_tool_category("todo_read"), ToolCategory::Safe);
         assert_eq!(get_tool_category("note"), ToolCategory::Safe);
         assert_eq!(get_tool_category("update_plan"), ToolCategory::Safe);
