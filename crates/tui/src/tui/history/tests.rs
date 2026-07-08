@@ -2747,3 +2747,125 @@ fn tool_run_summary_uses_metadata_fallback_for_unknown_groups() {
 
     assert_eq!(super::tool_run_summary(&run), "Updated metadata");
 }
+
+// ---- #4112 / dogfood A5: transcript noise ----
+
+fn agent_cell(
+    action_summary: Option<&str>,
+    status: ToolStatus,
+    output: Option<&str>,
+) -> GenericToolCell {
+    GenericToolCell {
+        name: "agent".to_string(),
+        status,
+        input_summary: action_summary.map(str::to_string),
+        output: output.map(str::to_string),
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    }
+}
+
+fn joined_lines(cell: &GenericToolCell, mode: super::RenderMode) -> String {
+    cell.lines_with_mode(120, true, mode)
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+        .collect()
+}
+
+#[test]
+fn unknown_tool_failure_collapses_to_one_line() {
+    let cell = GenericToolCell {
+        name: "item".to_string(),
+        status: ToolStatus::Failed,
+        input_summary: Some("status: pending".to_string()),
+        output: Some(
+            "Tool 'item' is not available in the current tool catalog. \
+             Checklist entries are not separate tool calls."
+                .to_string(),
+        ),
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    };
+    for mode in [super::RenderMode::Live, super::RenderMode::Transcript] {
+        let lines = cell.lines_with_mode(120, true, mode);
+        assert_eq!(
+            lines.len(),
+            1,
+            "unknown-tool failure should be a single header line in {mode:?}: {lines:?}"
+        );
+        let joined = joined_lines(&cell, mode);
+        assert!(
+            joined.contains("Tool 'item' is not available"),
+            "the catalog error is the useful part: {joined:?}"
+        );
+        assert!(
+            !joined.contains("name: item"),
+            "no name:/args:/result: block for unknown tools: {joined:?}"
+        );
+    }
+}
+
+#[test]
+fn agent_peek_renders_checked_not_done() {
+    let cell = agent_cell(
+        Some("action: peek agent_id: agent_scout_1"),
+        ToolStatus::Success,
+        Some(r#"{"agent_id":"agent_scout_1","status":"running"}"#),
+    );
+    let joined = joined_lines(&cell, super::RenderMode::Live);
+    assert!(
+        joined.contains("checked") && joined.contains("agent_scout_1"),
+        "peek should read as a check, not a completed delegate: {joined:?}"
+    );
+    assert!(
+        !joined.contains("delegate done"),
+        "peek must not draw the spawn-completion line: {joined:?}"
+    );
+}
+
+#[test]
+fn agent_wait_renders_waited_label() {
+    let cell = agent_cell(
+        Some("action: wait"),
+        ToolStatus::Success,
+        Some(r#"{"action":"wait","settled":[{"agent_id":"agent_scout_1"}]}"#),
+    );
+    let joined = joined_lines(&cell, super::RenderMode::Live);
+    assert!(
+        joined.contains("waited"),
+        "wait cells should read as a join: {joined:?}"
+    );
+}
+
+#[test]
+fn agent_inspection_stays_compact_in_transcript_mode() {
+    let cell = agent_cell(
+        Some("action: status agent_id: agent_scout_1"),
+        ToolStatus::Success,
+        Some(r#"{"agent_id":"agent_scout_1","status":"running","terminal":false}"#),
+    );
+    let lines = cell.lines_with_mode(120, true, super::RenderMode::Transcript);
+    assert_eq!(
+        lines.len(),
+        1,
+        "status checks should not dump full projections in the pager: {lines:?}"
+    );
+}
+
+#[test]
+fn agent_spawn_keeps_full_block_in_transcript_mode() {
+    let cell = agent_cell(
+        Some("prompt: map the repo"),
+        ToolStatus::Success,
+        Some(r#"{"agent_id":"agent_scout_1","status":"running"}"#),
+    );
+    let lines = cell.lines_with_mode(120, true, super::RenderMode::Transcript);
+    assert!(
+        lines.len() > 1,
+        "spawns keep the full block for session replay: {lines:?}"
+    );
+}

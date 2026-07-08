@@ -658,6 +658,21 @@ pub(super) fn tool_catalog_consistency_issues(
 }
 
 pub(super) fn missing_tool_error_message(tool_name: &str, catalog: &[Tool]) -> String {
+    // Dogfood A5 (#4092): models mid-checklist sometimes emit each list entry
+    // as its own tool call named `item`/`todo`/... . Fuzzy suggestions are
+    // actively misleading there ("Did you mean: note, tts?"); name the actual
+    // fix instead.
+    if matches!(
+        tool_name,
+        "item" | "items" | "todo" | "todos" | "checklist" | "checklist_item" | "plan_item"
+    ) {
+        return format!(
+            "Tool '{tool_name}' is not available in the current tool catalog. \
+             Checklist entries are not separate tool calls — write the whole list \
+             in one `checklist_write` call with an `items` array of \
+             {{content, status}} objects."
+        );
+    }
     let suggestions = suggest_tool_names(catalog, tool_name, 3);
     let shell_hint = if is_shell_tool_name(tool_name) {
         Some(shell_tool_allow_shell_hint())

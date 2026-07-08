@@ -17,14 +17,53 @@ pub(super) fn render_agent_compact(cell: &GenericToolCell, low_motion: bool) -> 
         .and_then(extract_agent_id)
         .map(str::to_string)
         .unwrap_or_else(|| delegate_identity_fallback(cell));
+    // Inspections and joins must not draw the same "delegate done" line as a
+    // spawn — during a fan-out session every peek/status/wait would otherwise
+    // read as yet another completed delegate (#4112, dogfood A5). The action
+    // is stamped at the front of the args summary by tool_routing.
+    let state_label = match agent_inspection_action(cell) {
+        Some(AgentCompactAction::Check) => match cell.status {
+            super::ToolStatus::Running => "checking",
+            _ => "checked",
+        },
+        Some(AgentCompactAction::Wait) => match cell.status {
+            super::ToolStatus::Running => "waiting",
+            _ => "waited",
+        },
+        None => tool_status_label(cell.status),
+    };
     vec![render_tool_header_with_family_and_summary(
         family,
         Some(agent_id.as_str()),
-        tool_status_label(cell.status),
+        state_label,
         cell.status,
         None,
         low_motion,
     )]
+}
+
+enum AgentCompactAction {
+    /// Read-only inspection: peek / status / progress / list / inspect.
+    Check,
+    /// Blocking join: wait / join / await / block.
+    Wait,
+}
+
+/// Whether this `agent` cell is a read-only inspection or join rather than a
+/// spawn — those stay compact even in Transcript mode.
+pub(super) fn is_agent_inspection(cell: &GenericToolCell) -> bool {
+    agent_inspection_action(cell).is_some()
+}
+
+fn agent_inspection_action(cell: &GenericToolCell) -> Option<AgentCompactAction> {
+    let summary = cell.input_summary.as_deref()?;
+    let action = summary.strip_prefix("action:")?.trim_start();
+    let action = action.split_whitespace().next().unwrap_or("");
+    match action.trim_end_matches(',') {
+        "peek" | "progress" | "status" | "list" | "inspect" => Some(AgentCompactAction::Check),
+        "wait" | "join" | "await" | "block" => Some(AgentCompactAction::Wait),
+        _ => None,
+    }
 }
 
 pub(super) fn render_activity_group(cell: &GenericToolCell, width: u16) -> Vec<Line<'static>> {

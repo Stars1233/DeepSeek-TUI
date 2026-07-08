@@ -1324,9 +1324,34 @@ impl GenericToolCell {
         // 3-4 lines per spawn — N parallel spawns multiply the noise. In
         // live mode, render one compact summary line and let the
         // DelegateCard be the source of truth. Transcript mode keeps the
-        // full block so session replay remains complete.
-        if matches!(mode, RenderMode::Live) && self.name == "agent" {
+        // full block for spawns so session replay remains complete, but
+        // inspection calls (peek/status/wait) stay compact there too — a
+        // full projection dump per check is exactly the dogfood-A5 noise
+        // and carries no replay value (#4112).
+        if self.name == "agent"
+            && (matches!(mode, RenderMode::Live) || agent_activity::is_agent_inspection(self))
+        {
             return agent_activity::render_agent_compact(self, low_motion);
+        }
+
+        // A call to a tool that doesn't exist carries exactly one useful
+        // fact: the catalog error. The full name:/args:/result: block turns
+        // each model slip into a four-line card (dogfood A5) — collapse it
+        // to a single header line in both render modes.
+        if self.status == ToolStatus::Failed
+            && let Some(output) = self.output.as_deref()
+            && output.contains("is not available in the current tool catalog")
+        {
+            let family = crate::tui::widgets::tool_card::tool_family_for_name(&self.name);
+            let summary = truncate_text(output.trim(), 200);
+            return wrap_card_rail(vec![render_tool_header_with_family_and_summary(
+                family,
+                Some(summary.as_str()),
+                tool_status_label(self.status),
+                self.status,
+                None,
+                low_motion,
+            )]);
         }
 
         // Live mode stays calm: successful tool calls collapse to one header

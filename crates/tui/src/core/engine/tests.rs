@@ -6190,6 +6190,23 @@ fn missing_tool_error_message_includes_discovery_guidance_when_no_match() {
 }
 
 #[test]
+fn missing_tool_error_message_redirects_checklist_item_miscalls() {
+    let catalog = vec![api_tool("note"), api_tool("tts")];
+
+    for tool_name in ["item", "items", "todo", "checklist_item"] {
+        let message = missing_tool_error_message(tool_name, &catalog);
+        assert!(
+            message.contains("checklist_write"),
+            "{tool_name}: {message}"
+        );
+        assert!(
+            !message.contains("Did you mean"),
+            "fuzzy suggestions are misleading for checklist mis-calls: {message}"
+        );
+    }
+}
+
+#[test]
 fn missing_shell_tool_error_message_names_allow_shell_gate() {
     let catalog = vec![api_tool("read_file")];
 

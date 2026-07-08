@@ -250,7 +250,30 @@ pub(super) fn handle_tool_call_started(
         return;
     }
 
-    let input_summary = summarize_tool_args(input);
+    let mut input_summary = summarize_tool_args(input);
+    // Lead the `agent` args summary with the non-default action so renderers
+    // can tell inspections (peek/status/wait) apart from spawns without a
+    // schema change — a peek must not draw the same "delegate done" line as
+    // a launch (#4112, dogfood A5).
+    if name == "agent"
+        && let Some(action) = input.get("action").and_then(serde_json::Value::as_str)
+    {
+        let action = action.trim().to_ascii_lowercase();
+        let already_leads = input_summary
+            .as_deref()
+            .is_some_and(|summary| summary.starts_with("action:"));
+        if !action.is_empty()
+            && !already_leads
+            && action != "start"
+            && action != "spawn"
+            && action != "run"
+        {
+            input_summary = Some(match input_summary {
+                Some(rest) => format!("action: {action} {rest}"),
+                None => format!("action: {action}"),
+            });
+        }
+    }
     push_active_tool_cell(
         app,
         &id,
