@@ -1,4 +1,4 @@
-//! Sidebar rendering — Pinned / Tasks / Agents / Context panels.
+//! Sidebar rendering — Pinned / Activity / Agents / Context panels.
 //!
 //! Extracted from `tui/ui.rs` (P1.2). The sidebar appears to the right of
 //! the chat transcript when the available width allows it. Each section
@@ -1249,7 +1249,11 @@ fn render_sidebar_tasks(f: &mut Frame, area: Rect, app: &mut App) {
     let (lines, row_actions) = task_panel_rows(app, content_width.max(1), usable_rows.max(1));
 
     let full_texts = task_panel_hover_texts(app, usable_rows.max(1));
-    render_sidebar_section(f, area, "Tasks", lines, full_texts, row_actions, app);
+    // #4147: This panel renders live tools / background jobs, not durable task
+    // state, so the user-facing label is "Activity" to match its contents and
+    // avoid colliding with durable tasks. The internal identifiers keep the
+    // "task_panel"/`SidebarFocus::Tasks` names (guard #4172).
+    render_sidebar_section(f, area, "Activity", lines, full_texts, row_actions, app);
 }
 
 #[derive(Debug, Clone)]
