@@ -195,8 +195,10 @@ pub fn footer_worked_chip(elapsed: std::time::Duration, locale: Locale) -> Vec<S
     if elapsed < std::time::Duration::from_secs(60) {
         return Vec::new();
     }
-    let label = tr(locale, MessageId::FooterWorkedChip)
-        .replace("{duration}", &crate::tui::notifications::humanize_duration(elapsed));
+    let label = tr(locale, MessageId::FooterWorkedChip).replace(
+        "{duration}",
+        &crate::tui::notifications::humanize_duration(elapsed),
+    );
     vec![Span::styled(
         label,
         Style::default().fg(palette::TEXT_MUTED),
@@ -864,7 +866,8 @@ mod tests {
         assert_eq!(text, "worked 3h 12m");
 
         // Multi-day session — exercises the d/h band.
-        let chip = super::footer_worked_chip(Duration::from_secs(2 * 86_400 + 5 * 3600), Locale::En);
+        let chip =
+            super::footer_worked_chip(Duration::from_secs(2 * 86_400 + 5 * 3600), Locale::En);
         let text: String = chip.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "worked 2d 5h");
     }

@@ -154,12 +154,11 @@ fn infer_server_name(command: &str, args: &[String]) -> Result<String> {
     if matches!(
         cmd_base.as_ref(),
         "node" | "python" | "python3" | "uvx" | "uv" | "ruby" | "deno"
-    ) {
-        if let Some(script) = args.iter().find(|a| !a.starts_with('-')) {
-            let script_path = std::path::Path::new(script);
-            if let Some(stem) = script_path.file_stem() {
-                return Ok(sanitize_name(&stem.to_string_lossy()));
-            }
+    ) && let Some(script) = args.iter().find(|a| !a.starts_with('-'))
+    {
+        let script_path = std::path::Path::new(script);
+        if let Some(stem) = script_path.file_stem() {
+            return Ok(sanitize_name(&stem.to_string_lossy()));
         }
     }
 

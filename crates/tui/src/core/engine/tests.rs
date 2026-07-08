@@ -1612,7 +1612,7 @@ fn default_defer_lookup_matches_linear_scan_over_active_native_tools() {
         REQUEST_USER_INPUT_NAME,
         "definitely_not_a_tool",
     ] {
-        let linear_hit = active.iter().any(|core| *core == name);
+        let linear_hit = active.contains(&name);
         assert!(!linear_hit, "non-member {name} should be absent from array");
         assert!(
             should_default_defer_tool(name, &always_load),

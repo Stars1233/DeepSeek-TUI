@@ -583,8 +583,7 @@ fn build_impact_summary_zh_hans(
             impacts
         }
         ToolCategory::FileWrite => {
-            let mut impacts =
-                vec![tr(locale, MessageId::ApprovalImpactFileWrite).to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactFileWrite).to_string()];
             if let Some(path) = param_preview(params, &["path", "target", "destination"], 72) {
                 impacts.push(format!("写入：{path}"));
             }
@@ -610,8 +609,7 @@ fn build_impact_summary_zh_hans(
             impacts
         }
         ToolCategory::McpAction => {
-            let mut impacts =
-                vec![tr(locale, MessageId::ApprovalImpactMcpAction).to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactMcpAction).to_string()];
             if let Some(target) = mcp_target_hint(tool_name) {
                 impacts.push(format!("MCP 目标：{target}"));
             }
@@ -625,8 +623,7 @@ fn build_impact_summary_zh_hans(
             impacts
         }
         ToolCategory::Unknown => {
-            let mut impacts =
-                vec![tr(locale, MessageId::ApprovalImpactUnknown).to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactUnknown).to_string()];
             if let Some(target) = param_preview(
                 params,
                 &["path", "cmd", "command", "url", "q", "query", "ref_id"],

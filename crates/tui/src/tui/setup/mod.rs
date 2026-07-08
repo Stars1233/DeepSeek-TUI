@@ -643,9 +643,7 @@ impl SetupConstitutionFileState {
             Self::Loaded if choice == ConstitutionChoice::GuidedCustom => {
                 MessageId::SetupConstitutionFileLoadedSelected
             }
-            Self::Loaded if choice.is_explicit() => {
-                MessageId::SetupConstitutionFileLoadedInactive
-            }
+            Self::Loaded if choice.is_explicit() => MessageId::SetupConstitutionFileLoadedInactive,
             Self::Loaded => MessageId::SetupConstitutionFileLoadedUnselected,
             Self::Empty => MessageId::SetupConstitutionFileEmpty,
             Self::Invalid => MessageId::SetupConstitutionFileInvalid,
@@ -805,12 +803,12 @@ impl GuidedConstitutionDraft {
         let notes = tr(locale, MessageId::SetupGuidedNotes);
         notes
             .replace("{purpose}", &self.purpose.label(locale))
-            .replace("{initiative}", &autonomy_label(self.autonomy, locale))
+            .replace("{initiative}", autonomy_label(self.autonomy, locale))
             .replace("{evidence}", &self.evidence.label(locale))
-            .replace("{communication}", &self.communication.label(locale))
-            .replace("{privacy}", &self.privacy.label(locale))
-            .replace("{principles}", &self.principles.label(locale))
-            .replace("{notes}", &self.principles.note(locale))
+            .replace("{communication}", self.communication.label(locale))
+            .replace("{privacy}", self.privacy.label(locale))
+            .replace("{principles}", self.principles.label(locale))
+            .replace("{notes}", self.principles.note(locale))
             .to_string()
     }
 }
@@ -4324,7 +4322,10 @@ mod tests {
 
         assert!(content.contains("--provider openrouter"), "{content}");
         assert!(!content.contains("--provider deepseek"), "{content}");
-        assert!(content.contains("does not generate deploy bundles"), "{content}");
+        assert!(
+            content.contains("does not generate deploy bundles"),
+            "{content}"
+        );
         assert!(
             content.contains("`--apply` remains unimplemented"),
             "{content}"

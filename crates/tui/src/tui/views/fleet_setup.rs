@@ -25,8 +25,8 @@ use ratatui::{
 };
 
 use crate::config::Config;
-use crate::palette;
 use crate::localization::{MessageId, tr};
+use crate::palette;
 use crate::tui::app::App;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
