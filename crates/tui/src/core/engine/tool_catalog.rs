@@ -18,6 +18,7 @@ use crate::tools::spec::{ToolError, ToolResult, optional_str, optional_u64, requ
 use crate::tui::app::AppMode;
 
 use crate::dependencies::ExternalTool;
+use crate::regex_cache::compile_user_regex;
 
 pub(super) const MULTI_TOOL_PARALLEL_NAME: &str = "multi_tool_use.parallel";
 pub(super) const REQUEST_USER_INPUT_NAME: &str = "request_user_input";
@@ -424,7 +425,7 @@ fn unavailable_core_action_tools_with_regex(
     if max_results == 0 {
         return Ok(Vec::new());
     }
-    let regex = regex::Regex::new(query)
+    let regex = compile_user_regex(query)
         .map_err(|err| ToolError::invalid_input(format!("Invalid regex query: {err}")))?;
     Ok(cached_fallbacks()
         .iter()
@@ -485,7 +486,7 @@ fn discover_tools_with_regex(
     query: &str,
     max_results: usize,
 ) -> Result<Vec<String>, ToolError> {
-    let regex = regex::Regex::new(query)
+    let regex = compile_user_regex(query)
         .map_err(|err| ToolError::invalid_input(format!("Invalid regex query: {err}")))?;
 
     let mut matches = Vec::new();

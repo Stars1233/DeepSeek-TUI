@@ -21,6 +21,7 @@ name = "codewhale-tui"
 path = "src/main.rs"
 
 [dependencies]
+ahash = "0.8"
 anyhow.workspace = true
 codewhale-config = { path = "../config", version = "0.8.67" }
 codewhale-execpolicy = { path = "../execpolicy", version = "0.8.67" }

@@ -961,6 +961,7 @@ dependencies = [
 name = "codewhale-tui"
 version = "0.8.67"
 dependencies = [
+ "ahash",
  "anyhow",
  "arboard",
  "async-stream",
