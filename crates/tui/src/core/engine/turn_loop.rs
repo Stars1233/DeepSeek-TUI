@@ -3171,6 +3171,10 @@ fn should_emit_thinking_only_status(
     tool_uses_empty && turn_error_is_none && !cancelled && !steers_pending && !holding_for_subagents
 }
 
+/// Sentinel reasoning-effort value meaning "let the auto-reasoning system
+/// decide" (#4158).
+const REASONING_EFFORT_AUTO: &str = "auto";
+
 /// Resolve an `"auto"` reasoning-effort tier to a concrete value.
 ///
 /// When the configured effort is `"auto"`, inspects the last user message
@@ -3182,7 +3186,7 @@ fn resolve_auto_effort(
     provider: crate::config::ApiProvider,
 ) -> Option<String> {
     match reasoning_effort {
-        Some("auto") => {
+        Some(effort) if effort == REASONING_EFFORT_AUTO => {
             // Find the last user message in the conversation.
             let last_msg = messages
                 .iter()
