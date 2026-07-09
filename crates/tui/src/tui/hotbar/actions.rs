@@ -571,21 +571,21 @@ impl HotbarActionSource for BuiltinHotbarActionSource {
             "mode.plan",
             "plan",
             "Plan mode",
-            "Switch the conversation into Plan mode.",
+            "Think through a plan before acting.",
             AppHotbarKind::Mode(AppMode::Plan),
         ));
         registry.register(AppHotbarAction::new(
             "mode.agent",
             "agent",
             "Act mode",
-            "Switch the conversation into Act (Agent) mode.",
+            "Do direct work in the current session.",
             AppHotbarKind::Mode(AppMode::Agent),
         ));
         registry.register(AppHotbarAction::new(
             "mode.operate",
             "operate",
             "Operate mode",
-            "Coordinate workflows, spawn workers, wait, and dispatch more work.",
+            "Manage Fleet workers, subagents, and workflow lanes.",
             AppHotbarKind::Mode(AppMode::Operate),
         ));
         registry.register(AppHotbarAction::new(
@@ -908,7 +908,8 @@ impl AppHotbarAction {
             AppHotbarKind::Mode(AppMode::Plan) => MessageId::HotbarActionModePlanName,
             AppHotbarKind::Mode(AppMode::Agent) => MessageId::HotbarActionModeAgentName,
             AppHotbarKind::Mode(AppMode::Yolo) => MessageId::HotbarActionModeYoloName,
-            AppHotbarKind::Mode(AppMode::Auto | AppMode::Operate) => {
+            AppHotbarKind::Mode(AppMode::Operate) => MessageId::HotbarActionModeOperateName,
+            AppHotbarKind::Mode(AppMode::Auto) => {
                 return None;
             }
             AppHotbarKind::ReasoningCycle => MessageId::HotbarActionReasoningCycleName,
@@ -926,7 +927,8 @@ impl AppHotbarAction {
             AppHotbarKind::Mode(AppMode::Plan) => MessageId::HotbarActionModePlanDescription,
             AppHotbarKind::Mode(AppMode::Agent) => MessageId::HotbarActionModeAgentDescription,
             AppHotbarKind::Mode(AppMode::Yolo) => MessageId::HotbarActionModeYoloDescription,
-            AppHotbarKind::Mode(AppMode::Auto | AppMode::Operate) => {
+            AppHotbarKind::Mode(AppMode::Operate) => MessageId::HotbarActionModeOperateDescription,
+            AppHotbarKind::Mode(AppMode::Auto) => {
                 return None;
             }
             AppHotbarKind::ReasoningCycle => MessageId::HotbarActionReasoningCycleDescription,
@@ -1055,15 +1057,17 @@ impl HotbarAction for AppHotbarAction {
                 Ok(HotbarDispatch::Handled)
             }
             AppHotbarKind::PaletteOpen => {
-                app.view_stack
-                    .push(CommandPaletteView::new(build_command_palette_entries(
+                app.view_stack.push(CommandPaletteView::new_for_locale(
+                    app.ui_locale,
+                    build_command_palette_entries(
                         app.ui_locale,
                         &app.skills_dir,
                         app.skills_scan_codewhale_only,
                         &app.workspace,
                         &app.mcp_config_path,
                         app.mcp_snapshot.as_ref(),
-                    )));
+                    ),
+                ));
                 Ok(HotbarDispatch::Handled)
             }
             AppHotbarKind::TrustToggle => {

@@ -188,7 +188,7 @@ impl ModalView for FleetRosterView {
 
         let block = Block::default()
             .title(Line::from(Span::styled(
-                " Fleet roster — your agent team ",
+                " Fleet — workers and orchestration ",
                 Style::default()
                     .fg(palette::WHALE_ACCENT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -218,7 +218,7 @@ impl ModalView for FleetRosterView {
             .split(content);
         let header = vec![
             Line::from(Span::styled(
-                "The saved party",
+                "Worker readiness and status (Operate posture)",
                 Style::default().fg(palette::WHALE_INFO).bold(),
             )),
             Line::from(Span::styled(
@@ -756,8 +756,11 @@ mod tests {
                 );
                 // Some action label is always visible.
                 assert!(text.contains("close"), "{label} {w}x{h}: missing footer");
-                // The first impression communicates the roster metaphor.
-                assert!(text.contains("roster"), "{label} {w}x{h}: missing framing");
+                // The first impression names Fleet as the worker/orchestration surface.
+                assert!(
+                    text.contains("Fleet") && text.contains("workers"),
+                    "{label} {w}x{h}: missing framing"
+                );
                 // The selected row's detail is on screen.
                 assert!(
                     text.contains("Posture"),

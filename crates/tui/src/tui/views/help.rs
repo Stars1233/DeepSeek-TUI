@@ -385,7 +385,11 @@ impl ModalView for HelpView {
         render_modal_surface(area, popup_area, buf);
 
         let block = modal_block().title(Line::from(vec![Span::styled(
-            format!(" {} ", self.tr(MessageId::HelpTitle)),
+            format!(
+                " {} — {} ",
+                self.tr(MessageId::HelpTitle),
+                self.tr(MessageId::HelpSubtitle)
+            ),
             Style::default()
                 .fg(palette::WHALE_ACCENT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
@@ -529,24 +533,24 @@ mod tests {
     #[test]
     fn substring_filter_narrows_to_command() {
         let mut view = HelpView::new();
-        type_filter(&mut view, "mode yolo");
+        type_filter(&mut view, "mode [act");
         assert!(!view.filtered.is_empty());
         // Every filtered entry should genuinely contain the query in its
         // searchable haystack — no false positives slipped past.
         for idx in &view.filtered {
             assert!(
-                view.entries[*idx].haystack.contains("yolo"),
-                "entry {:?} leaked through `mode yolo` filter",
+                view.entries[*idx].haystack.contains("mode [act"),
+                "entry {:?} leaked through `mode [act` filter",
                 view.entries[*idx]
             );
         }
         // The unified `/mode` command must surface when filtering for a
-        // concrete mode value.
+        // concrete mode value from the visible vocabulary.
         assert!(
             view.filtered
                 .iter()
                 .any(|idx| view.entries[*idx].label == "/mode"),
-            "/mode should match the `mode yolo` filter"
+            "/mode should match the `mode [act` filter"
         );
     }
 
@@ -592,7 +596,9 @@ mod tests {
     #[test]
     fn backspace_widens_match_set() {
         let mut view = HelpView::new();
-        type_filter(&mut view, "yolox");
+        // Near-miss against the still-visible mode vocabulary so the last
+        // character removes a unique miss and broadens the match set.
+        type_filter(&mut view, "modez");
         let narrow = view.filtered.len();
         view.handle_key(key(KeyCode::Backspace));
         let wider = view.filtered.len();
@@ -605,7 +611,7 @@ mod tests {
     #[test]
     fn ctrl_h_widens_match_set() {
         let mut view = HelpView::new();
-        type_filter(&mut view, "yolox");
+        type_filter(&mut view, "modez");
         let narrow = view.filtered.len();
         view.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
         let wider = view.filtered.len();
@@ -771,14 +777,14 @@ mod tests {
     #[test]
     fn render_with_filter_shows_only_matching_section_and_status() {
         let mut view = HelpView::new();
-        type_filter(&mut view, "mode yolo");
+        type_filter(&mut view, "mode [act");
         let area = Rect::new(0, 0, 96, 24);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
 
         let dump = buffer_text(&buf, area);
         assert!(
-            dump.contains("Filter: mode yolo"),
+            dump.contains("Filter: mode [act"),
             "filter echo missing:\n{dump}"
         );
         assert!(
@@ -791,7 +797,7 @@ mod tests {
         );
         assert!(
             !dump.contains("/model"),
-            "non-matching commands should not render under a `mode yolo` filter:\n{dump}"
+            "non-matching commands should not render under a `mode [act` filter:\n{dump}"
         );
     }
 

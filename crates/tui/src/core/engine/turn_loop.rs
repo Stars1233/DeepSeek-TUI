@@ -1610,7 +1610,7 @@ impl Engine {
                     )
                 {
                     blocked_error = Some(ToolError::permission_denied(format!(
-                        "'{tool_name}' is not available in Plan mode — switch to Agent or YOLO mode to run commands and code."
+                        "'{tool_name}' is not available in Plan mode — switch to Act mode (`/mode act`) to run commands and code."
                     )));
                 }
 
@@ -1769,7 +1769,7 @@ impl Engine {
                     && plan_mode_blocks_write_capable_tool(&tool_name, read_only)
                 {
                     blocked_error = Some(ToolError::permission_denied(format!(
-                        "'{tool_name}' is not available in Plan mode - switch to Agent or YOLO mode to modify files or run write-capable tools."
+                        "'{tool_name}' is not available in Plan mode - switch to Act mode (`/mode act`) to modify files or run write-capable tools."
                     )));
                 }
 

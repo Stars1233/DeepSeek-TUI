@@ -31,7 +31,7 @@ impl RegisterCommand for FleetCmd {
                 super::core::subagents(app)
             }
             Some("help" | "?") => CommandResult::message(
-                "Usage: /fleet [roster|setup|status]\n\n/fleet (or /fleet roster) opens the roster — the saved party of agent profiles, with each member's posture, routing, and origin. /fleet setup opens the authoring wizard for a new or overriding profile. /fleet status shows live Fleet worker status; /subagents is a compatibility shortcut for the same status view.",
+                "Usage: /fleet [roster|setup|status]\n\n/fleet (or /fleet roster) opens Fleet workers and orchestration state — each member's posture, routing, and origin. Use Operate mode when managing delegated work. /fleet setup opens the authoring wizard for a new or overriding profile. /fleet status shows live Fleet worker status; /subagents is a compatibility shortcut for the same status view.",
             ),
             Some(other) => CommandResult::error(format!(
                 "Unknown /fleet target '{other}'. Use `/fleet roster`, `/fleet setup`, or `/fleet status`."

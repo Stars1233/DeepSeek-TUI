@@ -67,7 +67,7 @@ static STATUSLINE_INFO: CommandInfo = CommandInfo {
 static MODE_INFO: CommandInfo = CommandInfo {
     name: "mode",
     aliases: &["jihua", "zidong"],
-    usage: "/mode [agent|plan|yolo|1|2|4]",
+    usage: "/mode [act|plan|operate|1|2|3]",
     description_id: MessageId::CmdModeDescription,
 };
 static THEME_INFO: CommandInfo = CommandInfo {

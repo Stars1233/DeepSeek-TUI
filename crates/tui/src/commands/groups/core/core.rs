@@ -612,14 +612,13 @@ pub fn home_dashboard(app: &mut App) -> CommandResult {
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeAgentModeYoloTip));
         }
         AppMode::Yolo => {
+            // Compatibility residual: YOLO is invisible Act + Full Access.
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeYoloModeTip));
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeYoloModeCaution));
         }
         AppMode::Operate => {
-            let _ = writeln!(
-                stats,
-                "  Operate: coordinate workflows, spawn workers, wait on results, dispatch more work"
-            );
+            let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeOperateModeTip));
+            let _ = writeln!(stats, "{}", tr(locale, MessageId::HomeOperateModeFleetTip));
         }
         AppMode::Plan => {
             let _ = writeln!(stats, "{}", tr(locale, MessageId::HomePlanModeTip));
@@ -754,7 +753,7 @@ mod tests {
         let result = help(&mut app, Some("config"));
         let msg = result.message.expect("help topic should return message");
         assert!(msg.contains("config"));
-        assert!(msg.contains("Open interactive configuration editor"));
+        assert!(msg.contains("Inspect and change settings"));
         assert!(msg.contains("Usage: /config"));
     }
 
@@ -1411,7 +1410,7 @@ mod tests {
             .message
             .expect("home dashboard should return message");
         assert!(msg.contains("/links      - Dashboard & API links"));
-        assert!(msg.contains("/config      - Open interactive configuration editor"));
+        assert!(msg.contains("/config      - Inspect and change settings"));
         assert!(
             !msg.lines()
                 .any(|line| line.trim_start().starts_with("/set "))

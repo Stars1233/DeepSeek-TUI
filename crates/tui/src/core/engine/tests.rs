@@ -1376,12 +1376,12 @@ fn tool_error_messages_include_actionable_hints() {
     // #3020: Plan-mode denials already explain the fix — pass through
     // verbatim, with no conflicting "Adjust approval mode" suffix.
     let plan_denied = ToolError::permission_denied(
-        "'exec_shell' is not available in Plan mode — switch to Agent or YOLO mode to run commands and code.",
+        "'exec_shell' is not available in Plan mode — switch to Act mode (`/mode act`) to run commands and code.",
     );
     let formatted = format_tool_error(&plan_denied, "exec_shell");
     assert_eq!(
         formatted,
-        "'exec_shell' is not available in Plan mode — switch to Agent or YOLO mode to run commands and code."
+        "'exec_shell' is not available in Plan mode — switch to Act mode (`/mode act`) to run commands and code."
     );
 
     // Bare denials still get the actionable suffix.
@@ -6251,7 +6251,7 @@ fn missing_shell_tool_error_message_names_allow_shell_gate() {
             "{tool_name}: {message}"
         );
         assert!(message.contains("--save"), "{tool_name}: {message}");
-        assert!(message.contains("Agent mode"), "{tool_name}: {message}");
+        assert!(message.contains("Act mode"), "{tool_name}: {message}");
         assert!(
             message.contains("approval gating"),
             "{tool_name}: {message}"
@@ -6274,7 +6274,7 @@ fn missing_shell_tool_error_message_keeps_allow_shell_hint_with_suggestions() {
     assert!(message.contains("allow_shell"));
     assert!(message.contains("/config allow_shell true"));
     assert!(message.contains("--save"));
-    assert!(message.contains("Agent mode"));
+    assert!(message.contains("Act mode"));
     assert!(!message.contains("YOLO"));
     assert!(!message.contains("auto-approve"));
     assert!(message.contains(TOOL_SEARCH_NAME));

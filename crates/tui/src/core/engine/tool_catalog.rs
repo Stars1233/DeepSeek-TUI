@@ -711,7 +711,7 @@ pub(super) fn missing_tool_error_message(tool_name: &str, catalog: &[Tool]) -> S
 fn shell_tool_allow_shell_hint() -> &'static str {
     "Shell tools are absent because this session or profile disabled shell access, \
      commonly via top-level `allow_shell = false` or Plan mode. \
-     Interactive Agent mode exposes shell by default with approval gating unless disabled. \
+     Interactive Act mode exposes shell by default with approval gating unless disabled. \
      Run `/config allow_shell true` for this session or add `--save` for future sessions; \
      the next turn will expose shell again"
 }

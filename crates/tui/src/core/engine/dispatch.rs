@@ -185,7 +185,7 @@ pub(super) fn format_tool_error(err: &ToolError, tool_name: &str) -> String {
             // #3020: Pass through self-explanatory messages that already name the
             // cause (mode switch, allow_shell, feature flag).  Avoids appending a
             // conflicting "Check mode, feature flags" suffix on top of
-            // "switch to Agent or YOLO mode" which already gives the recovery path.
+            // "switch to Act mode" which already gives the recovery path.
             if lower.contains("current tool catalog")
                 || lower.contains("did you mean:")
                 || mentions_mode_word(&lower)

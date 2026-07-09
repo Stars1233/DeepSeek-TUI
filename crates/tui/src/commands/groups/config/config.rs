@@ -1464,7 +1464,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 " (session only, add --save to persist)".to_string()
             };
             let mode_hint = if enabled {
-                " Agent mode will expose shell on the next turn with approval gating. Bypass permissions (Shift+Tab) also enables shell and auto-approves."
+                " Act mode will expose shell on the next turn with approval gating. Bypass permissions (Shift+Tab) also enables shell and auto-approves."
             } else {
                 " Shell tools will be hidden on the next turn. Re-enable with `/config allow_shell true`."
             };
@@ -2846,7 +2846,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
 
         assert!(msg.contains("allow_shell = true"));
         assert!(msg.contains("session only"));
-        assert!(msg.contains("Agent mode"));
+        assert!(msg.contains("Act mode"));
         assert!(msg.contains("approval gating"));
         assert!(msg.contains("next turn"));
         assert!(
@@ -2874,7 +2874,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         assert_eq!(
             msg,
             format!(
-                "allow_shell = true (saved to {}). Agent mode will expose shell on the next turn with approval gating. Bypass permissions (Shift+Tab) also enables shell and auto-approves.",
+                "allow_shell = true (saved to {}). Act mode will expose shell on the next turn with approval gating. Bypass permissions (Shift+Tab) also enables shell and auto-approves.",
                 config_path.display()
             )
         );

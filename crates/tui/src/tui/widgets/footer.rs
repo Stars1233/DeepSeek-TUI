@@ -5,6 +5,23 @@
 //! level, then `FooterWidget::new(props).render(area, buf)` paints the
 //! result. The widget owns no `App` knowledge; this mirrors the layout used
 //! by `HeaderWidget` (and Codex's `bottom_pane::footer::Footer`).
+//!
+//! # Compact glance facts (#4275)
+//!
+//! The footer is the default compact glance surface. Allowed facts and their
+//! drill-down owners:
+//!
+//! | Glance fact | Footer field | Drill-down owner |
+//! |-------------|--------------|------------------|
+//! | state | `state_label` (+ working strip) | transcript / live work strip |
+//! | work count | `agents` | Agents sidebar, `/fleet` |
+//! | mode | `mode_label` | `/mode` picker |
+//! | permission | `permission` | Shift+Tab cycle, `/config` |
+//! | cost/rate | `cost`, `balance`, `cache` | `/tokens`, context inspector |
+//! | anomalies | `retry`, MCP chip | retry banner, MCP manager |
+//!
+//! Dense proof (tool receipts, full workflow history, raw config keys) stays
+//! in inspect/audit surfaces — not duplicated as permanent footer chips.
 
 use ratatui::{
     buffer::Buffer,

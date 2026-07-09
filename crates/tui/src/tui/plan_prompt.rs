@@ -21,13 +21,13 @@ struct PlanOption {
 
 const PLAN_OPTIONS: [PlanOption; 4] = [
     PlanOption {
-        label: "Accept plan (Agent)",
-        description: "Start implementation in Agent mode with approvals",
+        label: "Accept plan (Act)",
+        description: "Start implementation in Act mode with approvals",
         shortcut: 'a',
     },
     PlanOption {
-        label: "Accept plan (YOLO)",
-        description: "Start implementation in YOLO mode (auto-approve)",
+        label: "Accept plan (Full Access)",
+        description: "Start implementation in Act with Full Access (bypass approvals)",
         shortcut: 'y',
     },
     PlanOption {
@@ -37,7 +37,7 @@ const PLAN_OPTIONS: [PlanOption; 4] = [
     },
     PlanOption {
         label: "Exit Plan mode",
-        description: "Return to Agent mode without implementation",
+        description: "Return to Act mode without implementation",
         shortcut: 'q',
     },
 ];
@@ -821,8 +821,10 @@ mod tests {
 
         let rendered = render_view(&view, 110, 36);
 
-        assert!(rendered.contains("> [2/y] Accept plan (YOLO)"));
-        assert!(rendered.contains("Start implementation in YOLO mode (auto-approve)"));
+        assert!(rendered.contains("> [2/y] Accept plan (Full Access)"));
+        assert!(
+            rendered.contains("Start implementation in Act with Full Access (bypass approvals)")
+        );
     }
 
     #[test]

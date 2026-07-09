@@ -1096,11 +1096,13 @@ impl AppMode {
     /// Description shown in help or onboarding text.
     pub fn description(self) -> &'static str {
         match self {
-            AppMode::Agent | AppMode::Auto => "Act mode - autonomous task execution with tools",
-            AppMode::Yolo => "Act mode with bypass permissions (legacy YOLO shorthand)",
-            AppMode::Plan => "Plan mode - design before implementing",
+            AppMode::Agent | AppMode::Auto => {
+                "Act mode - direct work in the current session with tools"
+            }
+            AppMode::Yolo => "Act mode with Full Access (legacy YOLO permission shorthand)",
+            AppMode::Plan => "Plan mode - research and design before implementing",
             AppMode::Operate => {
-                "Operate mode - coordinate workflows, spawn workers, wait, and dispatch more work"
+                "Operate mode - manage Fleet, subagents, and workflow lanes (spawn, wait, verify, hand off)"
             }
         }
     }

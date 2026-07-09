@@ -4268,15 +4268,17 @@ async fn run_event_loop(
                 if app.view_stack.is_empty() && app.kill_to_end_of_line() {
                     continue;
                 }
-                app.view_stack
-                    .push(CommandPaletteView::new(build_command_palette_entries(
+                app.view_stack.push(CommandPaletteView::new_for_locale(
+                    app.ui_locale,
+                    build_command_palette_entries(
                         app.ui_locale,
                         &app.skills_dir,
                         app.skills_scan_codewhale_only,
                         &app.workspace,
                         &app.mcp_config_path,
                         app.mcp_snapshot.as_ref(),
-                    )));
+                    ),
+                ));
                 continue;
             }
 
@@ -9330,10 +9332,10 @@ enum PlanChoice {
 fn plan_next_step_prompt() -> String {
     [
         "Action required: choose the next step for this plan.",
-        "  1) Accept + implement in Agent mode",
-        "  2) Accept + implement in YOLO mode",
+        "  1) Accept + implement in Act mode",
+        "  2) Accept + implement with Full Access (Act + bypass)",
         "  3) Revise the plan / ask follow-ups",
-        "  4) Return to Agent mode without implementing",
+        "  4) Return to Act mode without implementing",
         "",
         "Use the plan confirmation popup, or type 1-4 and press Enter.",
     ]
@@ -9372,14 +9374,13 @@ async fn apply_plan_choice(
         PlanChoice::AcceptAgent => {
             apply_mode_update(app, engine_handle, AppMode::Agent).await;
             app.add_message(HistoryCell::System {
-                content: "Plan accepted. Switching to Agent mode and starting implementation."
+                content: "Plan accepted. Switching to Act mode and starting implementation."
                     .to_string(),
             });
             let followup = QueuedMessage::new("Proceed with the accepted plan.".to_string(), None);
             if app.is_loading {
                 app.queue_message(followup);
-                app.status_message =
-                    Some("Queued accepted plan execution (agent mode).".to_string());
+                app.status_message = Some("Queued accepted plan execution (Act mode).".to_string());
             } else {
                 dispatch_user_message(app, config, engine_handle, followup).await?;
             }
@@ -9387,14 +9388,15 @@ async fn apply_plan_choice(
         PlanChoice::AcceptYolo => {
             apply_mode_update(app, engine_handle, AppMode::Yolo).await;
             app.add_message(HistoryCell::System {
-                content: "Plan accepted. Switching to YOLO mode and starting implementation."
-                    .to_string(),
+                content:
+                    "Plan accepted. Switching to Act + Full Access and starting implementation."
+                        .to_string(),
             });
             let followup = QueuedMessage::new("Proceed with the accepted plan.".to_string(), None);
             if app.is_loading {
                 app.queue_message(followup);
                 app.status_message =
-                    Some("Queued accepted plan execution (YOLO mode).".to_string());
+                    Some("Queued accepted plan execution (Act + Full Access).".to_string());
             } else {
                 dispatch_user_message(app, config, engine_handle, followup).await?;
             }
@@ -9409,7 +9411,7 @@ async fn apply_plan_choice(
             apply_mode_update(app, engine_handle, AppMode::Agent).await;
             app.add_message(HistoryCell::System {
                 content: concat!(
-                    "Exited Plan mode. Switched to Agent mode.\n\n",
+                    "Exited Plan mode. Switched to Act mode.\n\n",
                     "The plan above is for reference only. ",
                     "Do NOT execute it until the user explicitly asks you to. ",
                     "Wait for the user's next instruction before taking any action.",

@@ -1,4 +1,7 @@
 //! Command palette modal for quick command/skill insertion.
+//!
+//! Product job (#4276): **find and run one action** — not a dense manual.
+//! Help owns concepts; Config owns settings; Fleet owns worker readiness.
 
 use std::path::Path;
 
@@ -13,7 +16,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::commands;
-use crate::localization::Locale;
+use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::skills;
 use crate::tools::spec::ApprovalRequirement;
@@ -52,6 +55,7 @@ impl CommandPaletteEntry {
 }
 
 pub struct CommandPaletteView {
+    locale: Locale,
     entries: Vec<CommandPaletteEntry>,
     filtered: Vec<usize>,
     query: String,
@@ -682,8 +686,14 @@ fn visible_entry_window(
 }
 
 impl CommandPaletteView {
+    #[cfg(test)]
     pub fn new(entries: Vec<CommandPaletteEntry>) -> Self {
+        Self::new_for_locale(Locale::En, entries)
+    }
+
+    pub fn new_for_locale(locale: Locale, entries: Vec<CommandPaletteEntry>) -> Self {
         let mut view = Self {
+            locale,
             entries,
             filtered: Vec::new(),
             query: String::new(),
@@ -872,7 +882,17 @@ impl ModalView for CommandPaletteView {
 
         render_modal_surface(area, popup_area, buf);
 
-        let block = modal_block().title(" Command Palette ");
+        let title = format!(
+            " {} — {} ",
+            tr(self.locale, MessageId::CommandPaletteTitle),
+            tr(self.locale, MessageId::CommandPaletteSubtitle)
+        );
+        let block = modal_block().title(Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(palette::WHALE_INFO)
+                .add_modifier(Modifier::BOLD),
+        )));
         let inner = block.inner(popup_area);
         block.render(popup_area, buf);
 
@@ -881,14 +901,14 @@ impl ModalView for CommandPaletteView {
             buf,
             &[
                 ActionHint::new("↑/↓/j/k", "move"),
-                ActionHint::new("Enter", "run/open"),
+                ActionHint::new("Enter", "run"),
                 ActionHint::new("Esc", "close"),
             ],
         );
 
         let mut lines = Vec::new();
         let query_label = if self.query.is_empty() {
-            "Type to filter".to_string()
+            "Type to find and run one action".to_string()
         } else {
             format!("Filter: {}", self.query)
         };
@@ -1726,10 +1746,7 @@ mod tests {
 
             // Footer keeps every action.
             assert!(text.contains("move"), "{w}x{h}: missing 'move' hint");
-            assert!(
-                text.contains("run/open"),
-                "{w}x{h}: missing 'run/open' hint"
-            );
+            assert!(text.contains("run"), "{w}x{h}: missing 'run' hint");
             assert!(text.contains("close"), "{w}x{h}: missing 'close' hint");
 
             // Composited frame is fully opaque.

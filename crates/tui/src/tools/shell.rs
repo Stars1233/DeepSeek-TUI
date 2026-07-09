@@ -2345,7 +2345,7 @@ impl ToolSpec for ExecShellTool {
             }
             ShellPolicy::ReadOnly if !exec_shell_input_is_parallel_readonly(&input) => {
                 return Ok(ToolResult::error(
-                    "Shell command blocked by read-only shell policy. Use a non-mutating, non-background inspection command, or switch to Agent/YOLO for write-capable shell work.",
+                    "Shell command blocked by read-only shell policy. Use a non-mutating, non-background inspection command, or switch to Act mode (`/mode act`) for write-capable shell work.",
                 ));
             }
             ShellPolicy::ReadOnly | ShellPolicy::Full => {}
