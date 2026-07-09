@@ -8,6 +8,9 @@ const ASSET_MATRIX = {
     x64: ["codewhale-linux-x64", "codewhale-tui-linux-x64", "codew-linux-x64"],
     arm64: ["codewhale-linux-arm64", "codewhale-tui-linux-arm64", "codew-linux-arm64"],
   },
+  android: {
+    arm64: ["codewhale-android-arm64", "codewhale-tui-android-arm64", "codew-android-arm64"],
+  },
   darwin: {
     x64: ["codewhale-macos-x64", "codewhale-tui-macos-x64", "codew-macos-x64"],
     arm64: ["codewhale-macos-arm64", "codewhale-tui-macos-arm64", "codew-macos-arm64"],

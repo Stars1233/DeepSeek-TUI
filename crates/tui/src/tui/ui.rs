@@ -210,6 +210,10 @@ const VERSION_HINT_TOAST_TTL_MS: u64 = 12_000;
 
 const REQUIRED_RELEASE_ASSETS: &[&str] = &[
     "codewhale-artifacts-sha256.txt",
+    "codew-android-arm64",
+    "codewhale-android-arm64",
+    "codewhale-android-arm64.tar.gz",
+    "codewhale-tui-android-arm64",
     "codewhale-linux-arm64",
     "codewhale-linux-arm64.tar.gz",
     "codewhale-linux-x64",

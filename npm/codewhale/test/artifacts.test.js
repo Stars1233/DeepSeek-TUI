@@ -40,6 +40,16 @@ test("openharmony arm64 resolves to linux arm64 binaries", () => {
   });
 });
 
+test("android arm64 resolves to Termux-native Android assets", () => {
+  withMockedOs("android", "arm64", () => {
+    const { detectBinaryNames } = require(ARTIFACTS_PATH);
+    const result = detectBinaryNames();
+    assert.equal(result.codewhale, "codewhale-android-arm64");
+    assert.equal(result.tui, "codewhale-tui-android-arm64");
+    assert.equal(result.codew, "codew-android-arm64");
+  });
+});
+
 test("genuinely unsupported platform throws with raw platform name", () => {
   withMockedOs("freebsd", "x64", () => {
     const { detectBinaryNames } = require(ARTIFACTS_PATH);
@@ -89,7 +99,11 @@ test("allAssetNames includes every matrix entry", () => {
   assert.ok(assetNames.includes("codewhale-tui-windows-x64.exe"));
   assert.ok(assetNames.includes("codew-windows-x64.exe"));
   assert.ok(assetNames.includes("codewhale.bat"));
+  assert.ok(assetNames.includes("codewhale-android-arm64"));
+  assert.ok(assetNames.includes("codewhale-tui-android-arm64"));
+  assert.ok(assetNames.includes("codew-android-arm64"));
   assert.ok(!assetNames.includes("codewhale-linux-riscv64"));
   assert.ok(allReleaseAssetNames().includes("codew-windows-x64.exe"));
   assert.ok(allReleaseAssetNames().includes("codewhale.bat"));
+  assert.ok(allReleaseAssetNames().includes("codew-android-arm64"));
 });
