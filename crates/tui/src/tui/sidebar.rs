@@ -6873,4 +6873,173 @@ mod tests {
         let rows = super::sidebar_agent_rows(&app);
         assert_eq!(rows[0].name, "Agent 1");
     }
+
+    // --- Unicode / CJK / terminal-width QA (issue #3488) -------------------
+    // The sub-agent overlay renders CJK display names next to ASCII ids,
+    // numeric columns (step count, elapsed), status verbs, and branch lines.
+    // These guard that a CJK name never shifts the status columns, corrupts the
+    // panel border, or hides the running/completed state (#3488 dogfood case:
+    // a worker named 抹香鲸).
+
+    /// Build the exact dogfood fixture: a CJK-named running implementer with a
+    /// mixed English/CJK objective, a long branch, step count, and elapsed time.
+    fn cjk_running_implementer_row() -> SidebarAgentRow {
+        SidebarAgentRow {
+            id: "agent_e0b2dcf1".to_string(),
+            parent_run_id: None,
+            spawn_depth: 1,
+            name: "抹香鲸".to_string(),
+            role: "implementer".to_string(),
+            model: Some("glm-5.2".to_string()),
+            status: "running".to_string(),
+            objective: Some(
+                "QUESTION: Add Zhipu GLM as a first-class provider-scoped model (issue #3439)"
+                    .to_string(),
+            ),
+            git_branch: Some("codex/issue-3439-zhipu-glm-fixture".to_string()),
+            progress: Some("step 10: finished tool edit_file ok".to_string()),
+            steps_taken: 10,
+            duration_ms: Some(124_838),
+            expanded: true,
+        }
+    }
+
+    #[test]
+    fn subagent_panel_cjk_display_name_keeps_columns_and_state_at_narrow_and_medium_widths() {
+        let summary = single_worker_summary(1);
+        let rows = vec![cjk_running_implementer_row()];
+
+        // Across pathological single-cell widths up through a medium terminal,
+        // every rendered line (count header, role-mix, label, dossier, handle)
+        // must stay within the column budget by *display* width and never split
+        // a wide glyph into a replacement char — which is what would corrupt the
+        // panel border or visually drift the status columns.
+        for content_width in [1usize, 2, 3, 5, 8, 12, 16, 20, 24, 40, 80] {
+            let (lines, actions) = subagent_panel_rows(
+                &summary,
+                &rows,
+                Locale::En,
+                content_width,
+                8,
+                &palette::UI_THEME,
+            );
+            assert_eq!(lines.len(), actions.len(), "width {content_width}");
+            for line in &lines {
+                assert!(
+                    subagent_line_width(line) <= content_width,
+                    "width {content_width}: line overflows by display width ({} cells)",
+                    subagent_line_width(line)
+                );
+                let text = lines_to_text(std::slice::from_ref(line)).join("");
+                assert!(
+                    !text.contains('\u{FFFD}'),
+                    "width {content_width}: wide glyph split during truncation: {text:?}"
+                );
+            }
+        }
+
+        // At medium/usable widths the CJK name must not hide the running state:
+        // the status marker `[~]`, the compact stop target `[x]`, and the CJK
+        // display name all survive, and the row still resolves to its agent id.
+        for content_width in [40usize, 80] {
+            let (lines, actions) = subagent_panel_rows(
+                &summary,
+                &rows,
+                Locale::En,
+                content_width,
+                8,
+                &palette::UI_THEME,
+            );
+            let text = lines_to_text(&lines);
+
+            let label_idx = text
+                .iter()
+                .position(|line| line.contains("抹香鲸"))
+                .unwrap_or_else(|| {
+                    panic!("width {content_width}: CJK display name dropped: {text:?}")
+                });
+            assert!(
+                text[label_idx].contains("[~]"),
+                "width {content_width}: running marker hidden by CJK name: {text:?}"
+            );
+            assert!(
+                text[label_idx].ends_with("[x]"),
+                "width {content_width}: stop target hidden by CJK name: {text:?}"
+            );
+            assert!(
+                !text[label_idx].contains('\u{FFFD}'),
+                "width {content_width}: CJK name split: {text:?}"
+            );
+            assert!(
+                matches!(
+                    actions[label_idx],
+                    Some(SidebarRowAction::ToggleAgentDetails { ref agent_id })
+                        if agent_id == "agent_e0b2dcf1"
+                ),
+                "width {content_width}: CJK row must still resolve to its agent id"
+            );
+        }
+    }
+
+    #[test]
+    fn subagent_panel_mixed_ascii_cjk_objective_truncates_on_glyph_boundary() {
+        // A long objective mixing ASCII (provider name, issue number) with CJK
+        // and full-width punctuation. Truncation must land on a whole-glyph
+        // boundary by display width, preserving the leading status marker
+        // prefix and never emitting U+FFFD.
+        let summary = single_worker_summary(1);
+        let rows = vec![SidebarAgentRow {
+            id: "agent_cjk_obj".to_string(),
+            spawn_depth: 1,
+            name: "抹香鲸".to_string(),
+            role: "implementer".to_string(),
+            status: "running".to_string(),
+            objective: Some(
+                "将智谱 GLM 添加为 provider-scoped provider，覆盖 issue #3439 的全部断言"
+                    .to_string(),
+            ),
+            git_branch: Some("codex/issue-3439".to_string()),
+            steps_taken: 4,
+            duration_ms: Some(88_000),
+            expanded: true,
+            ..SidebarAgentRow::default()
+        }];
+
+        for content_width in [12usize, 20, 28, 40, 80] {
+            let (lines, _) = subagent_panel_rows(
+                &summary,
+                &rows,
+                Locale::En,
+                content_width,
+                8,
+                &palette::UI_THEME,
+            );
+            for line in &lines {
+                assert!(
+                    subagent_line_width(line) <= content_width,
+                    "width {content_width}: objective line overflowed ({} cells)",
+                    subagent_line_width(line)
+                );
+                let text = lines_to_text(std::slice::from_ref(line)).join("");
+                assert!(
+                    !text.contains('\u{FFFD}'),
+                    "width {content_width}: mixed objective split a wide glyph: {text:?}"
+                );
+            }
+        }
+
+        // The label keeps its semantic status-marker prefix across widths.
+        let (lines, _) =
+            subagent_panel_rows(&summary, &rows, Locale::En, 40, 8, &palette::UI_THEME);
+        let label_text = lines_to_text(&lines);
+        let label = label_text
+            .iter()
+            .find(|line| line.contains("抹香鲸"))
+            .expect("CJK name present at medium width");
+        assert!(
+            label.contains("[~]"),
+            "status marker prefix must survive truncation: {label:?}"
+        );
+        assert!(!label.contains('\u{FFFD}'));
+    }
 }

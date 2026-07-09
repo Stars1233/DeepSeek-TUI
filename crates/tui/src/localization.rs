@@ -2005,4 +2005,132 @@ mod tests {
         }
         out
     }
+
+    fn visible_row_text(buf: &Buffer, area: Rect, y: u16) -> String {
+        let mut out = String::new();
+        let mut skip_cells = 0usize;
+        for x in area.left()..area.right() {
+            if skip_cells > 0 {
+                skip_cells -= 1;
+                continue;
+            }
+            let symbol = buf[(x, y)].symbol();
+            out.push_str(symbol);
+            skip_cells = UnicodeWidthStr::width(symbol).saturating_sub(1);
+        }
+        out
+    }
+
+    // --- Unicode / CJK / terminal-width QA (issue #3488) -------------------
+    // `truncate_to_width` is the localization-layer truncation helper. These
+    // verify it clips by display width (never byte/char count), preserves
+    // semantic prefixes, never splits a grapheme cluster, and that mixed
+    // English/CJK rows wrap inside a narrow (40-col) and medium (80-col)
+    // terminal buffer without overflowing the column.
+
+    #[test]
+    fn truncate_to_width_clips_cjk_by_display_width_and_keeps_prefix_intact() {
+        // Each Han glyph is two columns. A 12-column budget fits the six-glyph
+        // title exactly, so no truncation/ellipsis happens and the prefix survives.
+        let title = "项目报告结果"; // 12 columns
+        assert_eq!(truncate_to_width(title, 12), title);
+
+        // Oversized: clip on a whole-glyph boundary, append the ellipsis, and
+        // stay within the budget by display width.
+        let out = truncate_to_width("数据库迁移任务结果", 7); // 10 glyphs = 20 cols
+        assert!(
+            UnicodeWidthStr::width(out.as_str()) <= 7,
+            "{out:?} overflowed"
+        );
+        assert!(out.ends_with('…'), "expected ellipsis, got {out:?}");
+        assert!(!out.contains('\u{FFFD}'), "split a wide glyph: {out:?}");
+        // The kept body is whole wide glyphs (each two columns) — never a half cell.
+        let body = out.strip_suffix('…').unwrap_or(&out);
+        assert!(
+            body.chars()
+                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum::<usize>()
+                <= 6,
+            "body exceeded budget-minus-ellipsis: {out:?}"
+        );
+
+        // A semantic ASCII prefix (e.g. a status verb) survives when it fits.
+        let row = "running 数据库迁移任务结果预览测试";
+        let out = truncate_to_width(row, 16);
+        assert!(
+            out.starts_with("running"),
+            "semantic prefix dropped: {out:?}"
+        );
+        assert!(UnicodeWidthStr::width(out.as_str()) <= 16);
+        assert!(!out.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn truncate_to_width_never_splits_combining_marks_or_emoji() {
+        // Combining mark (U+0301) and ZWJ are zero-width; they must not be
+        // counted as columns and must never be cut mid-cluster into U+FFFD.
+        let cafe = "cafe\u{0301}"; // "café", 4 columns
+        assert_eq!(truncate_to_width(cafe, 10), cafe);
+        let out = truncate_to_width("cafe\u{0301} overflow here", 6);
+        assert!(UnicodeWidthStr::width(out.as_str()) <= 6);
+        assert!(!out.contains('\u{FFFD}'));
+
+        // Emoji is two columns; truncation lands on a cluster boundary.
+        let out = truncate_to_width("\u{1F433}\u{1F433}\u{1F433} whales everywhere", 5);
+        assert!(UnicodeWidthStr::width(out.as_str()) <= 5);
+        assert!(!out.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn narrow_and_medium_terminal_wraps_mixed_width_rows_without_overflow() {
+        // Issue #3488 acceptance: at a 40-col (narrow, macOS-Terminal-like) and
+        // 80-col (medium) terminal, mixed English/CJK task titles and transcript
+        // lines must (a) truncate to the column by display width, and (b) wrap
+        // inside the buffer so no rendered row exceeds the terminal width.
+        let fixtures = [
+            "Task: 数据库迁移任务 — verify provider routing for issue #3488",
+            "抹香鲸 is running codex/issue-3439-zhipu-glm-fixture @ issue-3439",
+            "满員電車🫠 — full-width punctuation：『』【】 mixes with ASCII ids",
+        ];
+
+        for width in [40usize, 80] {
+            // (a) The truncation helper clips by display width.
+            for fixture in fixtures {
+                let out = truncate_to_width(fixture, width);
+                assert!(
+                    UnicodeWidthStr::width(out.as_str()) <= width,
+                    "width={width}: truncated row overflowed: {out:?}"
+                );
+                assert!(
+                    !out.contains('\u{FFFD}'),
+                    "width={width}: split a glyph: {out:?}"
+                );
+            }
+
+            // (b) Wrapping the full mixed-width line inside a buffer of `width`
+            // columns never lets a rendered row exceed the terminal width.
+            for fixture in fixtures {
+                let area = Rect::new(0, 0, width as u16, 6);
+                let mut buf = Buffer::empty(area);
+                Paragraph::new(fixture)
+                    .wrap(Wrap { trim: false })
+                    .render(area, &mut buf);
+                let mut saw_text = false;
+                for (row_idx, y) in (area.top()..area.bottom()).enumerate() {
+                    let row = visible_row_text(&buf, area, y);
+                    let trimmed = row.trim_end_matches('\u{0}').trim_end();
+                    assert!(
+                        UnicodeWidthStr::width(trimmed) <= width,
+                        "width={width} row {row_idx}: wrapped row overflowed ({} cols): {trimmed:?}",
+                        UnicodeWidthStr::width(trimmed)
+                    );
+                    saw_text |= trimmed.chars().any(|ch| !ch.is_whitespace());
+                }
+                assert!(
+                    saw_text,
+                    "width={width}: mixed fixture produced an empty render"
+                );
+            }
+        }
+    }
 }
