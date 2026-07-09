@@ -350,8 +350,11 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
     }
     match lower.as_str() {
         "gpt-5-codex" | "gpt-5.3-codex" => Some(128_000),
-        "claude-opus-4-8" => Some(128_000),
-        "claude-sonnet-4-6" | "claude-haiku-4-5" => Some(64_000),
+        // claude-sonnet-4-6 max output raised 64K -> 128K per
+        // https://platform.claude.com/docs/en/about-claude/models/overview
+        // (2026-07-09 audit).
+        "claude-opus-4-8" | "claude-sonnet-4-6" => Some(128_000),
+        "claude-haiku-4-5" => Some(64_000),
         "arcee-ai/trinity-large-thinking"
         | "trinity-large-thinking"
         | "moonshotai/kimi-k2.7-code"
@@ -776,6 +779,33 @@ mod tests {
         assert_eq!(context_window_for_model("gpt-5.5-nano"), None);
         assert_eq!(max_output_tokens_for_model("gpt-5.5-nano"), None);
         assert!(!model_supports_reasoning("gpt-5.5-nano"));
+    }
+
+    #[test]
+    fn anthropic_stepfun_and_sakana_limits_match_2026_07_09_audit() {
+        // Sonnet 4.6 output cap raised 64K -> 128K per
+        // https://platform.claude.com/docs/en/about-claude/models/overview;
+        // Haiku stays at 64K.
+        assert_eq!(
+            max_output_tokens_for_model("claude-sonnet-4-6"),
+            Some(128_000)
+        );
+        assert_eq!(
+            max_output_tokens_for_model("claude-haiku-4-5"),
+            Some(64_000)
+        );
+        // step-3.7-flash max output is third-party sourced (models.dev +
+        // Artificial Analysis; the official StepFun page is silent):
+        // https://models.dev/models/stepfun/step-3.7-flash/
+        assert_eq!(max_output_tokens_for_model("step-3.7-flash"), Some(256_000));
+        assert_eq!(context_window_for_model("step-3.7-flash"), Some(256_000));
+        // fugu-ultra limits are third-party sourced (Requesty; Sakana's own
+        // >272K price tier at https://console.sakana.ai/pricing confirms the
+        // context window exceeds 272K).
+        for model in ["fugu-ultra", "fugu-ultra-20260615"] {
+            assert_eq!(context_window_for_model(model), Some(1_000_000), "{model}");
+            assert_eq!(max_output_tokens_for_model(model), Some(131_000), "{model}");
+        }
     }
 
     #[test]

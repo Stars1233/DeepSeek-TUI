@@ -153,6 +153,25 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         "openai/gpt-5.6-terra" | "gpt-5.6-terra" => Some(usd_only_pricing(0.25, 2.50, 15.00)),
         "openai/gpt-5.6-luna" | "gpt-5.6-luna" => Some(usd_only_pricing(0.10, 1.00, 6.00)),
         "meta/muse-spark-1.1" | "muse-spark-1.1" => Some(usd_only_pricing(1.25, 1.25, 4.25)),
+        // Anthropic first-party rates including the published cache-read
+        // discounts (2026-07-09 audit,
+        // https://platform.claude.com/docs/en/about-claude/pricing). These sit
+        // above the catalog lookup because the bundled catalog cannot carry a
+        // cache-read rate yet. Cache-write rates (1.25x-2x input) exist
+        // upstream but `CurrencyPricing` has no cache-write field.
+        "claude-opus-4-8" => Some(usd_only_pricing(0.50, 5.00, 25.00)),
+        "claude-sonnet-4-6" => Some(usd_only_pricing(0.30, 3.00, 15.00)),
+        "claude-haiku-4-5" => Some(usd_only_pricing(0.10, 1.00, 5.00)),
+        // Z.ai GLM-5.2 cache-read rate per https://docs.z.ai/guides/overview/pricing
+        // (cache storage limited-time free).
+        "z-ai/glm-5.2" | "glm-5.2" => Some(usd_only_pricing(0.26, 1.40, 4.40)),
+        // Moonshot K2.7 Code cache-read rate per
+        // https://platform.kimi.ai/docs/pricing/chat-k27-code
+        "moonshotai/kimi-k2.7-code" | "kimi-k2.7-code" => Some(usd_only_pricing(0.19, 0.95, 4.00)),
+        // gpt-5-codex is deprecated upstream on the ChatGPT-OAuth path
+        // (successor: gpt-5.3-codex); API usage is still billed at these rates.
+        // https://developers.openai.com/api/docs/models/gpt-5.3-codex
+        "openai/gpt-5-codex" | "gpt-5-codex" => Some(usd_only_pricing(0.125, 1.25, 10.00)),
         _ => None,
     };
     if explicit.is_some() {
@@ -168,19 +187,27 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         ));
     }
     match model_lower {
-        "moonshotai/kimi-k2.6" | "kimi-k2.6" => Some(usd_only_pricing(0.34, 0.68, 3.41)),
-        "z-ai/glm-5.1" | "glm-5.1" => Some(usd_only_pricing(0.182, 0.98, 3.08)),
+        "moonshotai/kimi-k2.6" | "kimi-k2.6" => Some(usd_only_pricing(0.16, 0.95, 4.00)),
+        "z-ai/glm-5.1" | "glm-5.1" => Some(usd_only_pricing(0.26, 1.40, 4.40)),
+        // GLM-5 Turbo pricing per https://docs.z.ai/guides/overview/pricing
+        "z-ai/glm-5-turbo" | "glm-5-turbo" => Some(usd_only_pricing(0.24, 1.20, 4.00)),
         "minimax/minimax-m3" | "minimax-m3" => Some(usd_only_pricing(0.06, 0.30, 1.20)),
+        // Arcee publishes no cache rate for Trinity Large Thinking, so the
+        // cache-hit rate equals the input rate (no-discount representation).
+        // https://docs.arcee.ai/get-started/pricing
         "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" => {
-            Some(usd_only_pricing(0.06, 0.22, 0.85))
+            Some(usd_only_pricing(0.25, 0.25, 0.80))
         }
         "openai/gpt-5.5" | "gpt-5.5" => Some(usd_only_pricing(0.50, 5.00, 30.00)),
+        // GPT-5.5 Pro does not offer a cached input discount, so the cache-hit
+        // rate equals the input rate.
+        // https://developers.openai.com/api/docs/models/gpt-5.5-pro
         "openai/gpt-5.5-pro" | "gpt-5.5-pro" => Some(usd_only_pricing(30.00, 30.00, 180.00)),
 
         "qwen/qwen3.6-flash" => Some(usd_only_pricing(0.1875, 0.1875, 1.125)),
-        "qwen/qwen3.6-35b-a3b" => Some(usd_only_pricing(0.05, 0.15, 1.00)),
+        "qwen/qwen3.6-35b-a3b" => Some(usd_only_pricing(0.05, 0.14, 1.00)),
         "qwen/qwen3.6-max-preview" => Some(usd_only_pricing(1.04, 1.04, 6.24)),
-        "qwen/qwen3.6-27b" => Some(usd_only_pricing(0.2885, 0.2885, 3.17)),
+        "qwen/qwen3.6-27b" => Some(usd_only_pricing(0.15, 0.285, 2.40)),
         "qwen/qwen3.6-plus" => Some(usd_only_pricing(0.325, 0.325, 1.95)),
         "qwen/qwen3.7-max" => Some(usd_only_pricing(0.25, 1.25, 3.75)),
 
@@ -188,7 +215,7 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         "google/gemma-4-26b-a4b-it" => Some(usd_only_pricing(0.06, 0.06, 0.33)),
         "tencent/hy3-preview" => Some(usd_only_pricing(0.021, 0.063, 0.21)),
         "nvidia/nemotron-3-ultra-550b-a55b" | "nvidia/nemotron-3-ultra" => {
-            Some(usd_only_pricing(0.15, 0.50, 2.50))
+            Some(usd_only_pricing(0.10, 0.50, 2.20))
         }
         _ => None,
     }
@@ -388,17 +415,10 @@ mod tests {
     #[test]
     fn catalog_sourced_models_have_usd_pricing() {
         for (model, input, output) in [
-            ("glm-5.2", 1.4, 4.4),
-            ("z-ai/glm-5.2", 1.4, 4.4),
-            ("kimi-k2.7-code", 0.95, 4.0),
-            ("moonshotai/kimi-k2.7-code", 0.95, 4.0),
             ("minimax-m2.7", 0.3, 1.2),
             ("minimax/minimax-m2.7", 0.3, 1.2),
             ("trinity-mini", 0.045, 0.15),
             ("arcee-ai/trinity-mini", 0.045, 0.15),
-            ("claude-opus-4-8", 5.0, 25.0),
-            ("claude-sonnet-4-6", 3.0, 15.0),
-            ("claude-haiku-4-5", 1.0, 5.0),
             ("step-3.7-flash", 0.2, 1.15),
             ("fugu-ultra-20260615", 5.0, 30.0),
             ("fugu-ultra", 5.0, 30.0),
@@ -420,14 +440,30 @@ mod tests {
             ..Default::default()
         };
         for (model, hit, miss, output) in [
-            ("kimi-k2.6", 0.34, 0.68, 3.41),
-            ("z-ai/glm-5.1", 0.182, 0.98, 3.08),
+            ("kimi-k2.6", 0.16, 0.95, 4.00),
+            ("kimi-k2.7-code", 0.19, 0.95, 4.00),
+            ("moonshotai/kimi-k2.7-code", 0.19, 0.95, 4.00),
+            ("z-ai/glm-5.1", 0.26, 1.40, 4.40),
+            ("glm-5.2", 0.26, 1.40, 4.40),
+            ("z-ai/glm-5.2", 0.26, 1.40, 4.40),
+            ("glm-5-turbo", 0.24, 1.20, 4.00),
+            ("z-ai/glm-5-turbo", 0.24, 1.20, 4.00),
             ("qwen/qwen3.6-plus", 0.325, 0.325, 1.95),
-            ("trinity-large-thinking", 0.06, 0.22, 0.85),
+            ("qwen/qwen3.6-35b-a3b", 0.05, 0.14, 1.00),
+            ("qwen/qwen3.6-27b", 0.15, 0.285, 2.40),
+            // No published cache rate: cache-hit billed at the input rate.
+            ("trinity-large-thinking", 0.25, 0.25, 0.80),
+            ("nvidia/nemotron-3-ultra-550b-a55b", 0.10, 0.50, 2.20),
+            ("claude-opus-4-8", 0.50, 5.00, 25.00),
+            ("claude-sonnet-4-6", 0.30, 3.00, 15.00),
+            ("claude-haiku-4-5", 0.10, 1.00, 5.00),
             ("gpt-5.5", 0.50, 5.00, 30.00),
+            // GPT-5.5 Pro has no cached-input discount: cache-hit == input.
+            ("gpt-5.5-pro", 30.00, 30.00, 180.00),
             ("gpt-5.6-sol", 0.50, 5.00, 30.00),
             ("gpt-5.6-terra", 0.25, 2.50, 15.00),
             ("gpt-5.6-luna", 0.10, 1.00, 6.00),
+            ("gpt-5-codex", 0.125, 1.25, 10.00),
             ("muse-spark-1.1", 1.25, 1.25, 4.25),
         ] {
             let pricing = pricing_for_model_at(model, Utc::now()).expect(model);

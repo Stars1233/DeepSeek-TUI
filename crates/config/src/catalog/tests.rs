@@ -622,11 +622,13 @@ fn bundled_asset_pricing_is_honest() {
         }
     }
 
-    // A sampled priced row matches the in-repo USD table (crates/tui pricing).
+    // A sampled priced row matches the in-repo USD table (crates/tui pricing):
+    // GLM-5.1 at the 2026-07-09 Z.ai published rates.
     let glm51 = find(&rows, "zai", "glm-5.1");
     let cost = glm51.cost.as_ref().expect("glm-5.1 is priced");
-    assert_eq!(cost.input, Some(0.98));
-    assert_eq!(cost.output, Some(3.08));
+    assert_eq!(cost.input, Some(1.40));
+    assert_eq!(cost.output, Some(4.40));
+    assert_eq!(cost.cache_read, Some(0.26));
 }
 
 #[test]

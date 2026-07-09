@@ -571,7 +571,9 @@ fn cny_cache_savings_falls_back_to_usd_for_usd_only_models() {
     app.model = "kimi-k2.6".to_string();
     app.session.last_prompt_cache_hit_tokens = Some(1_000_000);
 
-    assert_eq!(app.last_turn_cache_savings(), Some(0.34));
+    // 1M cache-hit tokens save (input 0.95 - cache-read 0.16) = $0.79.
+    let savings = app.last_turn_cache_savings().expect("kimi-k2.6 is priced");
+    assert!((savings - 0.79).abs() < 1e-9, "got {savings}");
 }
 
 #[test]

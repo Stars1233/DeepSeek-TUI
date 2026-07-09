@@ -27,6 +27,8 @@
       "context_window": 400000,
       "max_output": 128000,
       "supports_reasoning": true,
+      "input_usd_per_million": 1.25,
+      "output_usd_per_million": 10.0,
       "modalities": ["text"],
       "supported_parameters": ["reasoning"],
       "provenance": "bundled"
@@ -206,7 +208,7 @@
     "claude-sonnet-4-6": {
       "id": "claude-sonnet-4-6",
       "context_window": 1000000,
-      "max_output": 64000,
+      "max_output": 128000,
       "supports_reasoning": true,
       "input_usd_per_million": 3.0,
       "output_usd_per_million": 15.0,
@@ -228,7 +230,7 @@
     "step-3.7-flash": {
       "id": "step-3.7-flash",
       "context_window": 256000,
-      "max_output": 32000,
+      "max_output": 256000,
       "supports_reasoning": false,
       "input_usd_per_million": 0.2,
       "output_usd_per_million": 1.15,
@@ -238,8 +240,8 @@
     },
     "fugu-ultra-20260615": {
       "id": "fugu-ultra-20260615",
-      "context_window": 200000,
-      "max_output": 64000,
+      "context_window": 1000000,
+      "max_output": 131000,
       "supports_reasoning": true,
       "input_usd_per_million": 5.0,
       "output_usd_per_million": 30.0,
@@ -249,8 +251,8 @@
     },
     "fugu-ultra": {
       "id": "fugu-ultra",
-      "context_window": 200000,
-      "max_output": 64000,
+      "context_window": 1000000,
+      "max_output": 131000,
       "supports_reasoning": true,
       "input_usd_per_million": 5.0,
       "output_usd_per_million": 30.0,
