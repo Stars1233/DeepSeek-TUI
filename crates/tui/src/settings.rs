@@ -817,13 +817,14 @@ impl Settings {
                 let normalized = match value.trim().to_ascii_lowercase().as_str() {
                     "auto" => "auto",
                     "pinned" | "visible" | "show" | "on" | "work" | "plan" | "todos" => "pinned",
-                    "tasks" => "tasks",
+                    // Persist as "tasks"; user-facing panel label is Activity (#4147/#4135).
+                    "tasks" | "activity" | "live" | "running" => "tasks",
                     "agents" | "subagents" | "sub-agents" => "agents",
                     "context" | "session" => "context",
                     "hidden" | "hide" | "closed" | "off" | "none" => "hidden",
                     _ => {
                         anyhow::bail!(
-                            "Failed to update setting: invalid sidebar focus '{value}'. Expected: pinned, auto, tasks, agents, context, hidden."
+                            "Failed to update setting: invalid sidebar focus '{value}'. Expected: pinned, auto, activity (tasks), agents, context, hidden."
                         )
                     }
                 };
@@ -1081,7 +1082,7 @@ impl Settings {
             ("sidebar_width", "Sidebar width percentage: 10-50"),
             (
                 "sidebar_focus",
-                "Sidebar focus: auto, work, tasks, agents, context, hidden",
+                "Sidebar focus: auto, work, activity (tasks), agents, context, hidden",
             ),
             (
                 "context_panel",
@@ -1493,7 +1494,7 @@ fn normalize_background_color_setting(value: &str) -> Result<Option<String>> {
 fn normalize_sidebar_focus(value: &str) -> &str {
     match value.trim().to_ascii_lowercase().as_str() {
         "pinned" | "visible" | "show" | "on" | "work" | "plan" | "todos" => "pinned",
-        "tasks" => "tasks",
+        "tasks" | "activity" | "live" | "running" => "tasks",
         "agents" | "subagents" | "sub-agents" => "agents",
         "context" | "session" => "context",
         "hidden" | "hide" | "closed" | "off" | "none" => "hidden",
@@ -1837,10 +1838,22 @@ mod tests {
         assert_eq!(settings.sidebar_focus, "pinned");
         assert!(!settings.sidebar_auto_collapse_opt_in);
 
+        // Activity is the user-facing panel name; config key remains "tasks" (#4135).
+        settings
+            .set("focus", "activity")
+            .expect("activity alias for Activity panel");
+        assert_eq!(settings.sidebar_focus, "tasks");
+        settings.set("focus", "live").expect("live alias");
+        assert_eq!(settings.sidebar_focus, "tasks");
+
         let err = settings
             .set("sidebar_focus", "classic")
             .expect_err("classic is not a supported public focus");
         assert!(err.to_string().contains("invalid sidebar focus"));
+        assert!(
+            err.to_string().contains("activity (tasks)"),
+            "error should teach the Activity alias: {err}"
+        );
     }
 
     #[test]

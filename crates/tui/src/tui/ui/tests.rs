@@ -10133,7 +10133,7 @@ fn turn_inspector_renders_overview_sections_for_active_turn() {
     // Section headers for all nine sections must be present.
     for header in [
         "── Intent ──",
-        "── Plan / checklist ──",
+        "── Strategy / To-do ──",
         "── Turn timeline ──",
         "── Files changed ──",
         "── Diagnostics loop ──",
@@ -10264,7 +10264,7 @@ fn turn_inspector_degrades_empty_sections_without_panic() {
     let body = turn_inspector_text(&app);
 
     // Unavailable sections degrade to `none`, never a blank void.
-    assert!(body.contains("── Plan / checklist ──\nnone"), "{body}");
+    assert!(body.contains("── Strategy / To-do ──\nnone"), "{body}");
     assert!(body.contains("── Files changed ──\nnone"), "{body}");
     assert!(body.contains("── Tests / verifier ──\nnone"), "{body}");
     assert!(body.contains("── Approvals / denials ──\nnone"), "{body}");
@@ -10425,7 +10425,7 @@ fn turn_handoff_markdown_degrades_empty_sections_without_panic() {
     assert!(md.contains("## Files changed\n—"), "{md}");
     assert!(md.contains("## Tests / verifier\n—"), "{md}");
     // The optional plan section is dropped entirely when no plan ran.
-    assert!(!md.contains("## Plan / checklist"), "{md}");
+    assert!(!md.contains("## Strategy / To-do"), "{md}");
     // Intent still resolves; status reflects the live turn.
     assert!(md.contains("## Intent\nhello"), "{md}");
     assert!(md.contains("Status: in progress"), "{md}");

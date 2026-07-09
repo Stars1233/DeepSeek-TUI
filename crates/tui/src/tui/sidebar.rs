@@ -809,8 +809,8 @@ fn work_panel_hover_texts(
         let remaining = earlier.saturating_add(later);
         if remaining > 0 && texts.len() < max_rows {
             let mut label = match (earlier, later) {
-                (0, later) => format!("+{later} more checklist items"),
-                (earlier, 0) => format!("+{earlier} earlier checklist items"),
+                (0, later) => format!("+{later} more To-do items"),
+                (earlier, 0) => format!("+{earlier} earlier To-do items"),
                 (earlier, later) => format!("+{earlier} earlier, +{later} later"),
             };
             // Hovering the overflow row reveals the omitted items, since
@@ -1054,8 +1054,8 @@ fn push_work_checklist_lines(
     let remaining = earlier.saturating_add(later);
     if remaining > 0 && lines.len() < max_rows {
         let label = match (earlier, later) {
-            (0, later) => format!("+{later} more checklist items"),
-            (earlier, 0) => format!("+{earlier} earlier checklist items"),
+            (0, later) => format!("+{later} more To-do items"),
+            (earlier, 0) => format!("+{earlier} earlier To-do items"),
             (earlier, later) => format!("+{earlier} earlier, +{later} later"),
         };
         lines.push(Line::from(Span::styled(
@@ -1171,10 +1171,12 @@ fn work_strategy_context_label(summary: &SidebarWorkSummary) -> &'static str {
 }
 
 fn strategy_context_step_prefix(status: &StepStatus) -> &'static str {
+    // Strategy = metadata/context/route (not a second checklist).
+    // Reserve "Phase" for Workflow stages only (#4135).
     match status {
-        StepStatus::Pending => "phase next:",
-        StepStatus::InProgress => "phase now:",
-        StepStatus::Completed => "phase done:",
+        StepStatus::Pending => "route next:",
+        StepStatus::InProgress => "route now:",
+        StepStatus::Completed => "route done:",
     }
 }
 
@@ -4031,20 +4033,20 @@ mod tests {
         );
         assert!(
             text.iter()
-                .any(|line| line.contains("phase done: Simplify sidebar")),
-            "completed strategy steps should render as phase context: {text:?}"
+                .any(|line| line.contains("route done: Simplify sidebar")),
+            "completed strategy steps should render as route context: {text:?}"
         );
         assert!(
             text.iter()
-                .any(|line| line.contains("phase next: Update prompts")),
-            "pending strategy steps should render as phase context: {text:?}"
+                .any(|line| line.contains("route next: Update prompts")),
+            "pending strategy steps should render as route context: {text:?}"
         );
         assert!(
             !text
                 .iter()
                 .any(|line| line.contains("[✓] Simplify sidebar"))
                 && !text.iter().any(|line| line.contains("[ ] Update prompts")),
-            "strategy rows must not look like a second checklist when Work checklist exists: {text:?}"
+            "strategy rows must not look like a second To-do when To-do items exist: {text:?}"
         );
     }
 
@@ -4082,14 +4084,14 @@ mod tests {
         assert!(
             hover
                 .iter()
-                .any(|line| line.contains("phase done: Map phase boundaries")),
-            "hover strategy rows should be phase context: {hover:?}"
+                .any(|line| line.contains("route done: Map phase boundaries")),
+            "hover strategy rows should be route context: {hover:?}"
         );
         assert!(
             hover
                 .iter()
-                .any(|line| line.contains("phase now: Implement counted work")),
-            "hover should expose the active strategy phase without checklist markers: {hover:?}"
+                .any(|line| line.contains("route now: Implement counted work")),
+            "hover should expose the active strategy route without To-do markers: {hover:?}"
         );
         assert!(
             !hover
@@ -4149,15 +4151,15 @@ mod tests {
             assert!(
                 rendered
                     .iter()
-                    .any(|line| line.contains("phase done: Completed context")),
+                    .any(|line| line.contains("route done: Completed context")),
                 "completed strategy context may still render: {rendered:?}"
             );
             assert!(
-                !rendered.iter().any(|line| line.contains("phase now:")),
+                !rendered.iter().any(|line| line.contains("route now:")),
                 "stale in-progress strategy must not render as active work: {rendered:?}"
             );
             assert!(
-                !rendered.iter().any(|line| line.contains("phase next:")),
+                !rendered.iter().any(|line| line.contains("route next:")),
                 "stale pending strategy must not render as upcoming work: {rendered:?}"
             );
         }
@@ -4428,6 +4430,86 @@ mod tests {
         assert!(
             text.first().is_some_and(|line| line.contains("(Paused)")),
             "paused state should be visible: {text:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_vocab_avoids_dual_meanings_in_work_and_activity_copy() {
+        // #4135 copy audit: To-do / Strategy / Phase / Activity stay distinct.
+        assert_eq!(
+            super::strategy_context_step_prefix(&StepStatus::Pending),
+            "route next:"
+        );
+        assert_eq!(
+            super::strategy_context_step_prefix(&StepStatus::InProgress),
+            "route now:"
+        );
+        assert_eq!(
+            super::strategy_context_step_prefix(&StepStatus::Completed),
+            "route done:"
+        );
+        for prefix in ["route next:", "route now:", "route done:"] {
+            assert!(
+                !prefix.contains("phase"),
+                "Strategy route prefixes must not reuse Workflow Phase vocabulary: {prefix}"
+            );
+        }
+
+        let summary = SidebarWorkSummary {
+            checklist_completion_pct: 10,
+            checklist_items: (1..=6)
+                .map(|id| SidebarWorkChecklistItem {
+                    id,
+                    content: format!("Item {id}"),
+                    status: if id == 1 {
+                        TodoStatus::InProgress
+                    } else {
+                        TodoStatus::Pending
+                    },
+                })
+                .collect(),
+            strategy_steps: vec![SidebarWorkStrategyStep {
+                text: "Approach".to_string(),
+                status: StepStatus::Pending,
+                elapsed: String::new(),
+            }],
+            ..SidebarWorkSummary::default()
+        };
+        let text = lines_to_text(&work_panel_lines(
+            &summary,
+            40,
+            4,
+            PaletteMode::Dark,
+            &palette::UI_THEME,
+        ));
+        let joined = text.join("\n");
+        assert!(
+            joined.contains("To-do items") || !joined.contains("checklist items"),
+            "To-do overflow must not say checklist: {text:?}"
+        );
+        assert!(
+            !joined.contains("phase next:")
+                && !joined.contains("phase now:")
+                && !joined.contains("phase done:"),
+            "Strategy context must not use Phase labels: {text:?}"
+        );
+        assert!(
+            joined.contains("route next:") || joined.contains("Strategy context"),
+            "Strategy context should use route prefixes under To-do: {text:?}"
+        );
+
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Tasks;
+        let activity = lines_to_text(&task_panel_lines(&app, 48, 4));
+        assert!(
+            activity
+                .iter()
+                .any(|line| line.contains("No live tools or background jobs")),
+            "Activity empty state should describe live activity: {activity:?}"
+        );
+        assert!(
+            !activity.iter().any(|line| line.contains("No active tasks")),
+            "Activity must not reuse durable Tasks wording: {activity:?}"
         );
     }
 

@@ -43,7 +43,7 @@ static CONFIG_INFO: CommandInfo = CommandInfo {
 static SIDEBAR_INFO: CommandInfo = CommandInfo {
     name: "sidebar",
     aliases: &[],
-    usage: "/sidebar [on|off|auto|work|tasks|agents|context] [--save]",
+    usage: "/sidebar [on|off|auto|work|activity|tasks|agents|context] [--save]",
     description_id: MessageId::CmdSidebarDescription,
 };
 static SETTINGS_INFO: CommandInfo = CommandInfo {

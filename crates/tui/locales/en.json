@@ -310,7 +310,7 @@
     "HomeYoloModeTip": "Act + Full Access — tools run without approval prompts",
     "HomeYoloModeCaution": "  Destructive operations can run immediately; prefer Ask when unsure",
     "HomePlanModeTip": "Plan — research and design before implementing",
-    "HomePlanModeChecklistTip": "  Present a plan/checklist, then switch to Act or Operate",
+    "HomePlanModeChecklistTip": "  Present a plan and To-do progress, then switch to Act or Operate",
     "HomeGoalModeTip": "Goal tracking - Set /goal <objective> to pursue objectives",
     "OnboardLanguageTitle": "Choose your language",
     "OnboardLanguageBlurb": "Pick the UI language. You can change it any time with `/settings set locale <tag>`.",

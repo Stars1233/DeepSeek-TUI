@@ -887,7 +887,7 @@ mod tests {
             critical_files: vec!["crates/tui/src/tools/plan.rs".to_string()],
             constraints: vec!["Preserve legacy update_plan payloads".to_string()],
             recommended_approach: Some(
-                "Keep checklist primary and enrich update_plan.".to_string(),
+                "Keep To-do primary and enrich update_plan Strategy metadata.".to_string(),
             ),
             verification_plan: Some("Run focused plan prompt tests.".to_string()),
             risks_and_unknowns: Some("Avoid dropping metadata-only plans.".to_string()),

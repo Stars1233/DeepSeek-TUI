@@ -439,18 +439,19 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
             "off" | "hide" | "hidden" | "closed" | "none" => SidebarFocus::Hidden,
             "auto" => SidebarFocus::Auto,
             "work" | "plan" | "todos" => SidebarFocus::Pinned,
-            "tasks" => SidebarFocus::Tasks,
+            // Panel label is Activity; "tasks" remains the config/compat key (#4147/#4135).
+            "tasks" | "activity" | "live" | "running" => SidebarFocus::Tasks,
             "agents" | "subagents" | "sub-agents" => SidebarFocus::Agents,
             "context" | "session" => SidebarFocus::Context,
             _ => {
                 return CommandResult::error(
-                    "Usage: /sidebar [on|off|pinned|auto|tasks|agents|context] [--save]",
+                    "Usage: /sidebar [on|off|pinned|auto|activity|tasks|agents|context] [--save]",
                 );
             }
         },
         _ => {
             return CommandResult::error(
-                "Usage: /sidebar [on|off|pinned|auto|tasks|agents|context] [--save]",
+                "Usage: /sidebar [on|off|pinned|auto|activity|tasks|agents|context] [--save]",
             );
         }
     };

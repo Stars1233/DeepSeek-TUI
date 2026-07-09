@@ -67,7 +67,7 @@ pub fn tool_family_for_title(title: &str) -> ToolFamily {
         "Patch" | "Diff" => ToolFamily::Patch,
         "Workspace" | "Image" => ToolFamily::Read,
         "Search" => ToolFamily::Find,
-        "Plan" | "Review" => ToolFamily::Generic,
+        "Plan" | "Strategy" | "Review" => ToolFamily::Generic,
         _ => ToolFamily::Generic,
     }
 }
@@ -346,6 +346,7 @@ mod tests {
         assert_eq!(tool_family_for_title("Search"), ToolFamily::Find);
         assert_eq!(tool_family_for_title("Diff"), ToolFamily::Patch);
         assert_eq!(tool_family_for_title("Plan"), ToolFamily::Generic);
+        assert_eq!(tool_family_for_title("Strategy"), ToolFamily::Generic);
         assert_eq!(tool_family_for_title("unknown title"), ToolFamily::Generic);
     }
 

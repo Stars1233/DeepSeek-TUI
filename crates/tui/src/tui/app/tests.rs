@@ -582,6 +582,9 @@ fn sidebar_focus_accepts_pinned_and_maps_legacy_trackers_to_pinned() {
     assert_eq!(SidebarFocus::from_setting("plan"), SidebarFocus::Pinned);
     assert_eq!(SidebarFocus::from_setting("todos"), SidebarFocus::Pinned);
     assert_eq!(SidebarFocus::from_setting("tasks"), SidebarFocus::Tasks);
+    assert_eq!(SidebarFocus::from_setting("activity"), SidebarFocus::Tasks);
+    assert_eq!(SidebarFocus::from_setting("live"), SidebarFocus::Tasks);
+    assert_eq!(SidebarFocus::from_setting("running"), SidebarFocus::Tasks);
     assert_eq!(SidebarFocus::from_setting("agents"), SidebarFocus::Agents);
     assert_eq!(SidebarFocus::from_setting("context"), SidebarFocus::Context);
     assert_eq!(SidebarFocus::from_setting("hidden"), SidebarFocus::Hidden);

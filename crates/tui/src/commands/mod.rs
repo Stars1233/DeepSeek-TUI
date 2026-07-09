@@ -488,9 +488,9 @@ mod tests {
                 critical_files: vec!["crates/tui/src/commands/mod.rs".to_string()],
                 constraints: vec!["Do not invent verification".to_string()],
                 verification_plan: Some("Check relay prompt assertions".to_string()),
-                handoff_packet: Some("Next thread should read the Work checklist".to_string()),
+                handoff_packet: Some("Next thread should read the To-do list".to_string()),
                 plan: vec![PlanItemArg {
-                    step: "keep checklist primary".to_string(),
+                    step: "keep To-do primary".to_string(),
                     status: StepStatus::InProgress,
                 }],
                 ..UpdatePlanArgs::default()
@@ -516,7 +516,7 @@ mod tests {
         assert!(message.contains("Requested relay focus: verify install"));
         assert!(message.contains("Goal objective: Unify the work surface"));
         assert!(message.contains("Goal token budget: 12000"));
-        assert!(message.contains("Work checklist (primary progress surface, 50% complete)"));
+        assert!(message.contains("To-do (primary progress surface, 50% complete)"));
         assert!(message.contains("#1 [completed] inspect workspace"));
         assert!(message.contains("#2 [in_progress] patch relay command"));
         assert!(message.contains("Optional strategy metadata from update_plan"));
@@ -526,8 +526,12 @@ mod tests {
         assert!(message.contains("Critical file: crates/tui/src/commands/mod.rs"));
         assert!(message.contains("Constraint: Do not invent verification"));
         assert!(message.contains("Verification plan: Check relay prompt assertions"));
-        assert!(message.contains("Handoff packet: Next thread should read the Work checklist"));
-        assert!(message.contains("[in_progress] keep checklist primary"));
+        assert!(message.contains("Handoff packet: Next thread should read the To-do list"));
+        assert!(message.contains("[in_progress] keep To-do primary"));
+        assert!(
+            !message.contains("Work checklist"),
+            "relay copy should use To-do vocabulary: {message}"
+        );
     }
 
     #[test]
@@ -975,6 +979,14 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(app.sidebar_focus, SidebarFocus::Tasks);
         assert!(app.status_message.is_none());
+
+        let result = execute("/sidebar activity", &mut app);
+        assert!(!result.is_error);
+        assert_eq!(
+            app.sidebar_focus,
+            SidebarFocus::Tasks,
+            "activity is the user-facing alias for the Activity panel"
+        );
 
         let result = execute("/sidebar off", &mut app);
         assert!(!result.is_error);

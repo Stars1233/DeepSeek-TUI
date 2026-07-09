@@ -463,7 +463,8 @@ impl SidebarFocus {
     pub fn from_setting(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "pinned" | "visible" | "show" | "on" | "work" | "plan" | "todos" => Self::Pinned,
-            "tasks" => Self::Tasks,
+            // Persist/compat key remains "tasks"; user-facing panel is Activity (#4147/#4135).
+            "tasks" | "activity" | "live" | "running" => Self::Tasks,
             "agents" | "subagents" | "sub-agents" => Self::Agents,
             "context" | "session" => Self::Context,
             "hidden" | "hide" | "closed" | "off" | "none" => Self::Hidden,

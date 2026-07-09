@@ -757,7 +757,7 @@ pub(crate) fn detail_target_label(app: &App, cell_index: usize) -> Option<String
             explore.entries.len(),
             if explore.entries.len() == 1 { "" } else { "s" }
         )),
-        HistoryCell::Tool(ToolCell::PlanUpdate(_)) => Some("update plan".to_string()),
+        HistoryCell::Tool(ToolCell::PlanUpdate(_)) => Some("update Strategy".to_string()),
         HistoryCell::Tool(ToolCell::PatchSummary(patch)) => Some(format!("patch {}", patch.path)),
         HistoryCell::Tool(ToolCell::Review(review)) => {
             let target = one_line_summary(&review.target, 80);
@@ -903,7 +903,7 @@ pub(super) fn turn_inspector_text(app: &App) -> String {
         push_section(&mut out, "Selected item", vec![line]);
     }
 
-    push_section(&mut out, "Plan / checklist", turn_plan_lines(app));
+    push_section(&mut out, "Strategy / To-do", turn_plan_lines(app));
     push_section(
         &mut out,
         "Turn timeline",
@@ -969,11 +969,11 @@ pub(crate) fn turn_handoff_markdown(app: &App) -> String {
 
     push_md_section(&mut out, "Intent", vec![turn_intent_line(app, start)]);
 
-    // Plan/checklist is optional context: include it only when a plan or todo
-    // list actually ran, to keep the handoff compact.
+    // Strategy / To-do is optional context: include it only when a plan or
+    // To-do tool actually ran, to keep the handoff compact.
     let plan = turn_plan_lines(app);
     if !plan.is_empty() {
-        push_md_section(&mut out, "Plan / checklist", md_bullets(plan));
+        push_md_section(&mut out, "Strategy / To-do", md_bullets(plan));
     }
 
     push_md_section(
@@ -1078,7 +1078,7 @@ fn selected_item_context_line(app: &App) -> Option<String> {
     Some(format!("{label}{hint}"))
 }
 
-/// Section 2 — plan and/or checklist state, when a plan/todo tool has run.
+/// Section 2 — Strategy metadata and/or To-do state when those tools ran.
 fn turn_plan_lines(app: &App) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -1093,13 +1093,16 @@ fn turn_plan_lines(app: &App) -> Vec<String> {
             .map(str::trim)
             .filter(|s: &&str| !s.is_empty());
         if let Some(headline) = headline {
-            lines.push(format!("Plan: {}", truncate_line_to_width(headline, 64)));
+            lines.push(format!(
+                "Strategy: {}",
+                truncate_line_to_width(headline, 64)
+            ));
         }
         let (pending, in_progress, completed) = plan.counts();
         let total = pending + in_progress + completed;
         if total > 0 {
             lines.push(format!(
-                "Steps: {completed}/{total} done ({}%)",
+                "Route steps: {completed}/{total} done ({}%)",
                 plan.progress_percent()
             ));
         }
@@ -1115,7 +1118,7 @@ fn turn_plan_lines(app: &App) -> Vec<String> {
     if let Ok(todos) = app.todos.try_lock() {
         let snapshot = todos.snapshot();
         if !snapshot.items.is_empty() {
-            lines.push(format!("Checklist: {}% complete", snapshot.completion_pct));
+            lines.push(format!("To-do: {}% complete", snapshot.completion_pct));
             for item in &snapshot.items {
                 lines.push(format!(
                     "{} {}",
@@ -1238,7 +1241,7 @@ fn timeline_tool_summary(app: &App, idx: usize, tool: &ToolCell) -> (&'static st
                 if explore.entries.len() == 1 { "" } else { "s" }
             ),
         ),
-        ToolCell::PlanUpdate(_) => ("plan update", "plan/checklist changed".to_string()),
+        ToolCell::PlanUpdate(_) => ("Strategy", "Strategy metadata updated".to_string()),
         ToolCell::PatchSummary(patch) => {
             let summary = one_line_summary(&patch.summary, 72);
             if summary.is_empty() {

@@ -1771,7 +1771,7 @@ fn plan_update_cell_renders_rich_artifact_metadata() {
             context_summary: Some("Grounded in issue #2691".to_string()),
             sources_used: vec!["gh issue view 2691".to_string()],
             critical_files: vec!["crates/tui/src/tools/plan.rs".to_string()],
-            constraints: vec!["Keep checklist primary".to_string()],
+            constraints: vec!["Keep To-do primary".to_string()],
             recommended_approach: Some(
                 "Enrich update_plan without breaking legacy calls".to_string(),
             ),

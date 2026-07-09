@@ -8092,7 +8092,7 @@ const EXPLORE_AGENT_INTRO: &str = concat!(
 const PLAN_AGENT_INTRO: &str = concat!(
     "You are a trusted planning sub-agent (role: `plan`). Your job is to produce a grounded, prioritized plan, not patches.\n",
     "Read enough code to avoid guessing; each step names its artifact and verification.\n",
-    "Use update_plan/work_update for plan artifacts and explain key trade-offs.\n",
+    "Use work_update for concrete To-do progress and update_plan only for Strategy metadata/context/route; explain key trade-offs.\n",
     "CHANGES should list plan artifacts only, not future speculative edits.\n\n"
 );
 
