@@ -39,6 +39,8 @@ You decide when to use Workflow — the operator need **not** say "workflow". Pr
 
 **Soft-auto launch:** name the maneuver in 1–3 sentences ("This looks set up for a Workflow — …"). Do not dump scripts or ask for `.workflow.js` files. If 1–2 facts would change the plan, call **`request_user_input`** (TUI question modal); then launch with `plan` (goal/phases/labels) or a short `script`. Pass **paths**, not file contents. Prefer `responseSchema`; filter `parallel()` null slots; verify findings; close with one compact summary. Bare `/workflow` means orchestrate current work without re-asking.
 
+**Automatic trigger / suppression:** trigger Workflow for independent scopes, staged multi-phase work, audit/sweep/compare/fan-out language, high context volume, and independent verification passes. Suppress it for one-file edits, simple commands or factual questions, highly interactive design, risky writes without clear decomposition, and cases where child overhead exceeds benefit, including estimated children above `auto_start_child_limit`.
+
 **Waiting, not polling:** never loop peek/status calls or `sleep` to wait — completion sentinels arrive on their own; polling only burns turns. While children run, do independent work or end your turn. To block for fan-in, make one `agent(action="wait")` call.
 
 Use `type: "explore"` for read-only scouting; it defaults to `model_strength: "faster"`. Use `model_strength: "same"` when the child needs parent-level capability. For broad investigations, open 2-4 `type: "explore"` sub-agents in parallel only when their outputs are independent; otherwise use `workflow` so one manager owns fan-in.
