@@ -1094,23 +1094,22 @@ fn shell_join(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
 
     fn tmux_env_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    #[cfg(unix)]
     struct ScopedEnvVar {
         name: &'static str,
         previous: Option<OsString>,
     }
 
-    #[cfg(unix)]
     impl ScopedEnvVar {
         fn set(name: &'static str, value: &std::ffi::OsStr) -> Self {
             let previous = std::env::var_os(name);
@@ -1120,6 +1119,7 @@ mod tests {
             Self { name, previous }
         }
 
+        #[cfg(unix)]
         fn remove(name: &'static str) -> Self {
             let previous = std::env::var_os(name);
             // SAFETY: tmux environment tests hold `tmux_env_lock` and restore
@@ -1129,7 +1129,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     impl Drop for ScopedEnvVar {
         fn drop(&mut self) {
             // SAFETY: paired with the serialized mutation above.
@@ -1146,10 +1145,7 @@ mod tests {
     #[test]
     fn tmux_dry_run_start_attach_stop_roundtrip() {
         let _env_guard = tmux_env_lock();
-        // SAFETY: test-only env toggle for tmux dry-run; single-threaded unit test.
-        unsafe {
-            std::env::set_var("CODEWHALE_LANE_TMUX_DRY_RUN", "1");
-        }
+        let _dry_run = ScopedEnvVar::set("CODEWHALE_LANE_TMUX_DRY_RUN", std::ffi::OsStr::new("1"));
         let dir = tempdir().unwrap();
         let reg = LaneRegistry::open(dir.path()).unwrap();
         let mut record = reg
@@ -1194,10 +1190,6 @@ mod tests {
         assert_eq!(record.status, LaneStatus::Stopped);
         let reloaded = reg.load(&record.id).unwrap();
         assert_eq!(reloaded.status, LaneStatus::Stopped);
-        // SAFETY: paired cleanup of the test-only dry-run flag.
-        unsafe {
-            std::env::remove_var("CODEWHALE_LANE_TMUX_DRY_RUN");
-        }
     }
 
     #[cfg(unix)]
@@ -1580,8 +1572,29 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tmux_reconcile_marks_vanished_session_failed_without_receipt() {
+        use std::os::unix::fs::PermissionsExt;
+
         let _env_guard = tmux_env_lock();
         let dir = tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir(&bin_dir).unwrap();
+        let tmux = bin_dir.join("tmux");
+        fs::write(
+            &tmux,
+            "#!/bin/sh\nprintf '%s\\n' 'no server running on /tmp/codewhale-test.sock' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&tmux).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tmux, permissions).unwrap();
+        let prior_path = std::env::var_os("PATH").unwrap_or_default();
+        let combined_path = std::env::join_paths(
+            std::iter::once(bin_dir).chain(std::env::split_paths(&prior_path)),
+        )
+        .unwrap();
+        let _path = ScopedEnvVar::set("PATH", &combined_path);
+        let _dry_run = ScopedEnvVar::remove("CODEWHALE_LANE_TMUX_DRY_RUN");
+
         let reg = LaneRegistry::open(dir.path()).unwrap();
         let mut record = reg
             .create_pending(
