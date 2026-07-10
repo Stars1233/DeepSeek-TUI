@@ -163,7 +163,7 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
     sources: ["#574", "#1303", "docs/CONFIGURATION.md"],
   },
   {
-    q: "What are Plan, Agent, and YOLO modes?",
+    q: "What are Plan, Act, and Operate modes?",
     a: (
       <>
         <ul className="list-disc pl-5 space-y-2 text-sm text-ink-soft">
@@ -203,7 +203,7 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
         <code className="inline">/goal</code> sets a goal for the current TUI session.
         App-server clients can also persist a thread-scoped goal through the
         <code className="inline">thread/goal/*</code> methods. It does not add another
-        app mode; the mode switcher remains Plan, Agent, and YOLO.
+        app mode; the mode switcher remains Plan, Act, and Operate, while approval posture is selected independently.
         Track progress in <a href="https://github.com/Hmbown/CodeWhale/issues/891" className="body-link">#891</a>.
       </>
     ),
@@ -507,7 +507,7 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
     sources: ["#574", "#1303", "docs/CONFIGURATION.md"],
   },
   {
-    q: "Plan、Agent、YOLO 三种模式有什么区别？",
+    q: "Plan、Act、Operate 三种模式有什么区别？",
     a: (
       <>
         <ul className="list-disc pl-5 space-y-2 text-sm text-ink-soft">
@@ -546,7 +546,7 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
       <>
         <code className="inline">/goal</code> 为当前 TUI 会话设置目标，支持 <code className="inline">pause</code>、<code className="inline">resume</code>、<code className="inline">complete</code>、<code className="inline">blocked</code> 和 <code className="inline">clear</code> 控制。
         App-server 客户端也可以通过 <code className="inline">thread/goal/*</code> 方法持久化线程范围的目标，支持 <code className="inline">set</code>、<code className="inline">get</code> 和 <code className="inline">clear</code>。
-        它不会新增一个应用模式；模式切换器仍然是 Plan、Agent 和 YOLO。
+        它不会新增一个应用模式；模式切换器仍然是 Plan、Act 和 Operate，审批姿态独立选择。
         跟踪进展：<a href="https://github.com/Hmbown/CodeWhale/issues/891" className="body-link">#891</a>。
       </>
     ),

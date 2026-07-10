@@ -69,9 +69,9 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
             : "As a project ages, instructions pile up and conflict: the original spec, a refactor that contradicts it, stale memory, a previous agent's handoff, your current request, fresh test output that doesn't match what the handoff claimed. A flat system prompt makes the model resolve that by guess. CodeWhale uses a nested constitution so there is a defined rank instead of vibes — the order is enforced in the harness, with tests asserting it can't drift, and it stays intact when you swap models."}
         </p>
 
-        {/* v0.8.67 flagship framing */}
+        {/* v0.8.68 flagship framing */}
         <div className="mt-7 max-w-2xl px-4 py-3 hairline-t hairline-b hairline-l hairline-r">
-          <span className="pill pill-new mr-2">{isZh ? "v0.8.67 新增" : "New in v0.8.67"}</span>
+          <span className="pill pill-new mr-2">{isZh ? "v0.8.68 新增" : "New in v0.8.68"}</span>
           <span className={`text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
             {isZh
               ? "宪法优先的初始设置——首次启动依次引导语言、模型、安全姿态和你的宪法；之后随时 /setup。模型可以起草，由你批准。"

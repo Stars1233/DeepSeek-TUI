@@ -9,7 +9,7 @@ description = "Lane registry and Runtime backends for CodeWhale workflow instanc
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-codewhale-config = { path = "../config", version = "0.8.67" }
+codewhale-config = { path = "../config", version = "0.8.68" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

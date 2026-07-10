@@ -19,16 +19,16 @@ path = "src/bin/codew_legacy_shim.rs"
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-codewhale-agent = { path = "../agent", version = "0.8.67" }
-codewhale-app-server = { path = "../app-server", version = "0.8.67" }
-codewhale-config = { path = "../config", version = "0.8.67" }
-codewhale-lane = { path = "../lane", version = "0.8.67" }
-codewhale-workflow = { path = "../workflow", version = "0.8.67" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.8.67" }
-codewhale-mcp = { path = "../mcp", version = "0.8.67" }
-codewhale-release = { path = "../release", version = "0.8.67" }
-codewhale-secrets = { path = "../secrets", version = "0.8.67" }
-codewhale-state = { path = "../state", version = "0.8.67" }
+codewhale-agent = { path = "../agent", version = "0.8.68" }
+codewhale-app-server = { path = "../app-server", version = "0.8.68" }
+codewhale-config = { path = "../config", version = "0.8.68" }
+codewhale-lane = { path = "../lane", version = "0.8.68" }
+codewhale-workflow = { path = "../workflow", version = "0.8.68" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.8.68" }
+codewhale-mcp = { path = "../mcp", version = "0.8.68" }
+codewhale-release = { path = "../release", version = "0.8.68" }
+codewhale-secrets = { path = "../secrets", version = "0.8.68" }
+codewhale-state = { path = "../state", version = "0.8.68" }
 chrono.workspace = true
 dirs.workspace = true
 serde.workspace = true
@@ -43,7 +43,7 @@ tempfile.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-codewhale-build-support = { path = "../build-support", version = "0.8.67" }
+codewhale-build-support = { path = "../build-support", version = "0.8.68" }
 
 # Parent-death cleanup for delegated server children (#3259): on Linux the
 # dispatcher sets PR_SET_PDEATHSIG so the child is signalled if the dispatcher

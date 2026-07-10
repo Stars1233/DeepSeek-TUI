@@ -94,8 +94,8 @@ export const DOC_TOPICS: DocTopic[] = [
     slug: "modes",
     label: { en: "Modes", zh: "模式" },
     description: {
-      en: "Plan, Agent, YOLO modes and orthogonal approval policies.",
-      zh: "Plan、Agent、YOLO 三种模式与正交审批策略。",
+      en: "Plan, Act, Operate modes and orthogonal approval posture.",
+      zh: "Plan、Act、Operate 三种模式与正交审批姿态。",
     },
     repoSource: "docs/MODES.md",
     hasPage: true,

@@ -21,7 +21,7 @@ bằng `/restore` cho mọi lượt.
 
 ```bash
 npm install -g codewhale
-codewhale --version   # 0.8.67
+codewhale --version   # 0.8.68
 ```
 
 Wrapper npm (Node 18+) tải binary đã xác minh SHA-256 từ GitHub Releases và
@@ -50,8 +50,8 @@ nix run github:Hmbown/CodeWhale
 scoop install codewhale        # hoặc trình cài NSIS từ GitHub Releases
 
 # CNB mirror cho người dùng khó truy cập GitHub ổn định
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.67 codewhale-cli --locked --force
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.67 codewhale-tui --locked --force
+cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.68 codewhale-cli --locked --force
+cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.68 codewhale-tui --locked --force
 
 # Homebrew legacy trong lúc formula đang được đổi tên
 brew tap Hmbown/deepseek-tui

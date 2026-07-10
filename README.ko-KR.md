@@ -35,7 +35,7 @@ CodeWhale이 실제 라우트를 해석해 실행합니다.
 
 ```bash
 npm install -g codewhale
-codewhale --version   # 0.8.67
+codewhale --version   # 0.8.68
 ```
 
 npm 래퍼(Node 18+)는 GitHub Releases에서 SHA-256으로 검증된 바이너리를
@@ -64,8 +64,8 @@ nix run github:Hmbown/CodeWhale
 scoop install codewhale        # or the NSIS installer from GitHub Releases
 
 # CNB mirror for users who cannot reliably reach GitHub
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.67 codewhale-cli --locked --force
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.67 codewhale-tui --locked --force
+cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.68 codewhale-cli --locked --force
+cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.68 codewhale-tui --locked --force
 
 # Legacy Homebrew compatibility while the formula is renamed
 brew tap Hmbown/deepseek-tui

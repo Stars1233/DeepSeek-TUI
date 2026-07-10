@@ -54,7 +54,7 @@ export default workflow({
               "prompt": "Fix #4090 using scout-ctrl-c findings. Branch from main (git checkout main && git pull && git checkout -b codex/v0868-fix-4090). Implement minimal fix so double Ctrl+C exits cleanly in PTY/raw-mode while preserving cancel/copy behavior. Add regression test or PTY/key-path trace. Run: `cargo test -p codewhale-tui` for touched modules and `cargo clippy -p codewhale-tui -- -D warnings`. Do not close the issue; report files changed and test output.",
               "agent_type": "implementer",
               "role": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/tui/app.rs", "crates/tui/src/tui/ui.rs"],
               "budget": { "max_steps": 20, "timeout_secs": 1200 }
             }
@@ -65,7 +65,7 @@ export default workflow({
               "prompt": "Using scout findings, fix #4093 and/or #4094 if root causes are clear and independent. Branch from main (separate branches per issue if needed: codex/v0868-fix-4093, codex/v0868-fix-4094). Prefer smallest correct diffs. For #4093: Fleet setup should edit role/profile roster not provider scope. For #4094: sub-agent detail panel must render and not freeze TUI. Add tests where feasible. Run targeted `cargo test -p codewhale-tui fleet sidebar`. Report per-issue status: fixed/partial/blocked.",
               "agent_type": "implementer",
               "role": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/tui/views/fleet_setup.rs", "crates/tui/src/tui/sidebar.rs"],
               "budget": { "max_steps": 24, "timeout_secs": 1800 }
             }
@@ -73,10 +73,10 @@ export default workflow({
           {
             "agent": {
               "id": "verify-dogfood",
-              "prompt": "Re-verify dogfood fixes for #3986 (API-key onboarding copy shows CODEWHALE_HOME path) and #3990 (slash autocomplete alias duplication). Read issue bodies via `gh issue view`. Check if fixes exist on current branch; if missing, implement minimal fixes. Run verification gate subset: `cargo fmt --all --check`, `cargo test -p codewhale-tui -- onboarding slash`. Report done/partial/missing per issue.",
+              "prompt": "Re-verify dogfood fixes for #3986 (API-key onboarding copy shows CODEWHALE_HOME path) and #3990 (slash autocomplete alias duplication). Read issue bodies via `gh issue view`. Check if fixes exist on current branch; if missing, report them as missing rather than editing. Run verification gate subset: `cargo fmt --all --check`, `cargo test -p codewhale-tui -- onboarding slash`. Report done/partial/missing per issue.",
               "agent_type": "verifier",
               "role": "verifier",
-              "mode": "write",
+              "mode": "read_only",
               "file_scope": ["crates/tui/src/tui/", "crates/tui/locales/en.json"],
               "budget": { "max_steps": 16, "timeout_secs": 900 }
             }

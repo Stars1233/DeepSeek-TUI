@@ -50,7 +50,7 @@ export default workflow({
               "id": "impl-refresh-policy",
               "prompt": "Implement catalog refresh policy (#4114) per scout-openrouter findings: manual `/model refresh` or `/provider refresh`, background TTL refresh, stale chip, fail-closed on auth errors, secret-free cache persistence. Touch `client.rs` and `catalog.rs`. Add tests. Run `cargo test -p codewhale-config catalog` and `cargo test -p codewhale-tui provider_lake`.",
               "agent_type": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/client.rs", "crates/config/src/catalog.rs"],
               "budget": { "max_steps": 24, "timeout_secs": 1800 }
             }
@@ -60,7 +60,7 @@ export default workflow({
               "id": "impl-picker-views",
               "prompt": "Implement model picker catalog views (#4115, #4139-4141) per scout-picker-views: Configured/Catalog/Recent/Coding/Cheap/Long-context views, metadata rows, cross-field search on provider+model. Minimal diff matching existing picker patterns. Tests in `cargo test -p codewhale-tui model_picker`.",
               "agent_type": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/tui/model_picker.rs", "crates/tui/src/tui/provider_picker.rs"],
               "budget": { "max_steps": 24, "timeout_secs": 1800 }
             }
@@ -70,7 +70,7 @@ export default workflow({
               "id": "impl-migrate-consumers",
               "prompt": "Migrate remaining legacy model source consumers to ProviderLake (#4116). Replace `model_completion_names_for_provider` at each scout-legacy-sources call site. Keep bundled fallback for unconfigured providers. Run `cargo test -p codewhale-tui model_inventory hotbar subagent`.",
               "agent_type": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/tui/hotbar/", "crates/tui/src/tools/subagent/mod.rs"],
               "budget": { "max_steps": 20, "timeout_secs": 1200 }
             }

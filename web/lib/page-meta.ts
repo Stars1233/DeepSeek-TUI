@@ -7,7 +7,7 @@ export const SITE_NAME = "CodeWhale";
 
 /** The one-line product identity, used as the default OG image alt text. */
 export const IDENTITY_PHRASE =
-  "The terminal coding agent for any model — open models first.";
+  "The calm, provider-honest terminal coding agent for any model — open models first.";
 
 /** Shared OG card rendered by app/opengraph-image.tsx (1200×630 PNG). */
 const OG_IMAGE = {

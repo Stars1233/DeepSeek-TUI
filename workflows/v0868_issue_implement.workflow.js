@@ -27,7 +27,7 @@ export default workflow({
         "id": "implement-fix",
         "prompt": "Implement the issue per scout-code plan. Branch from main (`git checkout main && git pull && git checkout -b codex/v0868-fix-<N>`). Stay within OUT_OF_SCOPE. Smallest correct diff. Run VERIFICATION commands from ISSUE_BRIEF. If blocked, report blocker clearly instead of guessing.",
         "agent_type": "implementer",
-        "mode": "write",
+        "mode": "read_write",
         "file_scope": ["crates/"],
         "budget": { "max_steps": 24, "timeout_secs": 1800 }
       }

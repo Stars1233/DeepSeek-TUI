@@ -2,8 +2,8 @@
 
 codewhale has two related concepts:
 
-- **TUI mode**: what kind of visible interaction you're in (Plan/Agent/YOLO).
-- **Approval mode**: how aggressively the UI asks before executing tools.
+- **TUI mode**: what kind of visible interaction you're in (Plan/Act/Operate).
+- **Approval posture**: how aggressively the UI asks before executing tools.
 - **Workflow overlay**: optional long-running orchestration that can
   run on top of any TUI mode when a task needs many coordinated workers.
 
@@ -22,16 +22,14 @@ into a resumable workflow with its own progress view.
 
 Press `Tab` to complete composer menus, queue a draft as a next-turn follow-up
 while a turn is running, or cycle through the visible modes when the composer is
-otherwise idle: **Plan → Act → Multitask → Operate → Plan**.
+otherwise idle: **Plan → Act → Operate → Plan**.
 Press `Shift+Tab` to cycle permission posture (Ask → Auto-Review → Full Access).
 Press `Ctrl+T` to cycle reasoning effort.
 Run `/mode` to open the mode picker, or switch directly with `/mode act`,
-`/mode plan`, `/mode multitask`, `/mode operate`, `/mode yolo` (deprecated shim),
-`/mode 1`, `/mode 2`, `/mode 3`, `/mode 5`, or `/mode 4`.
+`/mode plan`, `/mode operate`, or `/mode yolo` (deprecated compatibility shim).
 
 - **Plan**: design-first prompting. Read-only investigation tools stay available; shell and patch execution stay off. Use this when you want to think out loud and produce a plan to hand to a human (yourself later, or a reviewer).
 - **Act** (Agent): multi-step tool use. In interactive TUI sessions, shell tools (`exec_shell`, `task_shell_start`, `task_shell_wait`) are available by default and approval prompts gate each call. Set top-level `allow_shell = false` to hide shell tools for a workspace/profile. File writes are allowed without a prompt.
-- **Multitask**: lighter delegation posture — spawn background sub-agents in parallel, start workflows non-blocking, and keep the operator turn responsive.
 - **Operate**: conductor posture — prefer Fleet roster + `/workflow` orchestration over solo inline tool chains; delegate by default.
 - **YOLO** (deprecated): maps to Act + Full Access permissions (`Shift+Tab` to Bypass). Use only in trusted repos.
 
@@ -39,7 +37,7 @@ Run `/mode` to open the mode picker, or switch directly with `/mode act`,
 
 ### Tool availability by mode
 
-| Tool family | Plan | Agent | YOLO |
+| Tool family | Plan | Act | Operate |
 |:---|:---:|:---:|:---:|
 | Read-only file, search, and diagnostic tools | yes | yes | yes |
 | File write and patch tools | no | yes | yes |

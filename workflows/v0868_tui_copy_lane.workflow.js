@@ -50,7 +50,7 @@ export default workflow({
               "id": "impl-copy-dedupe",
               "prompt": "Implement copy dedupe batch (#4142-#4148, #4112) per scout findings. Rules: disclose once not thrice; header OR footer OR sidebar owns each fact. Touch `en.json`, `mode_picker.rs`, `history.rs`, `sidebar.rs` as needed. Add/adjust tests. `cargo test -p codewhale-tui history mode_picker`.",
               "agent_type": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/locales/en.json", "crates/tui/src/tui/history.rs"],
               "budget": { "max_steps": 20, "timeout_secs": 1200 }
             }
@@ -60,7 +60,7 @@ export default workflow({
               "id": "impl-compact-default",
               "prompt": "If scout-compact-mode recommends it, make compact presentation the default (#4095) with safe migration for existing users. Minimal config/default change. Document in CHANGELOG snippet. `cargo test -p codewhale-tui config`.",
               "agent_type": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/config.rs"],
               "budget": { "max_steps": 12, "timeout_secs": 900 }
             }

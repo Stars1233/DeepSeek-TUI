@@ -8,8 +8,8 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     locale,
     title: isZh ? "模式 · CodeWhale 文档" : "Modes · CodeWhale Docs",
     description: isZh
-      ? "Plan、Agent、YOLO 三种运行模式与正交审批策略。"
-      : "Plan, Agent, YOLO operating modes and orthogonal approval policies.",
+      ? "Plan、Act、Operate 三种运行模式与正交审批姿态。"
+      : "Plan, Act, Operate modes and orthogonal approval posture.",
   });
 }
 

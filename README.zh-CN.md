@@ -20,7 +20,7 @@ DeepInfra 以及本地 vLLM/SGLang/Ollama 都是一等路由；当你手里是 A
 
 ```bash
 npm install -g codewhale
-codewhale --version   # 0.8.67
+codewhale --version   # 0.8.68
 ```
 
 npm wrapper（Node 18+）会从 GitHub Releases 下载经 SHA-256 校验的二进制，并安装
@@ -49,8 +49,8 @@ nix run github:Hmbown/CodeWhale
 scoop install codewhale        # 或使用 GitHub Releases 中的 NSIS 安装包
 
 # CNB 镜像：适合无法稳定访问 GitHub 的用户
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.67 codewhale-cli --locked --force
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.67 codewhale-tui --locked --force
+cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.68 codewhale-cli --locked --force
+cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.68 codewhale-tui --locked --force
 
 # 旧 Homebrew 兼容路径：formula 改名期间仍沿用 deepseek-tui
 brew tap Hmbown/deepseek-tui

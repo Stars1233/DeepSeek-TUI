@@ -17,7 +17,7 @@ Rust 製の TUI と CLI、25 のプロバイダ。DeepSeek、OpenRouter、Huggin
 
 ```bash
 npm install -g codewhale
-codewhale --version   # 0.8.67
+codewhale --version   # 0.8.68
 ```
 
 npm wrapper（Node 18+）は GitHub Releases から SHA-256 検証済みのバイナリをダウンロードし、`codewhale`、`codew`、`codewhale-tui` をインストールします。ソースからビルドしたい場合は cargo（Rust 1.88+）で:
@@ -44,8 +44,8 @@ nix run github:Hmbown/CodeWhale
 scoop install codewhale        # または GitHub Releases の NSIS インストーラ
 
 # GitHub に安定して到達できない場合の CNB ミラー
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.67 codewhale-cli --locked --force
-cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.67 codewhale-tui --locked --force
+cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.68 codewhale-cli --locked --force
+cargo install --git https://cnb.cool/codewhale.net/codewhale --tag v0.8.68 codewhale-tui --locked --force
 
 # 旧 Homebrew 互換。formula の改名が完了するまで deepseek-tui 名のままです
 brew tap Hmbown/deepseek-tui

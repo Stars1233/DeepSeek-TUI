@@ -50,7 +50,7 @@ export default workflow({
               "id": "impl-typed-events",
               "prompt": "Implement typed WorkflowUiEvent stream (#4118) per scout findings. Replace string progress where needed; add resolution fields (provider, model, route_source). Wire sub-agent spawn metadata (#4119). Default parallel write children to worktree (#4120). Tests: `cargo test -p codewhale-tui workflow`.",
               "agent_type": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/tools/workflow.rs", "crates/tui/src/tools/subagent/mod.rs"],
               "budget": { "max_steps": 28, "timeout_secs": 2400 }
             }
@@ -60,7 +60,7 @@ export default workflow({
               "id": "impl-workflow-panel",
               "prompt": "Implement WorkflowPanel unified activity surface (#4121, #4122, #4125) and history card routing (#4122). Create or extend `workflow_panel.rs`. Panel: collapsed/expanded, phase list, child rows, cancel. History card: phase summary, failure details. Tests for state transitions (#4123). `cargo test -p codewhale-tui workflow_panel history`.",
               "agent_type": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/tui/history.rs"],
               "budget": { "max_steps": 28, "timeout_secs": 2400 }
             }
@@ -70,7 +70,7 @@ export default workflow({
               "id": "impl-auto-launch",
               "prompt": "Implement automatic launch pieces (#4127-4129): planner-to-workflow structured launch (#4124), parent prompt update (#4125), approval card for elevated plans (#4126), trigger suppression (#4127), config defaults (#4128), sandbox regression tests (#4129). Prioritize config keys + suppression + prompt; defer full dogfood (#4131) if timeboxed.",
               "agent_type": "implementer",
-              "mode": "write",
+              "mode": "read_write",
               "file_scope": ["crates/tui/src/tools/workflow.rs", "crates/workflow-js/src/vm.rs", "config.example.toml"],
               "budget": { "max_steps": 28, "timeout_secs": 2400 }
             }

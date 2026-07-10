@@ -25,7 +25,7 @@ const tracksEn = [
       { title: "Typed tool surface", note: "read, write, edit, patch, grep, shell, git, web search — plus sub-agents, RLM, and MCP" },
       { title: "Sub-agent parallel execution", note: "agent; up to 10 concurrent sessions with bounded result handles" },
       { title: "RLM batched processing", note: "Persistent sandboxed Python REPL with 1–16 cheap parallel children for long-input analysis" },
-      { title: "Three operating modes", note: "Plan (read-only), Agent (default), YOLO (auto-approved); orthogonal suggest / auto / never approval" },
+      { title: "Three operating modes", note: "Plan (read-only), Act (execution), Operate (Fleet/Workflow orchestration); orthogonal Ask / Auto-Review / Full Access posture" },
       { title: "Per-platform sandbox", note: "seatbelt (macOS), landlock (Linux); Windows containment via restricted tokens (limited)" },
       { title: "Durable sessions + tasks", note: "Save, resume, rollback; background task queue with replayable timelines under ~/.codewhale/tasks/" },
       { title: "Bidirectional MCP", note: "Consume tools from external servers; expose as server via `codewhale mcp`; ~/.codewhale/mcp.json" },
