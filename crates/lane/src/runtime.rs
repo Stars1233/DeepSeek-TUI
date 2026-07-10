@@ -1094,6 +1094,7 @@ fn shell_join(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
@@ -1103,11 +1104,13 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
+    #[cfg(unix)]
     struct ScopedEnvVar {
         name: &'static str,
         previous: Option<OsString>,
     }
 
+    #[cfg(unix)]
     impl ScopedEnvVar {
         fn set(name: &'static str, value: &std::ffi::OsStr) -> Self {
             let previous = std::env::var_os(name);
@@ -1126,6 +1129,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for ScopedEnvVar {
         fn drop(&mut self) {
             // SAFETY: paired with the serialized mutation above.
