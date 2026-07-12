@@ -1406,7 +1406,7 @@ mod tests {
             let dump = buffer_text(&buf, area);
             let selected_id = crate::session_manager::truncate_id(&view.filtered[view.selected].id);
             assert!(
-                row_containing(&buf, area, &selected_id).is_some(),
+                row_containing(&buf, area, selected_id).is_some(),
                 "{label} should render the selected session row:\n{dump}"
             );
             assert!(
@@ -1422,7 +1422,7 @@ mod tests {
                 let row = buffer_row_text(&buf, area, *y);
                 let id = crate::session_manager::truncate_id(&view.filtered[*idx].id);
                 assert!(
-                    row.contains(&id),
+                    row.contains(id),
                     "{label} hitbox at y={y} should map to session {id}; got {row:?}"
                 );
             }
