@@ -1227,7 +1227,7 @@ fn execute_subagent_observer_hook(
 
 fn execute_turn_end_observer_hook(
     app: &App,
-    turn: &ActiveTurnMetadata,
+    turn: Option<&ActiveTurnMetadata>,
     usage: &Usage,
     billing_surface: Option<&str>,
     duration: Duration,
@@ -1237,15 +1237,16 @@ fn execute_turn_end_observer_hook(
         return;
     }
 
+    let metadata = turn_end_observer_metadata(turn);
     let context = app.base_hook_context();
     let payload = crate::hooks::turn_end_payload(TurnEndPayloadInput {
         context: &context,
-        created_at: turn.created_at,
-        model_backed: turn.route.is_some(),
-        provider: turn.route.as_ref().map(|route| route.provider.as_str()),
-        billing_surface,
-        model: turn.route.as_ref().map(|route| route.model.as_str()),
-        turn_id: &turn.turn_id,
+        created_at: metadata.created_at,
+        model_backed: metadata.route.is_some(),
+        provider: metadata.route.map(|route| route.provider.as_str()),
+        billing_surface: metadata.route.and(billing_surface),
+        model: metadata.route.map(|route| route.model.as_str()),
+        turn_id: metadata.turn_id.as_ref(),
         status: app.runtime_turn_status.as_deref().unwrap_or("unknown"),
         error,
         duration,
@@ -1265,6 +1266,31 @@ fn execute_turn_end_observer_hook(
         .spawn(move || {
             let _ = hooks.execute_json_observer(HookEvent::TurnEnd, &context, &payload);
         });
+}
+
+struct TurnEndObserverMetadata<'a> {
+    turn_id: std::borrow::Cow<'a, str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    route: Option<&'a crate::core::events::TurnRoute>,
+}
+
+fn turn_end_observer_metadata(turn: Option<&ActiveTurnMetadata>) -> TurnEndObserverMetadata<'_> {
+    turn.map_or_else(
+        || TurnEndObserverMetadata {
+            // Manual compaction, purge, and shell-only completions predate the
+            // TurnStarted lifecycle event. Preserve their observer contract
+            // with a distinct non-model identity instead of borrowing a stale
+            // model turn id.
+            turn_id: std::borrow::Cow::Owned(format!("lifecycle_{}", uuid::Uuid::new_v4())),
+            created_at: chrono::Utc::now(),
+            route: None,
+        },
+        |turn| TurnEndObserverMetadata {
+            turn_id: std::borrow::Cow::Borrowed(&turn.turn_id),
+            created_at: turn.created_at,
+            route: turn.route.as_ref(),
+        },
+    )
 }
 
 fn bounded_subagent_hook_preview(text: &str) -> (String, bool) {
@@ -2952,16 +2978,14 @@ async fn run_event_loop(
                             }
                         }
 
-                        if let Some(completed_turn) = completed_turn.as_ref() {
-                            execute_turn_end_observer_hook(
-                                app,
-                                completed_turn,
-                                &usage,
-                                billing_surface,
-                                turn_elapsed,
-                                error.as_deref(),
-                            );
-                        }
+                        execute_turn_end_observer_hook(
+                            app,
+                            completed_turn.as_ref(),
+                            &usage,
+                            billing_surface,
+                            turn_elapsed,
+                            error.as_deref(),
+                        );
 
                         if queued_to_send.is_none() {
                             queued_to_send = app.pop_queued_message();

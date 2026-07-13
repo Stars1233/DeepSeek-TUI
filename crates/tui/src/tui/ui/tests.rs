@@ -7227,6 +7227,25 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
     assert!(route.auto_model);
     assert!(app.pending_turn_route.is_none());
     assert!(app.ocean_completion_started_at.is_none());
+
+    let observer = turn_end_observer_metadata(Some(active_turn));
+    assert_eq!(observer.turn_id.as_ref(), "turn_cancel_race");
+    assert_eq!(observer.created_at, created_at);
+    assert_eq!(observer.route, Some(route));
+}
+
+#[test]
+fn completion_only_hook_metadata_is_synthetic_and_non_model() {
+    let observed_after = chrono::Utc::now();
+    let first = turn_end_observer_metadata(None);
+    let second = turn_end_observer_metadata(None);
+
+    assert!(first.turn_id.starts_with("lifecycle_"));
+    assert!(second.turn_id.starts_with("lifecycle_"));
+    assert_ne!(first.turn_id, second.turn_id);
+    assert!(first.created_at >= observed_after);
+    assert!(first.route.is_none());
+    assert!(second.route.is_none());
 }
 
 #[test]

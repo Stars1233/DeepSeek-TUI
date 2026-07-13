@@ -1017,7 +1017,9 @@ usage. Unrecognized and custom endpoints remain `null` and unpriced.
 
 Shell-only lifecycle completions set `model_backed` to `false` and may report a
 `null` provider; offline scorecards exclude those records from model token and
-cost totals.
+cost totals. Completion-only shell, manual-compaction, and purge events that do
+not have a matching `TurnStarted` retain the observer notification with a
+synthetic `lifecycle_<uuid>` turn id and the time the completion was observed.
 
 For `interrupted` or `failed` turns, `status` reflects that terminal
 state and `error` carries the engine error string when one is available.
