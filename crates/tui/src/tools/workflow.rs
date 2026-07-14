@@ -1522,7 +1522,7 @@ impl DeclarativeWorkflowLowerer {
                     "{} + \"\\n\\nInputs:\\n\" + {inputs}",
                     js_string(&spec.prompt)
                 ),
-                "general",
+                Some("general"),
                 None,
                 None,
                 false,
@@ -1593,7 +1593,7 @@ fn leaf_task_options_expression(
     validate_leaf_runtime_contract(spec)?;
     Ok(task_options_expression(
         leaf_description_expression(spec),
-        leaf_subagent_type(spec)?,
+        leaf_subagent_type(spec),
         spec.role.as_deref(),
         spec.profile.as_deref(),
         // Parallel write-capable children default to worktree isolation (#4120).
@@ -1665,15 +1665,18 @@ fn result_inputs_expression(inputs: &[String]) -> String {
     )
 }
 
-fn leaf_subagent_type(spec: &LeafSpec) -> Result<&'static str, ToolError> {
-    if spec.mode == TaskMode::ReadOnly
-        && spec.agent_type == AgentType::General
-        && spec.role.is_none()
-        && spec.profile.is_none()
-    {
-        return Ok("review");
+fn leaf_subagent_type(spec: &LeafSpec) -> Option<&'static str> {
+    // A named Fleet profile owns the child's runtime type. Emitting the IR's
+    // default `general` here makes role-only leaves look like an explicit type
+    // override and can conflict with the resolved roster member (for example,
+    // scout -> explore). Keep type defaults only for non-roster leaves.
+    if spec.role.is_some() || spec.profile.is_some() {
+        return None;
     }
-    Ok(agent_type_name(spec.agent_type))
+    if spec.mode == TaskMode::ReadOnly && spec.agent_type == AgentType::General {
+        return Some("review");
+    }
+    Some(agent_type_name(spec.agent_type))
 }
 
 fn leaf_allowed_tools(spec: &LeafSpec) -> Result<Option<Vec<String>>, ToolError> {
@@ -1717,7 +1720,7 @@ fn is_write_or_shell_tool(tool: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn task_options_expression(
     description_expr: String,
-    subagent_type: &str,
+    subagent_type: Option<&str>,
     role: Option<&str>,
     profile: Option<&str>,
     worktree: bool,
@@ -1726,11 +1729,11 @@ fn task_options_expression(
     phase: Option<&str>,
     allowed_tools: Option<Vec<String>>,
 ) -> String {
-    let mut fields = vec![
-        format!("description: {description_expr}"),
-        format!("type: {}", js_string(subagent_type)),
-        format!("label: {}", js_string(label)),
-    ];
+    let mut fields = vec![format!("description: {description_expr}")];
+    if let Some(subagent_type) = subagent_type {
+        fields.push(format!("type: {}", js_string(subagent_type)));
+    }
+    fields.push(format!("label: {}", js_string(label)));
     if let Some(phase) = phase {
         fields.push(format!("phase: {}", js_string(phase)));
     }
@@ -3212,6 +3215,100 @@ mod tests {
             err.to_string().contains("unknown fleet role `wizard`"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn role_only_leaf_omits_type_and_resolves_through_named_fleet() {
+        let _retry_guard = workflow_test_retry_guard();
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let fleet_dir = tmp.path().join("fleets");
+        std::fs::create_dir_all(&fleet_dir).expect("fleet dir");
+        std::fs::write(
+            fleet_dir.join("role-only-test.toml"),
+            r#"
+name = "role-only-test"
+
+[roles]
+scout = "scout"
+"#,
+        )
+        .expect("role-only fleet");
+        let source = r#"
+export default workflow({
+  "goal": "resolve a role-only child",
+  "nodes": [
+    {
+      "agent": {
+        "id": "scout-source",
+        "prompt": "Inspect the source without editing.",
+        "role": "scout",
+        "mode": "read_only"
+      }
+    }
+  ]
+});
+"#;
+
+        let adapted = adapt_workflow_source(source, None).expect("lower role-only workflow");
+        assert!(adapted.source.contains("role: \"scout\""));
+        assert!(
+            !adapted.source.contains("type:"),
+            "Fleet-addressed leaves must defer runtime type to the roster:\n{}",
+            adapted.source
+        );
+        let non_role = adapt_workflow_source(
+            r#"workflow({
+              "goal": "default non-role child",
+              "nodes": [{ "agent": { "id": "audit", "prompt": "Audit only." } }]
+            });"#,
+            None,
+        )
+        .expect("lower non-role workflow");
+        assert!(
+            non_role.source.contains("type: \"review\""),
+            "non-role read-only leaves retain the review default:\n{}",
+            non_role.source
+        );
+
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let (client, calls) = fake_chat_client("scout evidence").await;
+        let runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager,
+        );
+        let tool = WorkflowTool::new(runtime.manager.clone(), runtime);
+        let result = tool
+            .execute(
+                json!({
+                    "action": "run",
+                    "script": source,
+                    "fleet": "role-only-test"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("role-only workflow should resolve through its named Fleet");
+        let payload: Value = serde_json::from_str(&result.content).expect("workflow JSON");
+
+        assert_eq!(payload["status"], "completed", "{payload}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let started = payload["events"]
+            .as_array()
+            .expect("typed events")
+            .iter()
+            .find(|event| event["type"] == "task_started")
+            .expect("task_started receipt");
+        assert_eq!(started["role"], "scout");
+        assert_eq!(started["profile"], "scout");
+        assert_eq!(started["resolved_profile"], "scout");
     }
 
     #[test]
