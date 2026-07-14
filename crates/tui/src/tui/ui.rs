@@ -13596,13 +13596,14 @@ fn maybe_warn_context_pressure(app: &mut App) {
 
     let configured_threshold = app.auto_compact_threshold_percent.clamp(10.0, 100.0);
     let warning_threshold = CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT.min(configured_threshold);
-    if percent < warning_threshold {
+    let will_auto_compact = app.auto_compact && used.max(0) as usize >= app.compact_threshold;
+    if percent < warning_threshold && !will_auto_compact {
         return;
     }
 
     let recommendation = if !app.auto_compact {
         "Consider enabling auto_compact or use /compact."
-    } else if percent >= configured_threshold {
+    } else if will_auto_compact {
         "Auto-compaction will run before the next send."
     } else {
         "Auto-compaction is enabled."
@@ -13631,8 +13632,11 @@ fn should_auto_compact_before_send(app: &App) -> bool {
     if !app.auto_compact {
         return false;
     }
+    // Use the same ceiling-anchored token threshold as the engine. Comparing
+    // against a raw percentage of the input-plus-output window can delay this
+    // gate until after the spendable input budget has already been exhausted.
     context_usage_snapshot(app)
-        .map(|(_, _, pct)| pct >= app.auto_compact_threshold_percent.clamp(10.0, 100.0))
+        .map(|(used, _, _)| used.max(0) as usize >= app.compact_threshold)
         .unwrap_or(false)
 }
 

@@ -437,7 +437,9 @@ was dropped. Restoring them here — every one shipped real code:_
 - **[MMMarcinho](https://github.com/MMMarcinho)** — `image_analyze` vision tool (#1467)
 - **[MeAiRobot](https://github.com/MeAiRobot)** — toast-stack overlay z-order fix (#1485)
 - **[NorethSea](https://github.com/NorethSea)** — `update` refreshing the sibling TUI binary (#1492)
-- **[SamhandsomeLee](https://github.com/SamhandsomeLee)** — bundled v4-best-practices skill (#1448)
+- **[SamhandsomeLee](https://github.com/SamhandsomeLee)** — bundled
+  v4-best-practices skill (#1448) and input-budget-aware compaction trigger
+  (#4293)
 - **[YaYII](https://github.com/YaYII)** — opt-in `/translate` command (#1462)
 - **[sandofree](https://github.com/sandofree)** — Tavily and Bocha `web_search` backends (#1294)
 - **[tiger-dog](https://github.com/tiger-dog)** — approval one-line banner and Markdown underscore handling (#1455)

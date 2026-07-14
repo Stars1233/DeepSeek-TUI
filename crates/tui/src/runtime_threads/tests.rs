@@ -104,7 +104,9 @@ fn runtime_compaction_uses_provider_route_context() {
     );
 
     assert!(config.enabled);
-    assert_eq!(config.token_threshold, 217_600);
+    // The threshold is 80% of the route's spendable input budget after
+    // output reservation and headroom, not 80% of the raw context window.
+    assert_eq!(config.token_threshold, 213_504);
     assert_eq!(config.effective_context_window, Some(272_000));
 }
 

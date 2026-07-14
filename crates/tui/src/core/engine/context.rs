@@ -8,77 +8,13 @@ use crate::compaction::estimate_tokens;
 use crate::config::ApiProvider;
 use crate::context_budget::ContextBudget;
 use crate::error_taxonomy::ErrorCategory;
-use crate::models::{Message, SystemPrompt, context_window_for_model};
+use crate::models::{Message, SystemPrompt};
+pub(super) use crate::route_budget::effective_max_output_tokens_for_route;
+#[cfg(test)]
+pub(super) use crate::route_budget::{TURN_MAX_OUTPUT_TOKENS, effective_max_output_tokens};
 use crate::tools::spec::ToolResult;
 use codewhale_config::route::RouteLimits;
 use serde_json::Value;
-
-/// Max output tokens requested for normal agent turns. Generous on purpose:
-/// V4 thinking models can produce tens of thousands of reasoning tokens on
-/// hard prompts before the visible reply, and DeepSeek V4 ships with a 1M
-/// context window. v0.7.5 keeps this cap fixed instead of silently lowering
-/// `max_tokens` near pressure; hard-cycle/preflight checks reserve this budget
-/// plus safety headroom before sending the next request.
-pub(super) const TURN_MAX_OUTPUT_TOKENS: u32 = 262_144;
-
-/// Safe max output tokens sent in the API request. This must be low enough to
-/// work with providers that have smaller context limits than the model's native
-/// window (e.g., self-hosted vLLM/SGLang with `--max-model-len 131072`).
-/// DeepSeek's API will still produce as many tokens as needed for thinking;
-/// this cap just prevents HTTP 400 from providers with tight limits.
-const API_MAX_OUTPUT_TOKENS: u32 = 65_536;
-
-/// Compute the effective `max_tokens` to send in the API request for a given
-/// model. Uses `API_MAX_OUTPUT_TOKENS` (64K) which fits within common provider
-/// limits (128K+ total). For non-V4 models with smaller context windows, caps
-/// at half the context window.
-///
-/// Override: when the env var `DEEPSEEK_MAX_OUTPUT_TOKENS` is set to a positive
-/// integer, this function returns that value directly. Use this for self-hosted
-/// providers (vLLM/SGLang) whose `max-model-len` is tight and where the
-/// model-table heuristic above would over-allocate. Example: vLLM serving
-/// Qwen3.6 with `--max-model-len 65536` should set
-/// `DEEPSEEK_MAX_OUTPUT_TOKENS=16384` so input + output stays well under the
-/// provider's hard limit.
-pub(super) fn effective_max_output_tokens(model: &str) -> u32 {
-    if let Ok(raw) = std::env::var("DEEPSEEK_MAX_OUTPUT_TOKENS")
-        && let Ok(n) = raw.trim().parse::<u32>()
-        && n > 0
-    {
-        return n;
-    }
-    let window = context_window_for_model(model).unwrap_or(128_000);
-    if window >= 500_000 {
-        // V4-class models on large-context providers: use 64K which is safe
-        // for most deployments while still allowing substantial output.
-        API_MAX_OUTPUT_TOKENS
-    } else {
-        // Smaller models: cap at half the context window (leave room for input)
-        let capped = window / 2;
-        capped.min(API_MAX_OUTPUT_TOKENS)
-    }
-}
-
-pub(super) fn effective_max_output_tokens_for_route(
-    provider: ApiProvider,
-    model: &str,
-    route_limits: Option<RouteLimits>,
-) -> u32 {
-    let cap = effective_max_output_tokens(model)
-        .min(crate::config::provider_capability(provider, model).max_output);
-    let cap = crate::route_budget::route_output_limit_tokens(route_limits)
-        .map_or(cap, |route_cap| cap.min(route_cap));
-    let Some(window) = route_limits
-        .and_then(|limits| limits.context_tokens)
-        .and_then(|tokens| u32::try_from(tokens).ok())
-        .filter(|tokens| *tokens > 0)
-    else {
-        return cap;
-    };
-    u32::try_from(ContextBudget::new(u64::from(window), 0, u64::from(cap)).output_cap_tokens)
-        .unwrap_or(cap)
-        .max(1)
-}
 /// Keep this many most recent messages when emergency trimming is required.
 pub(super) const MIN_RECENT_MESSAGES_TO_KEEP: usize = 4;
 /// Allow a few emergency recovery attempts before failing the turn.
@@ -580,13 +516,6 @@ pub(super) fn estimate_input_tokens_conservative(
         .saturating_add(framing_overhead)
 }
 
-/// Context windows at or above this size reserve the full
-/// [`TURN_MAX_OUTPUT_TOKENS`] (262K) when computing the internal input budget,
-/// leaving room for V4-class interleaved thinking. Below it, the reservation
-/// falls back to [`effective_max_output_tokens`] so a smaller self-hosted
-/// window does not underflow to a negative budget.
-const INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD: u32 = 500_000;
-
 /// Internal input-side token budget for a provider/model route:
 /// `window - reserved_output - headroom`. Used by the preflight check,
 /// emergency recovery, and capacity trimming to decide when to compact.
@@ -642,31 +571,7 @@ pub(super) fn route_context_budget_for_route(
     route_limits: Option<RouteLimits>,
     input_tokens: usize,
 ) -> Option<ContextBudget> {
-    let window = crate::route_budget::route_context_window_tokens(provider, model, route_limits);
-    let output_cap = route_output_reservation_for_window(provider, model, window, route_limits);
-    crate::route_budget::route_context_budget(
-        provider,
-        model,
-        route_limits,
-        input_tokens,
-        output_cap,
-    )
-}
-
-fn route_output_reservation_for_window(
-    provider: ApiProvider,
-    model: &str,
-    window_tokens: u32,
-    route_limits: Option<RouteLimits>,
-) -> u32 {
-    if window_tokens >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
-        crate::route_budget::route_output_limit_tokens(route_limits)
-            .map_or(TURN_MAX_OUTPUT_TOKENS, |route_cap| {
-                route_cap.min(TURN_MAX_OUTPUT_TOKENS)
-            })
-    } else {
-        effective_max_output_tokens_for_route(provider, model, route_limits)
-    }
+    crate::route_budget::route_context_budget(provider, model, route_limits, input_tokens)
 }
 
 pub(super) fn is_context_length_error_message(message: &str) -> bool {
