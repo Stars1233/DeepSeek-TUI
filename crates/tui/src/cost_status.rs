@@ -36,7 +36,8 @@ fn cell() -> &'static Mutex<CostEstimate> {
 /// cost via [`crate::pricing::calculate_turn_cost_estimate_for_provider`] and
 /// adds it to the pending pool. Cheap; takes a short-lived lock
 /// and returns. No-op when the provider does not expose authoritative runtime
-/// pricing (for example ChatGPT/Codex OAuth) or the model is unknown.
+/// pricing (for example ChatGPT/Codex OAuth), needs route provenance that this
+/// side channel does not carry (StepFun PAYG vs Plan), or the model is unknown.
 pub fn report(provider: ApiProvider, model: &str, usage: &Usage) {
     let Some(cost) =
         crate::pricing::calculate_turn_cost_estimate_for_provider(provider, model, usage)
@@ -124,6 +125,15 @@ mod tests {
         let _g = serial_lock();
         reset_for_tests();
         report(ApiProvider::OpenaiCodex, "gpt-5.5", &small_usage());
+        assert_eq!(drain(), CostEstimate::default());
+    }
+
+    #[test]
+    fn report_skips_stepfun_without_billing_surface() {
+        let _g = serial_lock();
+        reset_for_tests();
+        report(ApiProvider::Stepfun, "step-3.7-flash", &small_usage());
+        report(ApiProvider::Openrouter, "step-3.7-flash", &small_usage());
         assert_eq!(drain(), CostEstimate::default());
     }
 

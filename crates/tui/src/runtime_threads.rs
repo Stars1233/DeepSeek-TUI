@@ -250,6 +250,10 @@ pub struct TurnRecord {
     /// deserialize without inventing provider provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_provider: Option<String>,
+    /// Non-secret discriminator for routes whose provider/model pair spans
+    /// different billing systems (for example StepFun PAYG vs Step Plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_billing_surface: Option<String>,
     /// Concrete wire model selected for this turn (especially important when
     /// the thread is configured as `auto`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1444,8 +1448,12 @@ impl RuntimeThreadManager {
                 let provider = ApiProvider::parse(provider_label);
                 let cost = provider
                     .and_then(|provider| {
-                        crate::pricing::calculate_turn_cost_estimate_for_provider(
-                            provider, model, usage,
+                        crate::pricing::calculate_turn_cost_estimate_for_route_at(
+                            provider,
+                            model,
+                            turn.effective_billing_surface.as_deref(),
+                            usage,
+                            turn.created_at,
                         )
                     })
                     .map(|estimate| estimate.usd)
@@ -2170,6 +2178,7 @@ impl RuntimeThreadManager {
                     duration_ms: Some(0),
                     usage: None,
                     effective_provider: None,
+                    effective_billing_surface: None,
                     effective_model: None,
                     error: None,
                     item_ids,
@@ -2280,6 +2289,7 @@ impl RuntimeThreadManager {
             duration_ms: None,
             usage: None,
             effective_provider: Some(provider.as_str().to_string()),
+            effective_billing_surface: None,
             effective_model: Some(model.clone()),
             error: None,
             item_ids: Vec::new(),
@@ -2574,6 +2584,7 @@ impl RuntimeThreadManager {
             duration_ms: None,
             usage: None,
             effective_provider: Some(route_provider.as_str().to_string()),
+            effective_billing_surface: None,
             effective_model: Some(route_model),
             error: None,
             item_ids: Vec::new(),
@@ -3026,6 +3037,7 @@ impl RuntimeThreadManager {
         let mut tool_items: HashMap<String, String> = HashMap::new();
         let mut compaction_items: HashMap<String, String> = HashMap::new();
         let mut turn_usage: Option<Usage> = None;
+        let mut turn_base_url: Option<String> = None;
         let mut turn_status = RuntimeTurnStatus::Completed;
         let mut turn_error: Option<String> = None;
         let mut saw_engine_activity = false;
@@ -3729,9 +3741,11 @@ impl RuntimeThreadManager {
                     usage,
                     status,
                     error,
+                    base_url,
                     ..
                 } => {
                     turn_usage = Some(usage);
+                    turn_base_url = base_url;
                     turn_status = match status {
                         TurnOutcomeStatus::Completed => RuntimeTurnStatus::Completed,
                         TurnOutcomeStatus::Interrupted => RuntimeTurnStatus::Interrupted,
@@ -3838,6 +3852,14 @@ impl RuntimeThreadManager {
         turn.ended_at = Some(ended_at);
         turn.duration_ms = turn.started_at.map(|start| duration_ms(start, ended_at));
         turn.usage = turn_usage;
+        turn.effective_billing_surface = turn
+            .effective_provider
+            .as_deref()
+            .and_then(ApiProvider::parse)
+            .and_then(|provider| {
+                crate::pricing::billing_surface_for_route(provider, turn_base_url.as_deref())
+            })
+            .map(str::to_string);
         turn.error = turn_error;
         self.store.save_turn(&turn)?;
 

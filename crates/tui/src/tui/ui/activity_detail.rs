@@ -1550,9 +1550,16 @@ fn turn_approvals_lines(app: &App) -> Vec<String> {
 fn turn_route_lines(app: &App) -> Vec<String> {
     let mut lines = Vec::new();
 
-    let (provider, model) = match app.pending_turn_route.as_ref() {
-        Some((provider, model, _passthrough)) => (provider.display_name(), model.clone()),
-        None => (app.api_provider.display_name(), app.model.clone()),
+    let (provider, model) = if let Some(route) = app
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.route.as_ref())
+    {
+        (route.provider.display_name(), route.model.clone())
+    } else if let Some((provider, model, _auto_model)) = app.pending_turn_route.as_ref() {
+        (provider.display_name(), model.clone())
+    } else {
+        (app.api_provider.display_name(), app.model.clone())
     };
     lines.push(format!("Route: {provider} · {model}"));
 

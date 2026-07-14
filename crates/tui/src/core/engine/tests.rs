@@ -773,12 +773,20 @@ async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial(
 
     let mut saw_blocker = false;
     let mut saw_operate_complete = false;
+    let mut saw_operate_route = false;
     let mut operate_rx = operate_handle.rx_event.write().await;
     while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), operate_rx.recv())
         .await
         .expect("timed out waiting for Operate blocker")
     {
         match event {
+            Event::TurnStarted { route, .. } => {
+                let route = route.expect("model turn route");
+                assert_eq!(route.provider, ApiProvider::Deepseek);
+                assert_eq!(route.model, crate::config::DEFAULT_TEXT_MODEL);
+                assert!(!route.auto_model);
+                saw_operate_route = true;
+            }
             Event::Error { envelope, .. } => {
                 saw_blocker = true;
                 assert!(
@@ -813,6 +821,10 @@ async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial(
     assert!(
         saw_blocker,
         "Operate must surface an actionable readiness blocker"
+    );
+    assert!(
+        saw_operate_route,
+        "model turns must publish route provenance"
     );
     assert!(
         saw_operate_complete,
@@ -2953,8 +2965,9 @@ async fn run_shell_command_op_requests_approval_and_executes_shell() {
     let mut rx = handle.rx_event.write().await;
     while let Some(event) = rx.recv().await {
         match event {
-            Event::TurnStarted { turn_id } => {
+            Event::TurnStarted { turn_id, route, .. } => {
                 assert!(turn_id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
+                assert!(route.is_none());
             }
             Event::ToolCallStarted { id, name, input } => {
                 saw_started = true;

@@ -134,9 +134,10 @@ use crate::tui::workspace_context;
 use super::key_actions;
 
 use super::app::{
-    App, AppAction, AppMode, HuntVerdict, OnboardingState, PendingProviderSwitch, QueuedMessage,
-    ReasoningEffort, SidebarFocus, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
-    TaskPanelEntryKind, TuiOptions, looks_like_slash_command_input, shell_command_from_bang_input,
+    ActiveTurnMetadata, App, AppAction, AppMode, HuntVerdict, OnboardingState,
+    PendingProviderSwitch, QueuedMessage, ReasoningEffort, SidebarFocus, StatusToastLevel,
+    SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, TuiOptions,
+    looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
@@ -1226,7 +1227,9 @@ fn execute_subagent_observer_hook(
 
 fn execute_turn_end_observer_hook(
     app: &App,
+    turn: Option<&ActiveTurnMetadata>,
     usage: &Usage,
+    billing_surface: Option<&str>,
     duration: Duration,
     error: Option<&str>,
 ) {
@@ -1234,10 +1237,16 @@ fn execute_turn_end_observer_hook(
         return;
     }
 
+    let metadata = turn_end_observer_metadata(turn);
     let context = app.base_hook_context();
     let payload = crate::hooks::turn_end_payload(TurnEndPayloadInput {
         context: &context,
-        turn_id: app.runtime_turn_id.as_deref(),
+        created_at: metadata.created_at,
+        model_backed: metadata.route.is_some(),
+        provider: metadata.route.map(|route| route.provider.as_str()),
+        billing_surface: metadata.route.and(billing_surface),
+        model: metadata.route.map(|route| route.model.as_str()),
+        turn_id: metadata.turn_id.as_ref(),
         status: app.runtime_turn_status.as_deref().unwrap_or("unknown"),
         error,
         duration,
@@ -1257,6 +1266,31 @@ fn execute_turn_end_observer_hook(
         .spawn(move || {
             let _ = hooks.execute_json_observer(HookEvent::TurnEnd, &context, &payload);
         });
+}
+
+struct TurnEndObserverMetadata<'a> {
+    turn_id: std::borrow::Cow<'a, str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    route: Option<&'a crate::core::events::TurnRoute>,
+}
+
+fn turn_end_observer_metadata(turn: Option<&ActiveTurnMetadata>) -> TurnEndObserverMetadata<'_> {
+    turn.map_or_else(
+        || TurnEndObserverMetadata {
+            // Manual compaction, purge, and shell-only completions predate the
+            // TurnStarted lifecycle event. Preserve their observer contract
+            // with a distinct non-model identity instead of borrowing a stale
+            // model turn id.
+            turn_id: std::borrow::Cow::Owned(format!("lifecycle_{}", uuid::Uuid::new_v4())),
+            created_at: chrono::Utc::now(),
+            route: None,
+        },
+        |turn| TurnEndObserverMetadata {
+            turn_id: std::borrow::Cow::Borrowed(&turn.turn_id),
+            created_at: turn.created_at,
+            route: turn.route.as_ref(),
+        },
+    )
 }
 
 fn bounded_subagent_hook_preview(text: &str) -> (String, bool) {
@@ -2184,6 +2218,7 @@ async fn run_event_loop(
                 // cancel redraws owed to other events in the same batch.
                 let redraw_requested_before_event = received_engine_event;
                 received_engine_event = true;
+                capture_turn_started_metadata(app, &event);
                 if app.suppress_stream_events_until_turn_complete {
                     if matches!(event, EngineEvent::TurnStarted { .. }) {
                         // Ctrl+C can race with the engine's per-turn token
@@ -2499,7 +2534,7 @@ async fn run_event_loop(
                             subagent_list_refresh_requested = true;
                         }
                     }
-                    EngineEvent::TurnStarted { turn_id } => {
+                    EngineEvent::TurnStarted { turn_id, .. } => {
                         app.ocean_completion_started_at = None;
                         app.ocean_receipt_settle_start = None;
                         app.ocean_turn_history_start = app.history.len();
@@ -2551,7 +2586,16 @@ async fn run_event_loop(
                         tool_catalog,
                         base_url,
                     } => {
-                        let pending_turn_route = app.pending_turn_route.take();
+                        let completed_turn = app.active_turn.take();
+                        let billing_surface = completed_turn
+                            .as_ref()
+                            .and_then(|turn| turn.route.as_ref())
+                            .and_then(|route| {
+                                crate::pricing::billing_surface_for_route(
+                                    route.provider,
+                                    base_url.as_deref(),
+                                )
+                            });
                         app.session.last_tool_catalog = tool_catalog;
                         app.session.last_base_url = base_url;
                         let was_locally_cancelled = app.suppress_stream_events_until_turn_complete;
@@ -2678,9 +2722,15 @@ async fn run_event_loop(
                         app.session.last_prompt_cache_hit_tokens = usage.prompt_cache_hit_tokens;
                         app.session.last_prompt_cache_miss_tokens = usage.prompt_cache_miss_tokens;
                         app.session.last_reasoning_replay_tokens = usage.reasoning_replay_tokens;
-                        let (provider, model, auto_model) = pending_turn_route
-                            .map(|(provider, model, auto_model)| {
-                                (Some(provider), Some(model), auto_model)
+                        let (provider, model, auto_model) = completed_turn
+                            .as_ref()
+                            .and_then(|turn| turn.route.as_ref())
+                            .map(|route| {
+                                (
+                                    Some(route.provider),
+                                    Some(route.model.clone()),
+                                    route.auto_model,
+                                )
                             })
                             .unwrap_or((None, None, false));
                         let effective_turn_provider = provider.unwrap_or(app.api_provider);
@@ -2725,14 +2775,25 @@ async fn run_event_loop(
                         }
 
                         // Update session cost
-                        let billing =
-                            crate::route_billing::for_route(config, effective_turn_provider);
-                        let turn_cost = crate::pricing::calculate_turn_cost_estimate_for_route(
-                            effective_turn_provider,
-                            &effective_turn_model,
-                            &usage,
-                            billing,
-                        );
+                        let turn_cost = completed_turn
+                            .as_ref()
+                            .and_then(|turn| {
+                                turn.route.as_ref().map(|route| (turn.created_at, route))
+                            })
+                            .and_then(|(created_at, route)| {
+                                let billing =
+                                    crate::route_billing::for_route(config, route.provider);
+                                if !billing.shows_money() {
+                                    return None;
+                                }
+                                crate::pricing::calculate_turn_cost_estimate_for_route_at(
+                                    route.provider,
+                                    &route.model,
+                                    billing_surface,
+                                    &usage,
+                                    created_at,
+                                )
+                            });
                         if let Some(cost) = turn_cost {
                             app.accrue_session_cost_estimate(cost);
                         }
@@ -2922,7 +2983,14 @@ async fn run_event_loop(
                             }
                         }
 
-                        execute_turn_end_observer_hook(app, &usage, turn_elapsed, error.as_deref());
+                        execute_turn_end_observer_hook(
+                            app,
+                            completed_turn.as_ref(),
+                            &usage,
+                            billing_surface,
+                            turn_elapsed,
+                            error.as_deref(),
+                        );
 
                         if queued_to_send.is_none() {
                             queued_to_send = app.pop_queued_message();
@@ -2933,11 +3001,8 @@ async fn run_event_loop(
                         recoverable: _,
                     } => {
                         let provider_before_error = app.api_provider;
-                        let (health_provider, health_model) = app
-                            .pending_turn_route
-                            .as_ref()
-                            .map(|(provider, model, _)| (*provider, model.clone()))
-                            .unwrap_or_else(|| (provider_before_error, app.model.clone()));
+                        let (health_provider, health_model) =
+                            error_health_route(app, provider_before_error);
                         app.provider_health.record_failure(
                             config,
                             health_provider,
@@ -5296,11 +5361,10 @@ async fn run_event_loop(
                             .await;
                     }
                 }
-                KeyCode::BackTab => {
-                    if app.cycle_approval_posture() {
-                        sync_mode_update(app, &engine_handle).await;
-                    }
+                KeyCode::BackTab if app.cycle_approval_posture() => {
+                    sync_mode_update(app, &engine_handle).await;
                 }
+                KeyCode::BackTab => {}
                 // Transcript-nav shortcuts now require Alt, leaving most bare
                 // letters free to insert as text. Before v0.8.30, bare `g`,
                 // `G`, `[`, `]`, `?`, and `l` on an empty composer were
@@ -6434,6 +6498,9 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
         app.dispatch_started_at = None;
         app.turn_started_at = None;
         app.turn_last_activity_at = None;
+        app.pending_turn_route = None;
+        app.active_turn = None;
+        app.suppress_stream_events_until_turn_complete = false;
         app.push_status_toast(
             "Turn dispatch timed out; the engine may have stopped. Please try again.",
             StatusToastLevel::Error,
@@ -6455,6 +6522,9 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
         app.dispatch_started_at = None;
         app.turn_started_at = None;
         app.turn_last_activity_at = None;
+        app.pending_turn_route = None;
+        app.active_turn = None;
+        app.suppress_stream_events_until_turn_complete = false;
         app.push_status_toast(
             "Recovered from an inconsistent busy state.",
             StatusToastLevel::Warning,
@@ -6588,6 +6658,9 @@ fn recover_stalled_runtime_turn(app: &mut App, message: &str, level: StatusToast
     app.runtime_turn_status = None;
     app.runtime_turn_id = None;
     app.dispatch_started_at = None;
+    app.pending_turn_route = None;
+    app.active_turn = None;
+    app.suppress_stream_events_until_turn_complete = false;
     // Per-turn scroll lock — clear so the next turn auto-scrolls.
     app.user_scrolled_during_stream = false;
     app.push_status_toast(message, level, None);
@@ -6633,6 +6706,9 @@ fn recover_engine_event_disconnect(app: &mut App) -> bool {
         || app.is_compacting
         || app.is_purging
         || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
+        || app.pending_turn_route.is_some()
+        || app.active_turn.is_some()
+        || app.suppress_stream_events_until_turn_complete
         || app.streaming_message_index.is_some()
         || app.streaming_thinking_active_entry.is_some()
         || app
@@ -6662,6 +6738,9 @@ fn recover_engine_event_disconnect(app: &mut App) -> bool {
     app.runtime_turn_status = None;
     app.runtime_turn_id = None;
     app.dispatch_started_at = None;
+    app.pending_turn_route = None;
+    app.active_turn = None;
+    app.suppress_stream_events_until_turn_complete = false;
     app.user_scrolled_during_stream = false;
 
     for msg in app.drain_pending_steers() {
@@ -6679,6 +6758,36 @@ fn recover_engine_event_disconnect(app: &mut App) -> bool {
         None,
     );
     true
+}
+
+fn capture_turn_started_metadata(app: &mut App, event: &EngineEvent) {
+    if let EngineEvent::TurnStarted {
+        turn_id,
+        created_at,
+        route,
+    } = event
+    {
+        app.ocean_completion_started_at = None;
+        app.active_turn = Some(ActiveTurnMetadata {
+            turn_id: turn_id.clone(),
+            created_at: *created_at,
+            route: route.clone(),
+        });
+        app.pending_turn_route = None;
+    }
+}
+
+fn error_health_route(app: &App, fallback_provider: ApiProvider) -> (ApiProvider, String) {
+    app.active_turn
+        .as_ref()
+        .and_then(|turn| turn.route.as_ref())
+        .map(|route| (route.provider, route.model.clone()))
+        .or_else(|| {
+            app.pending_turn_route
+                .as_ref()
+                .map(|(provider, model, _)| (*provider, model.clone()))
+        })
+        .unwrap_or_else(|| (fallback_provider, app.model.clone()))
 }
 
 fn record_turn_activity(app: &mut App, event: &EngineEvent, now: Instant) {

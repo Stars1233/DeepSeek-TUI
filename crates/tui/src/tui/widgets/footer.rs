@@ -355,9 +355,9 @@ pub fn footer_permission_chip(app: &App) -> Vec<Span<'static>> {
 
 fn footer_compact_work_chip(app: &App) -> Vec<Span<'static>> {
     if app.sidebar_focus == SidebarFocus::Hidden
-        || !app
+        || app
             .last_sidebar_host_width
-            .is_some_and(|width| width < crate::tui::ui::SIDEBAR_VISIBLE_MIN_WIDTH)
+            .is_none_or(|width| width >= crate::tui::ui::SIDEBAR_VISIBLE_MIN_WIDTH)
     {
         return Vec::new();
     }

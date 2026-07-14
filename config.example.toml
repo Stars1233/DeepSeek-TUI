@@ -499,12 +499,12 @@ max_subagents = 10 # optional (1-20)
 # # base_url = "https://api.z.ai/api/paas/v4"
 # model = "GLM-5.2"                             # default; GLM-5.1 is the smaller model, GLM-5-Turbo the fast sub-agent sibling
 
-# StepFun / StepFlash direct OpenAI-compatible endpoint (https://platform.stepfun.com)
+# StepFun / StepFlash direct OpenAI-compatible endpoint (https://platform.stepfun.ai)
 [providers.stepfun]
 # api_key = "YOUR_STEPFUN_API_KEY"               # or STEP_API_KEY
 # base_url = "https://api.stepfun.ai/v1"          # or STEP_BASE_URL
 # # Coding Plan endpoint:
-# # base_url = "https://api.stepfun.com/step_plan/v1"
+# # base_url = "https://api.stepfun.ai/step_plan/v1"
 # model = "step-3.7-flash"                       # or STEPFUN_MODEL / STEP_MODEL
 
 # MiniMax direct OpenAI-compatible endpoint (https://platform.minimax.io)

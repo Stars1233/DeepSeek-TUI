@@ -398,7 +398,7 @@ provider = "stepfun"
 
 [providers.stepfun]
 api_key = "YOUR_STEPFUN_API_KEY"
-base_url = "https://api.stepfun.com/step_plan/v1"
+base_url = "https://api.stepfun.ai/step_plan/v1"
 model = "step-3.7-flash"
 ```
 
@@ -977,7 +977,11 @@ The payload includes common hook metadata plus post-turn accounting:
   "session_id": "sess_12345678",
   "workspace": "/path/to/workspace",
   "mode": "agent",
+  "created_at": "2026-07-12T10:30:00+00:00",
+  "model_backed": true,
+  "provider": "deepseek",
   "model": "deepseek-chat",
+  "billing_surface": null,
   "turn_id": "turn_12345678",
   "status": "completed",
   "error": null,
@@ -1001,6 +1005,21 @@ The payload includes common hook metadata plus post-turn accounting:
   "stop_hook_active": false
 }
 ```
+
+`created_at` anchors time-window pricing; `provider` and `model` identify the
+effective route used for model-backed turns. `billing_surface` is an optional,
+non-secret classification derived from the endpoint that actually served the
+turn. Recognized StepFun routes emit `stepfun-payg` or `stepfun-plan`; the raw
+base URL is never written to hook or runtime records. Runtime `TurnRecord`
+exports call the same field `effective_billing_surface`, which `scorecard`
+accepts as an alias. This keeps subscription quota separate from token-priced
+usage. Unrecognized and custom endpoints remain `null` and unpriced.
+
+Shell-only lifecycle completions set `model_backed` to `false` and may report a
+`null` provider; offline scorecards exclude those records from model token and
+cost totals. Completion-only shell, manual-compaction, and purge events that do
+not have a matching `TurnStarted` retain the observer notification with a
+synthetic `lifecycle_<uuid>` turn id and the time the completion was observed.
 
 For `interrupted` or `failed` turns, `status` reflects that terminal
 state and `error` carries the engine error string when one is available.

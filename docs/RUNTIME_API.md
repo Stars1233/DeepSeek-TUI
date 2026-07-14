@@ -89,7 +89,7 @@ this; the table maps each integration need to where a local client reads it.
 
 | Integration need | Where it comes from | Status |
 |---|---|---|
-| Route / effective model | `TurnRecord` + thread `model`; per-run `--provider`/`--model` overrides | available |
+| Route / effective model / billing surface | `TurnRecord` + thread `model`; per-run `--provider`/`--model` overrides | available |
 | Permission / sandbox / approval profile | thread `auto_approve`, sandbox + approval policy | available |
 | Run / thread / turn IDs | `thread_id`, `turn_id`, SSE event envelope | available |
 | Event stream | `GET /v1/threads/{id}/events` (replay + live SSE) | available |
@@ -461,12 +461,18 @@ The runtime uses a durable Thread/Turn/Item lifecycle.
   `mode`, `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|
-  failed|interrupted|canceled`), timestamps, duration, usage, error summary
+  failed|interrupted|canceled`), `effective_provider`, `effective_model`,
+  `effective_billing_surface`, timestamps, duration, usage, error summary
 - **TurnItemRecord** — `id`, `turn_id`, `kind` (`user_message|agent_message|
   tool_call|file_change|command_execution|context_compaction|status|error`),
   lifecycle `status`, `metadata`
 
 Events are append-only with a global monotonic `seq` for replay/resume.
+
+`effective_billing_surface` is a non-secret classification derived from the
+endpoint that served the turn. Recognized StepFun routes use `stepfun-payg` or
+`stepfun-plan`; unknown and custom endpoints leave it unset. The raw base URL is
+not persisted in `TurnRecord`.
 
 ### Restart semantics
 

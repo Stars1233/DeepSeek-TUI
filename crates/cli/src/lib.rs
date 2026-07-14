@@ -423,6 +423,10 @@ struct LaneArgs {
 }
 
 #[derive(Debug, Subcommand)]
+// Clap constructs this command enum once at process startup. Keeping the
+// fields inline makes the generated CLI shape explicit; boxing them only to
+// reduce this transient value would add indirection without runtime benefit.
+#[allow(clippy::large_enum_variant)]
 enum LaneCommand {
     /// List known lanes (newest first).
     List {

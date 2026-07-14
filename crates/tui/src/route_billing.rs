@@ -79,6 +79,7 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
 
     let provider_config = config.provider_config_for(provider);
     match provider {
+        ApiProvider::Stepfun => stepfun_billing(provider_config),
         // Z.ai's dedicated Coding endpoint is the GLM Coding Plan route. Its
         // quota is subscription-backed, so a public API price estimate is not
         // truthful spend and must not appear as dollars in the UI.
@@ -101,6 +102,19 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
             BillingPresentation::Unknown
         }
         _ => BillingPresentation::Metered,
+    }
+}
+
+fn stepfun_billing(config: Option<&ProviderConfig>) -> BillingPresentation {
+    let base_url = config
+        .and_then(|config| config.base_url.as_deref())
+        .unwrap_or(crate::config::DEFAULT_STEPFUN_BASE_URL);
+    match crate::pricing::billing_surface_for_route(ApiProvider::Stepfun, Some(base_url)) {
+        Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE) => BillingPresentation::Metered,
+        Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE) => {
+            BillingPresentation::Subscription("StepFun Step Plan quota")
+        }
+        _ => BillingPresentation::Unknown,
     }
 }
 
@@ -138,7 +152,7 @@ pub fn for_child_route(
         | ApiProvider::Anthropic
         | ApiProvider::XiaomiMimo
         | ApiProvider::Zai => BillingPresentation::Subscription("provider quota"),
-        ApiProvider::Custom => BillingPresentation::Unknown,
+        ApiProvider::Stepfun | ApiProvider::Custom => BillingPresentation::Unknown,
         _ => BillingPresentation::Metered,
     }
 }
@@ -154,7 +168,16 @@ pub fn has_priced_metered_basis(
     provider: ApiProvider,
     model: &str,
 ) -> bool {
-    billing.shows_money() && crate::pricing::has_pricing_for_provider(provider, model)
+    billing.shows_money()
+        && if provider == ApiProvider::Stepfun {
+            crate::pricing::has_pricing_for_billing_surface(
+                provider,
+                model,
+                Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE),
+            )
+        } else {
+            crate::pricing::has_pricing_for_provider(provider, model)
+        }
 }
 
 /// Build the truthful usage chip for session surfaces.
@@ -398,6 +421,52 @@ mod tests {
         assert_eq!(
             for_route(&config, ApiProvider::Zai),
             BillingPresentation::Subscription("Z.ai Coding Plan quota")
+        );
+    }
+
+    #[test]
+    fn stepfun_payg_shows_money_but_step_plan_stays_subscription_billed() {
+        let payg_billing = for_route(&Config::default(), ApiProvider::Stepfun);
+        assert_eq!(payg_billing, BillingPresentation::Metered);
+        let payg_chip = usage_chip(
+            payg_billing,
+            ApiProvider::Stepfun,
+            crate::config::DEFAULT_STEPFUN_MODEL,
+            0.42,
+            CostCurrency::Usd,
+            None,
+        );
+        assert_eq!(format_usage_chip(&payg_chip).as_deref(), Some("$0.42"));
+
+        let plan_config = config_with(
+            ApiProvider::Stepfun,
+            ProviderConfig {
+                base_url: Some("https://api.stepfun.ai/step_plan/v1".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let plan_billing = for_route(&plan_config, ApiProvider::Stepfun);
+        assert_eq!(
+            plan_billing,
+            BillingPresentation::Subscription("StepFun Step Plan quota")
+        );
+        let plan_chip = usage_chip(
+            plan_billing,
+            ApiProvider::Stepfun,
+            crate::config::DEFAULT_STEPFUN_MODEL,
+            0.42,
+            CostCurrency::Usd,
+            None,
+        );
+        assert!(!format_usage_line(&plan_chip).contains('$'));
+
+        assert_eq!(
+            for_child_route(
+                ApiProvider::Deepseek,
+                BillingPresentation::Metered,
+                ApiProvider::Stepfun,
+            ),
+            BillingPresentation::Unknown
         );
     }
 

@@ -6,9 +6,12 @@
 //! reliable balance endpoint exists.
 
 use chrono::{DateTime, TimeZone, Utc};
-use codewhale_config::pricing::{OfferingPricing, TokenUsage};
+use codewhale_config::pricing::{Currency, OfferingPricing, TokenUsage};
 
-use crate::config::ApiProvider;
+use crate::config::{
+    ApiProvider, DEEPSEEK_ALIAS_REPLACEMENT, DEEPSEEK_ALIAS_RETIREMENT_UTC,
+    DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL, canonical_model_id_for_provider,
+};
 use crate::models::Usage;
 
 /// Cost display currency.
@@ -111,6 +114,76 @@ struct ModelPricing {
     cny: Option<CurrencyPricing>,
 }
 
+pub(crate) const STEPFUN_PAYG_BILLING_SURFACE: &str = "stepfun-payg";
+pub(crate) const STEPFUN_PLAN_BILLING_SURFACE: &str = "stepfun-plan";
+const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.ai/step_plan/v1";
+const LEGACY_STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
+
+/// Reduce a concrete request endpoint to non-secret billing provenance.
+/// Unknown/custom endpoints stay unclassified so offline reports fail closed.
+pub(crate) fn billing_surface_for_route(
+    provider: ApiProvider,
+    base_url: Option<&str>,
+) -> Option<&'static str> {
+    if provider != ApiProvider::Stepfun {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(base_url?.trim()).ok()?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    let default = reqwest::Url::parse(DEFAULT_STEPFUN_BASE_URL).ok()?;
+    let official_host = default.host_str()?;
+    let host = parsed.host_str()?;
+    let path = parsed.path().trim_end_matches('/');
+    if parsed.port_or_known_default() != Some(443) {
+        return None;
+    }
+    if host.eq_ignore_ascii_case(official_host) && matches!(path, "" | "/v1") {
+        Some(STEPFUN_PAYG_BILLING_SURFACE)
+    } else if [STEPFUN_PLAN_BASE_URL, LEGACY_STEPFUN_PLAN_BASE_URL]
+        .iter()
+        .filter_map(|url| reqwest::Url::parse(url).ok())
+        .any(|plan| {
+            plan.host_str()
+                .is_some_and(|plan_host| host.eq_ignore_ascii_case(plan_host))
+                && matches!(path, "/step_plan" | "/step_plan/v1")
+        })
+    {
+        Some(STEPFUN_PLAN_BILLING_SURFACE)
+    } else {
+        None
+    }
+}
+
+fn pricing_for_billing_surface(
+    provider: ApiProvider,
+    model: &str,
+    billing_surface: Option<&str>,
+) -> Option<ModelPricing> {
+    if provider == ApiProvider::Stepfun
+        && model.trim().eq_ignore_ascii_case(DEFAULT_STEPFUN_MODEL)
+        && billing_surface
+            .is_some_and(|surface| surface.eq_ignore_ascii_case(STEPFUN_PAYG_BILLING_SURFACE))
+    {
+        // StepFun standard API pricing (2026-07-13 audit). Step Plan uses a
+        // separate subscription quota and must never reach this token rate.
+        // https://platform.stepfun.ai/docs/en/guides/pricing/details
+        Some(usd_only_pricing(0.04, 0.20, 1.15))
+    } else {
+        None
+    }
+}
+
+fn route_requires_billing_surface(provider: ApiProvider, model: &str) -> bool {
+    provider == ApiProvider::Stepfun || model.trim().eq_ignore_ascii_case(DEFAULT_STEPFUN_MODEL)
+}
+
 /// Look up pricing for a model name.
 fn pricing_for_model(model: &str) -> Option<ModelPricing> {
     pricing_for_model_at(model, Utc::now())
@@ -123,12 +196,22 @@ pub fn has_pricing_for_model(model: &str) -> bool {
 }
 
 /// Return whether the selected provider route exposes authoritative dollar
-/// pricing for this model. ChatGPT/Codex OAuth usage is subscription/account
-/// scoped, so the same model id can be priced on the OpenAI API route while
-/// remaining intentionally unpriced on the OAuth route.
+/// pricing for this model without endpoint provenance. ChatGPT/Codex OAuth is
+/// subscription/account scoped, while StepFun needs PAYG-vs-Plan provenance.
 #[must_use]
 pub fn has_pricing_for_provider(provider: ApiProvider, model: &str) -> bool {
-    provider != ApiProvider::OpenaiCodex && has_pricing_for_model(model)
+    calculate_turn_cost_estimate_for_provider(provider, model, &Usage::default()).is_some()
+}
+
+/// Return whether a provider/model route has authoritative pricing for an
+/// already-classified billing surface.
+#[must_use]
+pub(crate) fn has_pricing_for_billing_surface(
+    provider: ApiProvider,
+    model: &str,
+    billing_surface: Option<&str>,
+) -> bool {
+    pricing_for_billing_surface(provider, model, billing_surface).is_some()
 }
 
 fn pricing_for_model_at(model: &str, now: DateTime<Utc>) -> Option<ModelPricing> {
@@ -228,7 +311,6 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         // rate equals the input rate.
         // https://developers.openai.com/api/docs/models/gpt-5.5-pro
         "openai/gpt-5.5-pro" | "gpt-5.5-pro" => Some(usd_only_pricing(30.00, 30.00, 180.00)),
-
         "qwen/qwen3.6-flash" => Some(usd_only_pricing(0.1875, 0.1875, 1.125)),
         "qwen/qwen3.6-35b-a3b" => Some(usd_only_pricing(0.05, 0.14, 1.00)),
         "qwen/qwen3.6-max-preview" => Some(usd_only_pricing(1.04, 1.04, 6.24)),
@@ -370,32 +452,33 @@ pub fn calculate_turn_cost_from_usage(model: &str, usage: &Usage) -> Option<f64>
 
 /// Calculate cost from provider usage in both official currencies.
 #[must_use]
+#[cfg(test)]
 pub fn calculate_turn_cost_estimate_from_usage(model: &str, usage: &Usage) -> Option<CostEstimate> {
     let pricing = pricing_for_model_and_usage(model, usage)?;
-    Some(CostEstimate {
+    Some(cost_estimate_with_pricing(pricing, usage))
+}
+
+fn cost_estimate_with_pricing(pricing: ModelPricing, usage: &Usage) -> CostEstimate {
+    CostEstimate {
         usd: calculate_turn_cost_from_usage_with_pricing(pricing.usd, usage),
         cny: pricing
             .cny
             .map(|pricing| calculate_turn_cost_from_usage_with_pricing(pricing, usage))
             .unwrap_or(0.0),
-    })
+    }
 }
 
-/// Calculate cost from provider usage when the provider's billing surface is
-/// known. ChatGPT/Codex OAuth does not expose authoritative dollar pricing to
-/// this runtime, so usage is shown without fabricating a spend estimate.
+/// Calculate cost from provider/model usage when that pair identifies a single
+/// billing surface. ChatGPT/Codex OAuth has no authoritative API dollar price,
+/// while StepFun needs endpoint-derived PAYG-vs-Plan provenance; both stay
+/// unpriced here rather than fabricating spend.
 #[must_use]
 pub fn calculate_turn_cost_estimate_for_provider(
     provider: ApiProvider,
     model: &str,
     usage: &Usage,
 ) -> Option<CostEstimate> {
-    let billing = if provider == ApiProvider::OpenaiCodex {
-        crate::route_billing::BillingPresentation::Subscription("Codex OAuth quota")
-    } else {
-        crate::route_billing::BillingPresentation::Metered
-    };
-    calculate_turn_cost_estimate_for_route(provider, model, usage, billing)
+    calculate_turn_cost_estimate_for_provider_at(provider, model, usage, Utc::now())
 }
 
 /// Calculate cost only for routes that are actually money-metered. OAuth and
@@ -411,30 +494,234 @@ pub fn calculate_turn_cost_estimate_for_route(
     if !billing.shows_money() {
         return None;
     }
-    if usage.prompt_cache_write_tokens.unwrap_or(0) > 0
-        && let Some(estimate) = crate::provider_lake::catalog_offering_for_model(provider, model)
-            .as_ref()
-            .and_then(|offering| catalog_cost_estimate_from_offering(offering, usage))
-    {
-        return Some(estimate);
-    }
-    calculate_turn_cost_estimate_from_usage(model, usage)
+    calculate_turn_cost_estimate_for_provider(provider, model, usage)
 }
 
-/// Estimate cache-write usage from a sourced catalog row when it publishes the
-/// separate write tier. Other usage continues through the legacy table, which
-/// retains CNY estimates and compatibility fallbacks.
-fn catalog_cost_estimate_from_offering(
+/// Estimate a turn when endpoint-derived billing provenance is available.
+/// StepFun's standard API and Step Plan share provider/model text but not a
+/// billing system, so that route fails closed unless the PAYG surface is known.
+#[must_use]
+#[cfg(test)]
+pub(crate) fn calculate_turn_cost_estimate_for_billing_surface(
+    provider: ApiProvider,
+    model: &str,
+    billing_surface: Option<&str>,
+    usage: &Usage,
+) -> Option<CostEstimate> {
+    calculate_turn_cost_estimate_for_route_at(provider, model, billing_surface, usage, Utc::now())
+}
+
+/// Deterministic provider-aware estimate at the turn's recorded time.
+#[must_use]
+pub(crate) fn calculate_turn_cost_estimate_for_provider_at(
+    provider: ApiProvider,
+    model: &str,
+    usage: &Usage,
+    recorded_at: DateTime<Utc>,
+) -> Option<CostEstimate> {
+    if provider == ApiProvider::OpenaiCodex || route_requires_billing_surface(provider, model) {
+        return None;
+    }
+    let normalized_model = model.trim();
+    let model_lower = normalized_model.to_ascii_lowercase();
+    let direct_deepseek = matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+    );
+    let canonical_model = canonical_model_id_for_provider(provider, normalized_model)?;
+    let catalog_model = if direct_deepseek
+        && matches!(model_lower.as_str(), "deepseek-chat" | "deepseek-reasoner")
+    {
+        let retirement = DateTime::parse_from_rfc3339(DEEPSEEK_ALIAS_RETIREMENT_UTC)
+            .ok()?
+            .with_timezone(&Utc);
+        if recorded_at >= retirement {
+            return None;
+        }
+        DEEPSEEK_ALIAS_REPLACEMENT.to_string()
+    } else {
+        canonical_model
+    };
+
+    // MiniMax-M3 doubles its published rates above 512K total input. The
+    // catalog row is necessarily static, so retain the usage-aware first-party
+    // table for both direct wire protocols after provider/model provenance has
+    // been canonicalized.
+    if matches!(
+        provider,
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic
+    ) && catalog_model.eq_ignore_ascii_case("minimax-m3")
+    {
+        let pricing = pricing_for_model_and_usage(&catalog_model, usage)?;
+        return Some(cost_estimate_with_pricing(pricing, usage));
+    }
+
+    // Direct DeepSeek pricing carries an authoritative CNY row, and Sonnet 5
+    // has a recorded-time introductory window that a static catalog row cannot
+    // represent. These exact first-party routes intentionally override the
+    // catalog; no other provider/model text match is allowed to do so.
+    if direct_deepseek
+        || (provider == ApiProvider::Anthropic
+            && catalog_model.eq_ignore_ascii_case("claude-sonnet-5"))
+    {
+        let pricing = provider_owned_hand_pricing_at(provider, &catalog_model, recorded_at)?;
+        return Some(cost_estimate_with_pricing(pricing, usage));
+    }
+
+    if let Some(offering) =
+        crate::provider_lake::catalog_offering_for_model(provider, &catalog_model)
+        && OfferingPricing::from_catalog_offering(&offering).is_some()
+    {
+        if let Some(estimate) =
+            catalog_cost_estimate_for_route(provider, &catalog_model, &offering, usage)
+        {
+            return Some(estimate);
+        }
+        if catalog_gap_uses_documented_hand_price(provider, &catalog_model, &offering, usage) {
+            let pricing = provider_owned_hand_pricing_at(provider, &catalog_model, recorded_at)?;
+            return Some(cost_estimate_with_pricing(pricing, usage));
+        }
+        return None;
+    }
+
+    // A few first-party rows predate or intentionally omit a Models.dev entry
+    // (for example OpenAI API `gpt-5-codex`, Arcee `trinity-mini`, and MiniMax
+    // `minimax-m2.7`). Preserve only an explicit provider-owned allowlist here;
+    // a costless foreign/catalog route must remain unpriced.
+    let pricing = provider_owned_hand_pricing_at(provider, &catalog_model, recorded_at)?;
+    Some(cost_estimate_with_pricing(pricing, usage))
+}
+
+/// Recorded-time variant with explicit billing-surface provenance.
+#[must_use]
+pub(crate) fn calculate_turn_cost_estimate_for_route_at(
+    provider: ApiProvider,
+    model: &str,
+    billing_surface: Option<&str>,
+    usage: &Usage,
+    recorded_at: DateTime<Utc>,
+) -> Option<CostEstimate> {
+    if provider == ApiProvider::Stepfun {
+        let pricing = pricing_for_billing_surface(provider, model, billing_surface)?;
+        return Some(cost_estimate_with_pricing(pricing, usage));
+    }
+    if model.trim().eq_ignore_ascii_case(DEFAULT_STEPFUN_MODEL) {
+        return None;
+    }
+    calculate_turn_cost_estimate_for_provider_at(provider, model, usage, recorded_at)
+}
+
+fn provider_owned_hand_pricing_at(
+    provider: ApiProvider,
+    model: &str,
+    recorded_at: DateTime<Utc>,
+) -> Option<ModelPricing> {
+    let model_lower = model.trim().to_ascii_lowercase();
+    let provider_owns_row = match provider {
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic => {
+            matches!(
+                model_lower.as_str(),
+                "deepseek-v4-pro" | "deepseek-v4-flash"
+            )
+        }
+        ApiProvider::Openai => matches!(
+            model_lower.as_str(),
+            "gpt-5-codex"
+                | "gpt-5.3-codex"
+                | "gpt-5.5"
+                | "gpt-5.5-pro"
+                | "gpt-5.6"
+                | "gpt-5.6-sol"
+                | "gpt-5.6-terra"
+                | "gpt-5.6-luna"
+        ),
+        ApiProvider::Anthropic => matches!(
+            model_lower.as_str(),
+            "claude-opus-4-8"
+                | "claude-sonnet-4-6"
+                | "claude-haiku-4-5"
+                | "claude-fable-5"
+                | "claude-sonnet-5"
+        ),
+        ApiProvider::Zai => matches!(model_lower.as_str(), "glm-5.1" | "glm-5.2" | "glm-5-turbo"),
+        ApiProvider::Moonshot => {
+            matches!(model_lower.as_str(), "kimi-k2.6" | "kimi-k2.7-code")
+        }
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => {
+            matches!(model_lower.as_str(), "minimax-m3" | "minimax-m2.7")
+        }
+        ApiProvider::Arcee => {
+            matches!(
+                model_lower.as_str(),
+                "trinity-mini" | "trinity-large-thinking"
+            )
+        }
+        ApiProvider::Meta => model_lower == "muse-spark-1.1",
+        _ => false,
+    };
+    provider_owns_row
+        .then(|| pricing_for_model_at(&model_lower, recorded_at))
+        .flatten()
+}
+
+/// Whether a failed catalog estimate is missing only a class whose billing is
+/// explicitly documented by the provider-owned row. Keep this narrow: a hand
+/// row must not fill unrelated catalog gaps (for example an unpublished cache
+/// read rate) merely because the model name is known locally.
+fn catalog_gap_uses_documented_hand_price(
+    provider: ApiProvider,
+    model: &str,
+    offering: &codewhale_config::catalog::CatalogOffering,
+    usage: &Usage,
+) -> bool {
+    if provider != ApiProvider::Openai || !model.eq_ignore_ascii_case("gpt-5.5") {
+        return false;
+    }
+    let Some(pricing) = OfferingPricing::from_catalog_offering(offering) else {
+        return false;
+    };
+    let usage = token_usage_for_pricing(usage);
+    usage.cache_write > 0
+        && pricing.cache_write_per_million.is_none()
+        && (usage.input == 0 || pricing.input_per_million.is_some())
+        && (usage.output == 0 || pricing.output_per_million.is_some())
+        && (usage.cache_read == 0 || pricing.cache_read_per_million.is_some())
+}
+
+/// Estimate usage only from the exact provider offering. Missing prices for a
+/// used token class fail closed, except on the two documented first-party
+/// routes where cache tokens are explicitly billed at the input rate.
+fn catalog_cost_estimate_for_route(
+    provider: ApiProvider,
+    model: &str,
     offering: &codewhale_config::catalog::CatalogOffering,
     usage: &Usage,
 ) -> Option<CostEstimate> {
     let usage = token_usage_for_pricing(usage);
-    let pricing = OfferingPricing::from_catalog_offering(offering)?;
-    if usage.cache_write == 0 || pricing.cache_write_per_million.is_none() {
-        return None;
+    let mut pricing = OfferingPricing::from_catalog_offering(offering)?;
+    let model_lower = model.trim().to_ascii_lowercase();
+    let cache_uses_input_rate = matches!(
+        (provider, model_lower.as_str()),
+        (ApiProvider::Openai, "gpt-5.5-pro") | (ApiProvider::Arcee, "trinity-large-thinking")
+    );
+    if cache_uses_input_rate {
+        if usage.cache_read > 0 && pricing.cache_read_per_million.is_none() {
+            pricing.cache_read_per_million = pricing.input_per_million;
+        }
+        if usage.cache_write > 0 && pricing.cache_write_per_million.is_none() {
+            pricing.cache_write_per_million = pricing.input_per_million;
+        }
     }
 
-    pricing.estimate_cost(&usage).map(CostEstimate::usd_only)
+    let amount = pricing.estimate_cost(&usage)?;
+    match pricing.currency {
+        Currency::Usd => Some(CostEstimate::usd_only(amount)),
+        Currency::Cny => Some(CostEstimate {
+            usd: 0.0,
+            cny: amount,
+        }),
+        Currency::Other(_) => None,
+    }
 }
 
 /// Project provider-normalized turn usage into canonical billable token
@@ -488,6 +775,7 @@ fn calculate_turn_cost_from_usage_with_pricing(pricing: CurrencyPricing, usage: 
 /// when the model's pricing is unknown or the number of cache-hit tokens is
 /// zero (nothing to save).
 #[must_use]
+#[cfg(test)]
 pub fn calculate_cache_savings(model: &str, cache_hit_tokens: u32) -> Option<CostEstimate> {
     if cache_hit_tokens == 0 {
         return None;
@@ -513,16 +801,36 @@ pub fn calculate_cache_savings(model: &str, cache_hit_tokens: u32) -> Option<Cos
     })
 }
 
+/// Estimate cache savings from the exact provider route by comparing the same
+/// tokens as cache hits and ordinary input. Unknown or costless routes remain
+/// unavailable instead of inheriting a model-only rate.
 #[must_use]
 pub fn calculate_cache_savings_for_provider(
     provider: ApiProvider,
     model: &str,
     cache_hit_tokens: u32,
 ) -> Option<CostEstimate> {
-    if provider == ApiProvider::OpenaiCodex {
+    if cache_hit_tokens == 0 {
         return None;
     }
-    calculate_cache_savings(model, cache_hit_tokens)
+    let cached = Usage {
+        input_tokens: cache_hit_tokens,
+        prompt_cache_hit_tokens: Some(cache_hit_tokens),
+        prompt_cache_miss_tokens: Some(0),
+        ..Usage::default()
+    };
+    let uncached = Usage {
+        input_tokens: cache_hit_tokens,
+        prompt_cache_hit_tokens: Some(0),
+        prompt_cache_miss_tokens: Some(cache_hit_tokens),
+        ..Usage::default()
+    };
+    let cached = calculate_turn_cost_estimate_for_provider(provider, model, &cached)?;
+    let uncached = calculate_turn_cost_estimate_for_provider(provider, model, &uncached)?;
+    Some(CostEstimate {
+        usd: uncached.usd - cached.usd,
+        cny: uncached.cny - cached.cny,
+    })
 }
 
 /// Format a cost amount for compact display in the chosen currency.
@@ -566,6 +874,170 @@ mod tests {
     }
 
     #[test]
+    fn stepfun_billing_surface_keeps_payg_separate_from_step_plan() {
+        for base_url in [
+            "https://api.stepfun.ai",
+            "https://api.stepfun.ai/",
+            "https://api.stepfun.ai/v1",
+            "https://API.STEPFUN.AI/v1/",
+        ] {
+            assert_eq!(
+                billing_surface_for_route(ApiProvider::Stepfun, Some(base_url)),
+                Some(STEPFUN_PAYG_BILLING_SURFACE),
+                "{base_url}"
+            );
+        }
+        for base_url in [
+            "https://api.stepfun.ai/step_plan",
+            "https://api.stepfun.ai/step_plan/v1/",
+            "https://api.stepfun.com/step_plan/v1",
+        ] {
+            assert_eq!(
+                billing_surface_for_route(ApiProvider::Stepfun, Some(base_url)),
+                Some(STEPFUN_PLAN_BILLING_SURFACE),
+                "{base_url}"
+            );
+        }
+        for base_url in [
+            "http://api.stepfun.ai/v1",
+            "https://token@api.stepfun.ai/v1",
+            "https://api.stepfun.ai/v1?account=other",
+            "https://api.stepfun.ai/STEP_PLAN/v1",
+            "https://stepfun.example/v1",
+        ] {
+            assert_eq!(
+                billing_surface_for_route(ApiProvider::Stepfun, Some(base_url)),
+                None,
+                "{base_url}"
+            );
+        }
+        assert_eq!(
+            billing_surface_for_route(ApiProvider::Openrouter, Some(DEFAULT_STEPFUN_BASE_URL)),
+            None
+        );
+
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            prompt_cache_hit_tokens: Some(250_000),
+            ..Default::default()
+        };
+        let payg = calculate_turn_cost_estimate_for_billing_surface(
+            ApiProvider::Stepfun,
+            DEFAULT_STEPFUN_MODEL,
+            Some(STEPFUN_PAYG_BILLING_SURFACE),
+            &usage,
+        )
+        .expect("standard StepFun API has an authoritative token price");
+        assert!((payg.usd - 0.735).abs() < 1e-12);
+        assert_eq!(payg.cny, 0.0);
+
+        // Provider/model-only callers (background compaction, sub-agents, and
+        // legacy records) cannot distinguish PAYG from Step Plan and must not
+        // add either route to spend or savings totals.
+        assert!(
+            calculate_turn_cost_estimate_for_provider(
+                ApiProvider::Stepfun,
+                DEFAULT_STEPFUN_MODEL,
+                &usage,
+            )
+            .is_none()
+        );
+        assert!(
+            calculate_turn_cost_estimate_for_provider_at(
+                ApiProvider::Stepfun,
+                DEFAULT_STEPFUN_MODEL,
+                &usage,
+                Utc::now(),
+            )
+            .is_none()
+        );
+        assert!(
+            calculate_cache_savings_for_provider(
+                ApiProvider::Stepfun,
+                DEFAULT_STEPFUN_MODEL,
+                250_000,
+            )
+            .is_none()
+        );
+        assert!(!has_pricing_for_provider(
+            ApiProvider::Stepfun,
+            DEFAULT_STEPFUN_MODEL
+        ));
+
+        for surface in [None, Some(STEPFUN_PLAN_BILLING_SURFACE)] {
+            assert!(
+                calculate_turn_cost_estimate_for_billing_surface(
+                    ApiProvider::Stepfun,
+                    DEFAULT_STEPFUN_MODEL,
+                    surface,
+                    &usage,
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            calculate_turn_cost_estimate_for_billing_surface(
+                ApiProvider::Stepfun,
+                "step-3.5-flash",
+                Some(STEPFUN_PAYG_BILLING_SURFACE),
+                &usage,
+            )
+            .is_none()
+        );
+        for provider in [
+            ApiProvider::Openrouter,
+            ApiProvider::Ollama,
+            ApiProvider::Custom,
+        ] {
+            assert!(
+                calculate_turn_cost_estimate_for_billing_surface(
+                    provider,
+                    DEFAULT_STEPFUN_MODEL,
+                    Some(STEPFUN_PAYG_BILLING_SURFACE),
+                    &usage,
+                )
+                .is_none(),
+                "{provider:?}"
+            );
+            assert!(
+                calculate_turn_cost_estimate_for_provider(provider, DEFAULT_STEPFUN_MODEL, &usage,)
+                    .is_none(),
+                "{provider:?}"
+            );
+            assert!(
+                calculate_turn_cost_estimate_for_provider_at(
+                    provider,
+                    DEFAULT_STEPFUN_MODEL,
+                    &usage,
+                    Utc::now(),
+                )
+                .is_none(),
+                "{provider:?}"
+            );
+            assert!(
+                calculate_cache_savings_for_provider(provider, DEFAULT_STEPFUN_MODEL, 250_000,)
+                    .is_none(),
+                "{provider:?}"
+            );
+            assert!(
+                !has_pricing_for_provider(provider, DEFAULT_STEPFUN_MODEL),
+                "{provider:?}"
+            );
+        }
+
+        let recorded = calculate_turn_cost_estimate_for_route_at(
+            ApiProvider::Stepfun,
+            DEFAULT_STEPFUN_MODEL,
+            Some(STEPFUN_PAYG_BILLING_SURFACE),
+            &usage,
+            Utc::now(),
+        )
+        .expect("recorded PAYG route retains provider-scoped pricing");
+        assert_eq!(recorded, payg);
+    }
+
+    #[test]
     fn catalog_sourced_models_have_usd_pricing() {
         for (model, input, output) in [
             ("minimax-m2.7", 0.3, 1.2),
@@ -598,6 +1070,27 @@ mod tests {
             assert_eq!(pricing.usd.output_per_million, output);
         }
         assert!(calculate_cache_savings("MiniMax-M3", 1).is_none());
+    }
+
+    #[test]
+    fn provider_scoped_minimax_m3_keeps_usage_tiers_for_both_wire_protocols() {
+        for provider in [ApiProvider::Minimax, ApiProvider::MinimaxAnthropic] {
+            for (input_tokens, input_rate) in [(512_000, 0.30), (512_001, 0.60)] {
+                let usage = Usage {
+                    input_tokens,
+                    ..Usage::default()
+                };
+                let estimate = calculate_turn_cost_estimate_for_provider_at(
+                    provider,
+                    "MiniMax-M3",
+                    &usage,
+                    Utc::now(),
+                )
+                .expect("direct MiniMax route has authoritative pricing");
+                let expected = f64::from(input_tokens) / 1_000_000.0 * input_rate;
+                assert!((estimate.usd - expected).abs() < 1e-12, "{provider:?}");
+            }
+        }
     }
 
     #[test]
@@ -739,10 +1232,189 @@ mod tests {
             ..Default::default()
         };
 
-        let estimate =
-            catalog_cost_estimate_from_offering(&offering, &usage).expect("catalog cost estimate");
+        let estimate = catalog_cost_estimate_for_route(
+            ApiProvider::Anthropic,
+            "catalog-priced-model",
+            &offering,
+            &usage,
+        )
+        .expect("catalog cost estimate");
         assert!((estimate.usd - 0.000_382).abs() < 1e-15);
         assert_eq!(estimate.cny, 0.0);
+    }
+
+    #[test]
+    fn recorded_time_provider_cost_keeps_catalog_cache_write_tier() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            prompt_cache_hit_tokens: Some(0),
+            prompt_cache_miss_tokens: Some(0),
+            prompt_cache_write_tokens: Some(1_000_000),
+            ..Default::default()
+        };
+
+        let estimate = calculate_turn_cost_estimate_for_provider_at(
+            ApiProvider::Openrouter,
+            "qwen/qwen3.7-plus",
+            &usage,
+            Utc::now(),
+        )
+        .expect("provider catalog write price");
+
+        assert!((estimate.usd - 0.40).abs() < f64::EPSILON);
+        assert_eq!(estimate.cny, 0.0);
+    }
+
+    #[test]
+    fn recorded_time_provider_cost_rejects_foreign_model_ids() {
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            ..Default::default()
+        };
+
+        assert!(
+            calculate_turn_cost_estimate_for_provider_at(
+                ApiProvider::Ollama,
+                "gpt-5.5",
+                &usage,
+                Utc::now(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_cost_keeps_owned_hand_price_without_catalog_offering() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            ..Default::default()
+        };
+        assert!(
+            crate::provider_lake::catalog_offering_for_model(ApiProvider::Openai, "gpt-5-codex")
+                .is_none(),
+            "regression fixture must exercise the hand-price fallback"
+        );
+
+        let estimate = calculate_turn_cost_estimate_for_provider_at(
+            ApiProvider::Openai,
+            "gpt-5-codex",
+            &usage,
+            Utc::now(),
+        )
+        .expect("OpenAI API owns the hand-priced model");
+
+        assert!((estimate.usd - 1.25).abs() < f64::EPSILON);
+        assert_eq!(estimate.cny, 0.0);
+        assert!(has_pricing_for_provider(ApiProvider::Openai, "gpt-5-codex"));
+    }
+
+    #[test]
+    fn provider_hand_price_fills_catalog_missing_used_class() {
+        let offering =
+            crate::provider_lake::catalog_offering_for_model(ApiProvider::Openai, "gpt-5.5")
+                .expect("bundled OpenAI route");
+        let catalog_pricing =
+            OfferingPricing::from_catalog_offering(&offering).expect("catalog pricing");
+        assert!(catalog_pricing.cache_write_per_million.is_none());
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            prompt_cache_miss_tokens: Some(0),
+            prompt_cache_write_tokens: Some(1_000_000),
+            ..Default::default()
+        };
+
+        let estimate = calculate_turn_cost_estimate_for_provider_at(
+            ApiProvider::Openai,
+            "gpt-5.5",
+            &usage,
+            Utc::now(),
+        )
+        .expect("provider hand price supplies the missing cache-write class");
+
+        assert!((estimate.usd - 5.0).abs() < f64::EPSILON);
+        assert_eq!(estimate.cny, 0.0);
+    }
+
+    #[test]
+    fn provider_cost_does_not_fabricate_price_for_costless_catalog_route() {
+        let offering = crate::provider_lake::catalog_offering_for_model(
+            ApiProvider::Openai,
+            "deepseek-v4-pro",
+        )
+        .expect("bundled OpenAI-compatible route");
+        assert!(OfferingPricing::from_catalog_offering(&offering).is_none());
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            ..Default::default()
+        };
+
+        assert!(
+            calculate_turn_cost_estimate_for_provider_at(
+                ApiProvider::Openai,
+                "deepseek-v4-pro",
+                &usage,
+                Utc::now(),
+            )
+            .is_none()
+        );
+        assert!(
+            calculate_turn_cost_estimate_for_provider(
+                ApiProvider::Openai,
+                "deepseek-v4-pro",
+                &usage,
+            )
+            .is_none()
+        );
+        assert!(!has_pricing_for_provider(
+            ApiProvider::Openai,
+            "deepseek-v4-pro"
+        ));
+        assert!(
+            calculate_cache_savings_for_provider(
+                ApiProvider::Openai,
+                "deepseek-v4-pro",
+                1_000_000,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn recorded_time_provider_cost_bounds_deepseek_compatibility_aliases() {
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            ..Default::default()
+        };
+        let before_retirement: DateTime<Utc> =
+            "2026-07-24T15:58:59Z".parse().expect("pre-retirement time");
+        let at_retirement: DateTime<Utc> = DEEPSEEK_ALIAS_RETIREMENT_UTC
+            .parse()
+            .expect("retirement time");
+
+        assert!(
+            calculate_turn_cost_estimate_for_provider_at(
+                ApiProvider::Deepseek,
+                "deepseek-chat",
+                &usage,
+                before_retirement,
+            )
+            .is_some()
+        );
+        assert!(
+            calculate_turn_cost_estimate_for_provider_at(
+                ApiProvider::Deepseek,
+                "deepseek-reasoner",
+                &usage,
+                at_retirement,
+            )
+            .is_none()
+        );
     }
 
     #[test]

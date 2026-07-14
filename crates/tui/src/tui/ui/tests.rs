@@ -4631,6 +4631,8 @@ fn turn_liveness_watchdog_clears_stale_dispatch() {
     app.dispatch_started_at =
         Some(Instant::now() - DISPATCH_WATCHDOG_TIMEOUT - Duration::from_millis(1));
     app.turn_started_at = Some(Instant::now());
+    app.pending_turn_route = Some((ApiProvider::Deepseek, "pending-model".to_string(), false));
+    app.suppress_stream_events_until_turn_complete = true;
 
     let recovered = reconcile_turn_liveness(&mut app, Instant::now(), false);
 
@@ -4638,6 +4640,9 @@ fn turn_liveness_watchdog_clears_stale_dispatch() {
     assert!(!app.is_loading);
     assert!(app.dispatch_started_at.is_none());
     assert!(app.turn_started_at.is_none());
+    assert!(app.pending_turn_route.is_none());
+    assert!(app.active_turn.is_none());
+    assert!(!app.suppress_stream_events_until_turn_complete);
     let toast = app.status_toasts.back().expect("watchdog toast");
     assert_eq!(toast.level, StatusToastLevel::Error);
     assert!(toast.text.contains("Turn dispatch timed out"));
@@ -4836,6 +4841,16 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
     app.turn_started_at = Some(now - turn_stall_watchdog_timeout(&app) - Duration::from_millis(1));
     app.streaming_message_index = Some(0);
     app.user_scrolled_during_stream = true;
+    app.pending_turn_route = Some((ApiProvider::Deepseek, "pending-model".to_string(), false));
+    app.active_turn = Some(crate::tui::app::ActiveTurnMetadata {
+        turn_id: "stale-turn-id".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Openai,
+            model: "gpt-5.5".to_string(),
+            auto_model: false,
+        }),
+    });
 
     let recovered = reconcile_turn_liveness(&mut app, now, false);
 
@@ -4848,6 +4863,9 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
     assert!(app.streaming_message_index.is_none());
     assert!(app.streaming_thinking_active_entry.is_none());
     assert!(!app.user_scrolled_during_stream);
+    assert!(app.pending_turn_route.is_none());
+    assert!(app.active_turn.is_none());
+    assert!(!app.suppress_stream_events_until_turn_complete);
     let toast = app.status_toasts.back().expect("stall toast");
     assert_eq!(toast.level, StatusToastLevel::Error);
     assert!(toast.text.contains("Turn stalled"));
@@ -4862,6 +4880,16 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
     app.turn_started_at = Some(Instant::now());
     app.dispatch_started_at = Some(Instant::now());
     app.user_scrolled_during_stream = true;
+    app.pending_turn_route = Some((ApiProvider::Deepseek, "pending-model".to_string(), false));
+    app.active_turn = Some(crate::tui::app::ActiveTurnMetadata {
+        turn_id: "turn_dead".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Openai,
+            model: "gpt-5.5".to_string(),
+            auto_model: false,
+        }),
+    });
     let thinking_idx = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     crate::tui::streaming_thinking::append(&mut app, thinking_idx, "partial reasoning");
     app.push_pending_steer(crate::tui::app::QueuedMessage::new(
@@ -4879,6 +4907,9 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
     assert!(app.turn_started_at.is_none());
     assert!(app.streaming_thinking_active_entry.is_none());
     assert!(!app.user_scrolled_during_stream);
+    assert!(app.pending_turn_route.is_none());
+    assert!(app.active_turn.is_none());
+    assert!(!app.suppress_stream_events_until_turn_complete);
     assert_eq!(app.queued_message_count(), 1);
     assert_eq!(
         app.queued_messages
@@ -4907,6 +4938,32 @@ fn engine_event_disconnect_while_idle_is_noop() {
     assert!(!recovered);
     assert!(app.history.is_empty());
     assert!(app.status_toasts.is_empty());
+}
+
+#[test]
+fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
+    let mut app = create_test_app();
+    app.suppress_stream_events_until_turn_complete = true;
+    app.active_turn = Some(crate::tui::app::ActiveTurnMetadata {
+        turn_id: "cancelled-turn".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Openai,
+            model: "gpt-5.5".to_string(),
+            auto_model: false,
+        }),
+    });
+
+    let recovered = recover_engine_event_disconnect(&mut app);
+
+    assert!(recovered);
+    assert!(app.active_turn.is_none());
+    assert!(!app.suppress_stream_events_until_turn_complete);
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::Error { message, .. }
+            if message.contains("Engine stopped before completing the turn")
+    )));
 }
 
 #[test]
@@ -7140,6 +7197,76 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
             message: "Request cancelled".to_string(),
         }
     ));
+}
+
+#[test]
+fn turn_started_route_is_captured_before_cancel_suppression() {
+    let mut app = create_test_app();
+    app.suppress_stream_events_until_turn_complete = true;
+    app.ocean_completion_started_at = Some(Instant::now());
+    app.pending_turn_route = Some((ApiProvider::Deepseek, "pending-model".to_string(), false));
+    let created_at = chrono::Utc::now();
+    let event = EngineEvent::TurnStarted {
+        turn_id: "turn_cancel_race".to_string(),
+        created_at,
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Openai,
+            model: "gpt-5.5".to_string(),
+            auto_model: true,
+        }),
+    };
+
+    capture_turn_started_metadata(&mut app, &event);
+
+    let active_turn = app.active_turn.as_ref().expect("captured turn");
+    assert_eq!(active_turn.turn_id, "turn_cancel_race");
+    assert_eq!(active_turn.created_at, created_at);
+    let route = active_turn.route.as_ref().expect("captured route");
+    assert_eq!(route.provider, ApiProvider::Openai);
+    assert_eq!(route.model, "gpt-5.5");
+    assert!(route.auto_model);
+    assert!(app.pending_turn_route.is_none());
+    assert!(app.ocean_completion_started_at.is_none());
+
+    let observer = turn_end_observer_metadata(Some(active_turn));
+    assert_eq!(observer.turn_id.as_ref(), "turn_cancel_race");
+    assert_eq!(observer.created_at, created_at);
+    assert_eq!(observer.route, Some(route));
+}
+
+#[test]
+fn engine_error_health_accounting_uses_active_turn_route() {
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
+    app.model = "current-model".to_string();
+    let event = EngineEvent::TurnStarted {
+        turn_id: "routed-turn".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Openai,
+            model: "gpt-5.5".to_string(),
+            auto_model: true,
+        }),
+    };
+    capture_turn_started_metadata(&mut app, &event);
+
+    let route = error_health_route(&app, app.api_provider);
+
+    assert_eq!(route, (ApiProvider::Openai, "gpt-5.5".to_string()));
+}
+
+#[test]
+fn completion_only_hook_metadata_is_synthetic_and_non_model() {
+    let observed_after = chrono::Utc::now();
+    let first = turn_end_observer_metadata(None);
+    let second = turn_end_observer_metadata(None);
+
+    assert!(first.turn_id.starts_with("lifecycle_"));
+    assert!(second.turn_id.starts_with("lifecycle_"));
+    assert_ne!(first.turn_id, second.turn_id);
+    assert!(first.created_at >= observed_after);
+    assert!(first.route.is_none());
+    assert!(second.route.is_none());
 }
 
 #[test]

@@ -238,6 +238,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         duration_ms: Some(0),
         usage: None,
         effective_provider: None,
+        effective_billing_surface: None,
         effective_model: None,
         error: None,
         item_ids: vec![
@@ -1705,6 +1706,8 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                     let _ = tx_event
                         .send(EngineEvent::TurnStarted {
                             turn_id: "mock_lifecycle".to_string(),
+                            created_at: chrono::Utc::now(),
+                            route: None,
                         })
                         .await;
                     let _ = tx_event
@@ -1879,6 +1882,8 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
         let _ = tx_event
             .send(EngineEvent::TurnStarted {
                 turn_id: "mock_cursor".to_string(),
+                created_at: chrono::Utc::now(),
+                route: None,
             })
             .await;
         let _ = tx_event
@@ -2001,6 +2006,8 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
         let _ = tx_event
             .send(EngineEvent::TurnStarted {
                 turn_id: "engine_turn_api".to_string(),
+                created_at: chrono::Utc::now(),
+                route: None,
             })
             .await;
         let _ = tx_event
@@ -2218,6 +2225,8 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
         let _ = tx_event
             .send(EngineEvent::TurnStarted {
                 turn_id: "mock_stream".to_string(),
+                created_at: chrono::Utc::now(),
+                route: None,
             })
             .await;
         let _ = tx_event
@@ -2812,6 +2821,8 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
         let _ = tx_event
             .send(EngineEvent::TurnStarted {
                 turn_id: "mock_active_session_save".to_string(),
+                created_at: chrono::Utc::now(),
+                route: None,
             })
             .await;
         let _ = tx_event

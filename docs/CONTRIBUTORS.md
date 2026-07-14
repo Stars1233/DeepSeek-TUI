@@ -85,6 +85,9 @@ in several community provider and bridge contributions with release credit.
 - **[pkeging](https://github.com/pkeging)** — WeCom Bridge deployment and
   security documentation, including the approval-timeout configuration surface
   (#3640, harvested)
+- **[Wenshan Deng / findshan](https://github.com/findshan)** — original offline
+  token/cache/cost scorecard and regression gate (#3388), extended with
+  provider-aware provenance in #4335
 - **[buko](https://github.com/buko)** — precise Ctrl+O external-editor freeze
   reproduction that shaped the terminal input-pump fix (#3657)
 - **[cyq1017](https://github.com/cyq1017)** — sub-agent progress-event

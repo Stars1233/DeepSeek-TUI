@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +22,7 @@ use crate::config::{
 };
 use crate::config_ui::ConfigUiMode;
 use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
+use crate::core::events::TurnRoute;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
 use crate::localization::{Locale, MessageId, resolve_locale, tr};
 use crate::models::{Message, SystemPrompt, Tool};
@@ -49,6 +51,17 @@ use crate::tui::transcript::TranscriptViewCache;
 use crate::tui::views::ViewStack;
 
 // === Types ===
+
+/// Lifecycle identity retained until the matching `TurnComplete` arrives.
+///
+/// This survives local cancellation clearing the visible runtime status, so
+/// observer records still carry a stable id, start time, and effective route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTurnMetadata {
+    pub turn_id: String,
+    pub created_at: DateTime<Utc>,
+    pub route: Option<TurnRoute>,
+}
 
 /// State machine for onboarding new users.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1762,9 +1775,13 @@ pub struct App {
     pub last_effective_model: Option<String>,
     /// Provider that actually served the latest auto-routed turn.
     pub last_effective_provider: Option<ApiProvider>,
-    /// Route selected for the in-flight turn. Consumed by `TurnComplete` to
-    /// annotate `/cache` telemetry without widening the engine event surface.
+    /// Route selected for the next turn, retained for in-flight UI details
+    /// until the engine confirms the authoritative `TurnStarted` route.
     pub pending_turn_route: Option<(ApiProvider, String, bool)>,
+    /// Authoritative lifecycle metadata attached to the most recent
+    /// `TurnStarted`. Kept separate from `pending_turn_route` so a preceding
+    /// compaction completion cannot consume the next model turn's route.
+    pub active_turn: Option<ActiveTurnMetadata>,
     /// Current API provider (mirrors `Config::api_provider`).
     /// Updated by `/provider` switches so the UI/commands can read the
     /// active backend without re-deriving it from the live config.
@@ -2525,6 +2542,7 @@ impl App {
         self.session.last_reasoning_replay_tokens = None;
         self.session.turn_cache_history.clear();
         self.pending_turn_route = None;
+        self.active_turn = None;
         self.last_pinned_prefix_hash = None;
     }
 
@@ -2974,6 +2992,7 @@ impl App {
             last_effective_model: None,
             last_effective_provider: None,
             pending_turn_route: None,
+            active_turn: None,
             api_provider: provider,
             provider_chain,
             provider_readiness,

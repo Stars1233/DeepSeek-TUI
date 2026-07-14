@@ -336,7 +336,7 @@ fn control_zones(
     stopping: bool,
     opened: bool,
 ) -> (Option<u16>, Option<u16>, Option<u16>, Option<u16>) {
-    if stopping || (!row.primary_action.is_some() && !row.stop_action.is_some() && !armed) {
+    if stopping || (row.primary_action.is_none() && row.stop_action.is_none() && !armed) {
         return (None, None, None, None);
     }
     let width = content_area.width;

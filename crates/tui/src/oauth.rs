@@ -431,6 +431,7 @@ mod tests {
 
     #[test]
     fn missing_auth_message_mentions_oauth_checked_locations() {
+        let _lock = crate::test_support::lock_test_env();
         let message = missing_auth_message();
 
         assert!(message.contains("OpenAI Codex OAuth credentials not found"));

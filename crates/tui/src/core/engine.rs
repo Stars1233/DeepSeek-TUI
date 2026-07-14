@@ -66,7 +66,7 @@ use crate::working_set::WorkingSet;
 #[cfg(test)]
 use super::authority::agent_approval_mode_for_turn;
 use super::authority::{TurnAuthority, effective_input_policy, shell_policy_for_mode};
-use super::events::{Event, TurnOutcomeStatus};
+use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
     Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
 };
@@ -1184,6 +1184,8 @@ impl Engine {
             .tx_event
             .send(Event::TurnStarted {
                 turn_id: turn_id.clone(),
+                created_at: chrono::Utc::now(),
+                route: None,
             })
             .await;
 
@@ -2466,6 +2468,11 @@ impl Engine {
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
         self.turn_counter = self.turn_counter.saturating_add(1);
+        let turn_route = TurnRoute {
+            provider: provider.unwrap_or(self.api_provider),
+            model: model.clone(),
+            auto_model,
+        };
 
         // Emit turn started event IMMEDIATELY so the UI knows the turn is
         // active. The snapshot below can take 30+ seconds on slow filesystems
@@ -2474,6 +2481,8 @@ impl Engine {
             .tx_event
             .send(Event::TurnStarted {
                 turn_id: turn.id.clone(),
+                created_at: chrono::Utc::now(),
+                route: Some(turn_route),
             })
             .await;
 

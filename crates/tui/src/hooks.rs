@@ -14,6 +14,7 @@
 // Note: anyhow is available if needed for future error handling
 #[allow(unused_imports)]
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -613,7 +614,12 @@ pub struct TurnEndTotals {
 /// Input used to build the structured `turn_end` observer payload.
 pub struct TurnEndPayloadInput<'a> {
     pub context: &'a HookContext,
-    pub turn_id: Option<&'a str>,
+    pub created_at: DateTime<Utc>,
+    pub model_backed: bool,
+    pub provider: Option<&'a str>,
+    pub billing_surface: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub turn_id: &'a str,
     pub status: &'a str,
     pub error: Option<&'a str>,
     pub duration: Duration,
@@ -1291,7 +1297,11 @@ pub fn turn_end_payload(input: TurnEndPayloadInput<'_>) -> serde_json::Value {
         "session_id": input.context.session_id.as_deref(),
         "workspace": input.context.workspace.as_ref().map(|path| path.display().to_string()),
         "mode": input.context.mode.as_deref(),
-        "model": input.context.model.as_deref(),
+        "created_at": input.created_at.to_rfc3339(),
+        "model_backed": input.model_backed,
+        "provider": input.provider,
+        "billing_surface": input.billing_surface,
+        "model": input.model.or(input.context.model.as_deref()),
         "turn_id": input.turn_id,
         "status": input.status,
         "error": input.error,
@@ -1576,7 +1586,12 @@ NOEQUAL line dropped
 
         let payload = super::turn_end_payload(TurnEndPayloadInput {
             context: &context,
-            turn_id: Some("turn_123"),
+            created_at: "2026-07-12T10:30:00Z".parse().expect("timestamp"),
+            model_backed: true,
+            provider: Some("deepseek"),
+            billing_surface: Some("test-payg"),
+            model: Some("deepseek-v4-pro"),
+            turn_id: "turn_123",
             status: "completed",
             error: None,
             duration: Duration::from_millis(321),
@@ -1595,7 +1610,12 @@ NOEQUAL line dropped
         assert_eq!(payload["session_id"], "sess_test");
         assert_eq!(payload["workspace"], "/tmp/codewhale");
         assert_eq!(payload["mode"], "agent");
-        assert_eq!(payload["model"], "deepseek-v4");
+        assert_eq!(payload["created_at"], "2026-07-12T10:30:00+00:00");
+        assert_eq!(payload["model_backed"], true);
+        assert_eq!(payload["provider"], "deepseek");
+        assert_eq!(payload["billing_surface"], "test-payg");
+        assert!(payload.get("base_url").is_none());
+        assert_eq!(payload["model"], "deepseek-v4-pro");
         assert_eq!(payload["turn_id"], "turn_123");
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["error"], serde_json::Value::Null);
@@ -1883,7 +1903,12 @@ printf '%s\n' '{{"text":"stdout is not a mutation contract"}}'
         let context = submit_context(&dir).with_tokens(15);
         let payload = super::turn_end_payload(TurnEndPayloadInput {
             context: &context,
-            turn_id: Some("turn_observed"),
+            created_at: "2026-07-12T10:30:00Z".parse().expect("timestamp"),
+            model_backed: true,
+            provider: Some("openai"),
+            billing_surface: None,
+            model: Some("gpt-5.5"),
+            turn_id: "turn_observed",
             status: "completed",
             error: None,
             duration: Duration::from_millis(7),
@@ -1912,6 +1937,9 @@ printf '%s\n' '{{"text":"stdout is not a mutation contract"}}'
             serde_json::from_str(&std::fs::read_to_string(out).expect("payload written"))
                 .expect("valid JSON payload");
         assert_eq!(captured["event"], "turn_end");
+        assert_eq!(captured["created_at"], "2026-07-12T10:30:00+00:00");
+        assert_eq!(captured["provider"], "openai");
+        assert_eq!(captured["model"], "gpt-5.5");
         assert_eq!(captured["turn_id"], "turn_observed");
         assert_eq!(captured["totals"]["input_tokens"], 12);
         assert_eq!(captured["totals"]["output_tokens"], 3);

@@ -927,6 +927,9 @@ fn truncate_retained_block(label: &str, content: &mut String, max_chars: usize) 
     true
 }
 
+// A match guard cannot mutably borrow `content`; keeping the mutation inside
+// the arm updates both retained representations together without indirection.
+#[allow(clippy::collapsible_match)]
 fn sanitize_retained_messages(mut messages: Vec<Message>) -> Vec<Message> {
     for message in &mut messages {
         for block in &mut message.content {

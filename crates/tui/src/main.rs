@@ -810,7 +810,12 @@ struct SessionDiagnosticsArgs {
 #[derive(Args, Debug, Clone)]
 struct ScorecardArgs {
     /// JSON file with the recorded turns to score: an array of
-    /// `{ "turn_id", "model", "usage": {…} }` (the shape the TurnEnd hook emits).
+    /// `{ "turn_id", "provider", "model", "billing_surface", "usage": {…} }`.
+    /// `turn_end` hooks emit this route provenance plus `created_at`; persisted
+    /// runtime exports may instead use `id`, `effective_provider`,
+    /// `effective_model`, and `effective_billing_surface`.
+    /// Shell-only hook rows marked `model_backed: false` are excluded. Legacy
+    /// rows without provider remain readable but their cost is unavailable.
     #[arg(long, value_name = "FILE")]
     input: PathBuf,
     /// Optional baseline scorecard-metrics JSON to compare against. When set,
@@ -1664,22 +1669,14 @@ fn run_eval(args: EvalArgs) -> Result<()> {
 /// when a baseline is supplied and a metric regresses past the threshold, so it
 /// can be wired as a release gate (#3388).
 fn run_scorecard(args: ScorecardArgs) -> Result<()> {
-    use crate::scorecard::{RecordedTurn, Scorecard, ScorecardMetrics, TurnInput};
+    use crate::scorecard::{RecordedTurn, Scorecard, ScorecardMetrics};
 
     let raw = std::fs::read_to_string(&args.input)
         .with_context(|| format!("failed to read scorecard input {}", args.input.display()))?;
     let recorded: Vec<RecordedTurn> = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse scorecard input {}", args.input.display()))?;
 
-    let inputs: Vec<TurnInput<'_>> = recorded
-        .iter()
-        .map(|r| TurnInput {
-            turn_id: r.turn_id.clone(),
-            model: r.model.clone(),
-            usage: &r.usage,
-        })
-        .collect();
-    let card = Scorecard::from_turns(&inputs);
+    let card = Scorecard::from_recorded_turns(&recorded);
 
     let regressions = match &args.baseline {
         Some(path) => {
