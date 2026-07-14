@@ -1777,6 +1777,36 @@ fn task_mode_name(mode: TaskMode) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExplicitGateVerdict {
+    Approve,
+    Reject,
+}
+
+/// Recognize only a standalone verdict token on the first non-empty line.
+///
+/// This deliberately does not interpret prose, Markdown bullets, or verdict
+/// words later in an otherwise successful child response. Existing workflows
+/// whose children return ordinary prose therefore remain pass-on-success,
+/// while review-style children can fail closed with `BLOCK` or `FAIL`.
+fn explicit_gate_verdict(output: Option<&str>) -> Option<ExplicitGateVerdict> {
+    let first_meaningful = output?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    if first_meaningful.eq_ignore_ascii_case("APPROVE")
+        || first_meaningful.eq_ignore_ascii_case("PASS")
+    {
+        Some(ExplicitGateVerdict::Approve)
+    } else if first_meaningful.eq_ignore_ascii_case("BLOCK")
+        || first_meaningful.eq_ignore_ascii_case("FAIL")
+    {
+        Some(ExplicitGateVerdict::Reject)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeTaskRecord {
     agent_id: String,
@@ -2030,7 +2060,16 @@ impl SubAgentWorkflowDriver {
         }
 
         let outcome = match record.status {
-            IrWorkflowRunStatus::Succeeded => GateOutcome::Pass,
+            IrWorkflowRunStatus::Succeeded => {
+                match explicit_gate_verdict(record.output.as_deref()) {
+                    Some(ExplicitGateVerdict::Reject) => GateOutcome::Fail {
+                        reason: record.output.clone().unwrap_or_else(|| {
+                            "child returned an explicit rejection verdict".into()
+                        }),
+                    },
+                    Some(ExplicitGateVerdict::Approve) | None => GateOutcome::Pass,
+                }
+            }
             _ => GateOutcome::Fail {
                 reason: record.output.clone().unwrap_or_else(|| {
                     format!("task {} ended as {:?}", record.agent_id, record.status)
@@ -4143,6 +4182,142 @@ reviewer = "reviewer"
             "{:?}",
             run.events
         );
+    }
+
+    #[test]
+    fn explicit_gate_verdict_only_reads_first_standalone_token() {
+        assert_eq!(
+            explicit_gate_verdict(Some("\n  APPROVE  \nreview complete")),
+            Some(ExplicitGateVerdict::Approve)
+        );
+        assert_eq!(
+            explicit_gate_verdict(Some("\nFAIL\nmissing receipt")),
+            Some(ExplicitGateVerdict::Reject)
+        );
+        assert_eq!(
+            explicit_gate_verdict(Some("Review result: BLOCK")),
+            None,
+            "prose remains backward-compatible success output"
+        );
+        assert_eq!(
+            explicit_gate_verdict(Some("review notes\nBLOCK")),
+            None,
+            "later verdict words must not override the first meaningful line"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_runtime_gate_honors_explicit_reviewer_verdicts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let runtime = SubAgentRuntime::new(
+            stub_client(),
+            "deepseek-v4-flash".to_string(),
+            ctx,
+            true,
+            None,
+            manager.clone(),
+        );
+        let state = WorkflowWorkspaceState::open(tmp.path());
+        let run_id = "workflow_explicit_verdict".to_string();
+        let gates = vec![GateSpec {
+            id: "review-findings".to_string(),
+            role: "reviewer".to_string(),
+            on: GateOn::RoleComplete,
+            gate: GateKind::Review,
+            on_fail: codewhale_workflow::GateOnFail::Block,
+            blocks_role: Some("verifier".to_string()),
+            max_retries: 0,
+            artifact_kind: Some("review_report".to_string()),
+        }];
+        let spec = WorkflowSpec {
+            id: Some("explicit-verdict-fixture".to_string()),
+            goal: "honor reviewer verdict".to_string(),
+            description: None,
+            budget: BudgetSpec::default(),
+            permissions: Default::default(),
+            model_policy: Default::default(),
+            promotion_policy: Default::default(),
+            gates: gates.clone(),
+            nodes: Vec::new(),
+        };
+        state.runs.lock().expect("runs").insert(
+            run_id.clone(),
+            WorkflowRunRecord::new(run_id.clone(), None, None, Some(&spec)),
+        );
+        let driver =
+            SubAgentWorkflowDriver::new(run_id, manager, runtime, state, None, None, None, gates);
+
+        driver.evaluate_gates_for_completed_role(&RuntimeTaskRecord {
+            agent_id: "reviewer-block".to_string(),
+            label: Some("reviewer".to_string()),
+            role: Some("reviewer".to_string()),
+            status: IrWorkflowRunStatus::Succeeded,
+            output: Some("\nBLOCK\nmissing terminal receipt".to_string()),
+            schema_error: None,
+        });
+
+        let verifier_request = || TaskRequest {
+            description: "Verify the accepted review.".to_string(),
+            subagent_type: Some("verifier".to_string()),
+            role: Some("verifier".to_string()),
+            profile: None,
+            model: None,
+            model_strength: None,
+            thinking: None,
+            worktree: false,
+            allowed_tools: Some(Vec::new()),
+            max_depth: None,
+            token_budget: None,
+            response_schema: None,
+            label: Some("verify".to_string()),
+            phase: None,
+        };
+        let mut blocked_verifier = verifier_request();
+        let error = driver
+            .prepare_request_for_gates(&mut blocked_verifier)
+            .expect_err("successful reviewer BLOCK must not admit verifier");
+        assert!(error.to_string().contains("BLOCK"), "{error}");
+        {
+            let board = driver.gate_board.lock().expect("gate board");
+            assert!(
+                board.artifacts.is_empty(),
+                "rejected output must not produce a handoff: {:?}",
+                board.artifacts
+            );
+            assert!(matches!(
+                board.gates.get("review-findings"),
+                Some(GateState::Blocked { .. })
+            ));
+        }
+
+        driver.evaluate_gates_for_completed_role(&RuntimeTaskRecord {
+            agent_id: "reviewer-approve".to_string(),
+            label: Some("reviewer".to_string()),
+            role: Some("reviewer".to_string()),
+            status: IrWorkflowRunStatus::Succeeded,
+            output: Some("APPROVE\nall receipt owners confirmed".to_string()),
+            schema_error: None,
+        });
+
+        let mut admitted_verifier = verifier_request();
+        driver
+            .prepare_request_for_gates(&mut admitted_verifier)
+            .expect("explicit reviewer APPROVE should admit verifier");
+        assert!(
+            admitted_verifier
+                .description
+                .contains("all receipt owners confirmed"),
+            "{}",
+            admitted_verifier.description
+        );
+        let board = driver.gate_board.lock().expect("gate board");
+        assert_eq!(board.artifacts.len(), 1, "{:?}", board.artifacts);
+        assert!(matches!(
+            board.gates.get("review-findings"),
+            Some(GateState::Passed)
+        ));
     }
 
     #[tokio::test]
