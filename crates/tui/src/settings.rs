@@ -2425,6 +2425,7 @@ mod tests {
         let prev_term_program = std::env::var_os("TERM_PROGRAM");
         let prev_tilix_id = std::env::var_os("TILIX_ID");
         let prev_terminator_uuid = std::env::var_os("TERMINATOR_UUID");
+        let prev_wt_session = std::env::var_os("WT_SESSION");
 
         for (var, val) in [
             ("TILIX_ID", "d5b5b5d6-tilix-session"),
@@ -2436,6 +2437,12 @@ mod tests {
                 std::env::remove_var("TILIX_ID");
                 std::env::remove_var("TERMINATOR_UUID");
                 std::env::set_var(var, val);
+                // A native Windows test process without any modern-terminal
+                // marker is intentionally treated as legacy ConHost. This
+                // test isolates the VTE signal instead, so keep that separate
+                // platform heuristic from changing its motion assertions.
+                #[cfg(windows)]
+                std::env::set_var("WT_SESSION", "codewhale-test");
             }
             let mut settings = animated_settings();
             assert!(!settings.low_motion, "default is animated");
@@ -2467,6 +2474,10 @@ mod tests {
             match prev_terminator_uuid {
                 Some(v) => std::env::set_var("TERMINATOR_UUID", v),
                 None => std::env::remove_var("TERMINATOR_UUID"),
+            }
+            match prev_wt_session {
+                Some(v) => std::env::set_var("WT_SESSION", v),
+                None => std::env::remove_var("WT_SESSION"),
             }
         }
     }
@@ -2656,6 +2667,7 @@ mod tests {
             "TILIX_ID",
             "TERMINATOR_UUID",
             "NO_ANIMATIONS",
+            "WT_SESSION",
         ];
         let prev: Vec<_> = vars
             .iter()
@@ -2672,6 +2684,8 @@ mod tests {
                     std::env::remove_var(name);
                 }
                 std::env::set_var(var, val);
+                #[cfg(windows)]
+                std::env::set_var("WT_SESSION", "codewhale-test");
             }
             let mut settings = animated_settings();
             assert!(!settings.low_motion, "default is animated");
@@ -3059,7 +3073,7 @@ mod tests {
         let _codewhale_home = EnvVarRestore::remove("CODEWHALE_HOME");
         let _home = EnvVarRestore::set("HOME", tmp.path());
 
-        let loaded = Settings::load().expect("load settings");
+        let loaded = Settings::load_persisted().expect("load persisted settings");
 
         assert!(loaded.low_motion, "legacy settings should still be read");
         assert!(
@@ -3084,6 +3098,10 @@ mod tests {
         let _xdg = EnvVarRestore::set("XDG_CONFIG_HOME", tmp.path().join("platform-config"));
         #[cfg(windows)]
         let _appdata = EnvVarRestore::set("APPDATA", tmp.path().join("platform-config"));
+        #[cfg(windows)]
+        let _local_appdata = EnvVarRestore::set("LOCALAPPDATA", tmp.path().join("platform-config"));
+        #[cfg(windows)]
+        let _userprofile = EnvVarRestore::set("USERPROFILE", tmp.path());
         let legacy_config_dir = dirs::config_dir()
             .expect("config dir")
             .join("deepseek")
@@ -3092,7 +3110,7 @@ mod tests {
             .expect("legacy config dir");
         std::fs::write(&legacy_config_dir, "low_motion = true\n").expect("legacy settings");
 
-        let loaded = Settings::load().expect("load settings");
+        let loaded = Settings::load_persisted().expect("load persisted settings");
 
         assert!(loaded.low_motion, "legacy settings should still be read");
         assert!(

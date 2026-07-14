@@ -40,7 +40,12 @@ use tempfile::TempDir;
 
 #[test]
 fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
-    let app = create_test_app();
+    let mut app = create_test_app();
+    // App::new reads real terminal overlays. This test owns the authored
+    // motion cadence, so pin that input instead of inheriting a host's saved
+    // low-motion or legacy-console policy.
+    app.low_motion = false;
+    app.fancy_animations = true;
 
     assert_eq!(
         animation_interval_ms(&app, true, false),

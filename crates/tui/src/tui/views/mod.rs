@@ -4330,12 +4330,11 @@ mod tests {
         )
         .expect("requirements config");
         let config_path = managed_dir.path().join("config.toml");
+        let requirements_value =
+            toml::Value::String(requirements_path.to_string_lossy().into_owned()).to_string();
         fs::write(
             &config_path,
-            format!(
-                "approval_policy = \"never\"\nrequirements_path = \"{}\"\n",
-                requirements_path.display()
-            ),
+            format!("approval_policy = \"never\"\nrequirements_path = {requirements_value}\n"),
         )
         .expect("managed config");
         app.config_path = Some(config_path);
