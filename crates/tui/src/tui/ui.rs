@@ -5782,16 +5782,20 @@ async fn run_event_loop(
                 {
                     app.delete_word_backward();
                 }
-                KeyCode::Char('s') | KeyCode::Char('S')
+                KeyCode::Char('s')
+                | KeyCode::Char('S')
+                | KeyCode::Char('g')
+                | KeyCode::Char('G')
                     if key.modifiers == KeyModifiers::CONTROL =>
                 {
-                    if send_ctrl_s_queued_message_now(app, config, &engine_handle).await? {
+                    if send_shortcut_queued_message_now(app, config, &engine_handle).await? {
                         continue;
                     }
-                    // #440: park the current draft to the persistent
-                    // stash and clear the composer. Empty composers
-                    // are a no-op so a stray Ctrl+S can't pollute the
-                    // file. Surface a toast so the user sees the
+                    // #440: park the current draft to the persistent stash and
+                    // clear the composer. Ctrl+G is the terminal-safe alias for
+                    // hosts such as Cursor/VS Code that reserve Ctrl+S for Save.
+                    // Empty composers are a no-op so a stray shortcut cannot
+                    // pollute the file. Surface a toast so the user sees the
                     // confirmation (no-op feels broken otherwise).
                     if !app.input.is_empty() {
                         crate::composer_stash::push_stash(&app.input);
@@ -7333,7 +7337,7 @@ fn queue_current_draft_for_next_turn(app: &mut App) -> bool {
     true
 }
 
-fn take_ctrl_s_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<usize>)> {
+fn take_shortcut_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<usize>)> {
     if let Some(mut draft) = app.queued_draft.take() {
         if let Some(input) = app.submit_input() {
             draft.display = input;
@@ -7348,12 +7352,12 @@ fn take_ctrl_s_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<us
     None
 }
 
-async fn send_ctrl_s_queued_message_now(
+async fn send_shortcut_queued_message_now(
     app: &mut App,
     config: &Config,
     engine_handle: &EngineHandle,
 ) -> Result<bool> {
-    let Some((message, restore_index)) = take_ctrl_s_queued_message(app) else {
+    let Some((message, restore_index)) = take_shortcut_queued_message(app) else {
         return Ok(false);
     };
     send_taken_queued_message_now(app, config, engine_handle, message, restore_index).await?;

@@ -2,7 +2,8 @@
 //!
 //! These scenarios cover the live TUI checks that unit tests cannot prove:
 //! six-worker fanout liveness/cancellation, multi-terminal route isolation,
-//! and queued steering via Ctrl+S. Every provider is a loopback wiremock
+//! and queued steering via the terminal-safe Ctrl+G shortcut. Every provider is a loopback
+//! wiremock
 //! server and every process receives a sealed HOME.
 
 #![cfg(unix)]
@@ -597,7 +598,7 @@ impl Respond for SteeringResponder {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body = request.body_json::<Value>().unwrap_or(Value::Null);
         let raw = body.to_string();
-        if raw.contains("queued steering from ctrl-s") {
+        if raw.contains("queued steering from ctrl-g") {
             self.steer_requests.fetch_add(1, Ordering::SeqCst);
             return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "steering-applied"));
         }
@@ -613,7 +614,7 @@ impl Respond for SteeringResponder {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn release_queued_steering_ctrl_s_sends_now_with_clear_status() -> Result<()> {
+async fn release_queued_steering_ctrl_g_sends_now_with_clear_status() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
     mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
@@ -640,21 +641,21 @@ async fn release_queued_steering_ctrl_s_sends_now_with_clear_status() -> Result<
     type_and_submit(&mut tui, "initial slow turn")?;
     wait_for_counter(&mut tui, &initial_requests, 1, Duration::from_secs(3))?;
 
-    type_and_tab(&mut tui, "queued steering from ctrl-s")?;
-    tui.wait_for_text("Ctrl+S send", Duration::from_secs(5))?;
+    type_and_tab(&mut tui, "queued steering from ctrl-g")?;
+    tui.wait_for_text("Ctrl+G send", Duration::from_secs(5))?;
     assert!(
-        tui.frame().contains("queued steering from ctrl-s"),
+        tui.frame().contains("queued steering from ctrl-g"),
         "queued steering preview was not readable:\n{}",
         tui.debug_dump()
     );
 
     let steer_started = Instant::now();
-    tui.send(b"\x13")?;
+    tui.send(b"\x07")?;
     wait_for_counter(&mut tui, &steer_requests, 1, INTERACTION_TIMEOUT)?;
     tui.wait_for_text("steering-applied", INTERACTION_TIMEOUT)?;
     assert!(
         steer_started.elapsed() < Duration::from_secs(10),
-        "Ctrl+S steering was not incorporated promptly"
+        "Ctrl+G steering was not incorporated promptly"
     );
 
     let _ = tui.shutdown();

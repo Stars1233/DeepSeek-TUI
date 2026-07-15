@@ -3471,7 +3471,7 @@ async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Opt
             );
         } else {
             println!(
-                "  {} composer stash empty (Ctrl+S in the composer to park a draft)",
+                "  {} composer stash empty (Ctrl+G or Ctrl+S in the composer to park a draft)",
                 "·".dimmed()
             );
         }

@@ -127,7 +127,7 @@ pub(crate) fn is_word_cursor_modifier(modifiers: KeyModifiers) -> bool {
 #[cfg(target_os = "macos")]
 pub(crate) fn normalize_macos_modifiers(modifiers: KeyModifiers) -> KeyModifiers {
     // Strip SUPER and add CONTROL so that exact modifier equality checks
-    // (e.g. `modifiers == KeyModifiers::CONTROL` in Ctrl+S stashing) work
+    // (e.g. `modifiers == KeyModifiers::CONTROL` in Ctrl+G/Ctrl+S stashing) work
     // correctly after normalization.
     if modifiers.contains(KeyModifiers::SUPER) {
         (modifiers - KeyModifiers::SUPER) | KeyModifiers::CONTROL

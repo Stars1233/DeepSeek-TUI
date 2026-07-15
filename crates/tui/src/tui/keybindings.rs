@@ -142,7 +142,7 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Editing,
     },
     KeybindingEntry {
-        chord: "Ctrl+S",
+        chord: "Ctrl+G / Ctrl+S",
         description_id: crate::localization::MessageId::KbStashDraft,
         section: KeybindingSection::Editing,
     },

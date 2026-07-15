@@ -1080,16 +1080,18 @@ Previews are capped before delivery so lifecycle hooks do not receive full
 sub-agent prompts, transcripts, or unbounded results. Use the transcript handle
 returned by `agent` when full sub-agent details are needed.
 
-### Composer stash (`/stash`, Ctrl+S)
+### Composer stash (`/stash`, Ctrl+G / Ctrl+S)
 
-Press **Ctrl+S** in the composer to park the current draft to
+Press **Ctrl+G** in the composer to park the current draft to
 `~/.codewhale/composer_stash.jsonl`. `/stash list` shows parked
 drafts with one-line previews and timestamps; `/stash pop`
 restores the most recently parked draft (LIFO); `/stash clear`
 wipes the file. Capped at 200 entries; multiline drafts
 round-trip intact. When a turn is already running and queued follow-ups exist,
-the pending-input preview advertises **Ctrl+S send now**; in that state Ctrl+S
+the pending-input preview advertises **Ctrl+G send now**; in that state Ctrl+G
 sends the next queued follow-up into the active turn instead of stashing.
+**Ctrl+S** remains an alias in terminals that forward it; Cursor and VS Code
+reserve Ctrl+S for Save, so Ctrl+G is the portable default.
 
 ## Settings File (Persistent UI Preferences)
 

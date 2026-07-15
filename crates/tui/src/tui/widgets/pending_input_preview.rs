@@ -121,7 +121,7 @@ impl PendingInputPreview {
             );
             let controls = crate::localization::truncate_to_width(
                 &format!(
-                    "Ctrl+S send · {} edit · /queue drop 1",
+                    "Ctrl+G send · {} edit · /queue drop 1",
                     self.edit_binding.label
                 ),
                 usize::from(width),
@@ -206,7 +206,7 @@ impl PendingInputPreview {
             if !self.queued_messages.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
                     format!(
-                        "    Ctrl+S send now · {} edit last queued",
+                        "    Ctrl+G send now · {} edit last queued",
                         self.edit_binding.label
                     ),
                     dim,
@@ -448,7 +448,7 @@ mod tests {
         let rows = render_to_string(&preview, 40);
         assert_eq!(rows.len(), 2, "got rows: {rows:?}");
         assert!(rows[0].contains("Queued #1: Hello, world!"));
-        assert!(rows[1].contains("Ctrl+S send"));
+        assert!(rows[1].contains("Ctrl+G send"));
         assert!(rows[1].contains("↑ edit"));
         assert!(rows[1].contains("/queue drop 1"));
     }
@@ -463,7 +463,7 @@ mod tests {
         for (width, height) in [(40, 1), (40, 2), (60, 3)] {
             let rows = render_in_area(&preview, width, height);
             assert!(
-                rows.iter().any(|row| row.contains("Ctrl+S send")),
+                rows.iter().any(|row| row.contains("Ctrl+G send")),
                 "send control clipped at {width}x{height}: {rows:?}"
             );
         }
@@ -574,7 +574,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("rejected")));
         assert!(rows.iter().any(|r| r.contains("queued")));
         assert!(rows.iter().any(|r| r.contains("↑")));
-        assert!(rows.iter().any(|r| r.contains("Ctrl+S")));
+        assert!(rows.iter().any(|r| r.contains("Ctrl+G")));
     }
 
     #[test]
@@ -621,7 +621,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "got rows: {rows:?}");
         assert!(rows[0].contains("Queued #1: alpha"));
         assert!(rows[0].contains('…'));
-        assert!(rows[1].contains("Ctrl+S send"));
+        assert!(rows[1].contains("Ctrl+G send"));
     }
 
     #[test]
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "got rows: {rows:?}");
         assert!(rows[0].contains("Queued #1: line1 line2"));
         assert!(rows[0].contains('…'));
-        assert!(rows[1].contains("Ctrl+S send"));
+        assert!(rows[1].contains("Ctrl+G send"));
         assert!(rows[1].contains("↑ edit"));
     }
 
@@ -648,7 +648,7 @@ mod tests {
         let rows = render_to_string(&preview, 36);
         assert_eq!(rows.len(), 2, "got rows: {rows:?}");
         assert!(rows[0].contains("Queued #1:"));
-        assert!(rows[1].contains("Ctrl+S send"));
+        assert!(rows[1].contains("Ctrl+G send"));
     }
 
     #[test]

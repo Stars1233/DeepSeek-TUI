@@ -8190,7 +8190,7 @@ async fn steer_user_message_records_prompt_for_cancel_restore() {
 }
 
 #[tokio::test]
-async fn ctrl_s_sends_next_queued_message_into_running_turn() {
+async fn composer_send_shortcut_sends_next_queued_message_into_running_turn() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.queue_message(crate::tui::app::QueuedMessage::new(
@@ -8201,9 +8201,9 @@ async fn ctrl_s_sends_next_queued_message_into_running_turn() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        send_ctrl_s_queued_message_now(&mut app, &config, &engine.handle)
+        send_shortcut_queued_message_now(&mut app, &config, &engine.handle)
             .await
-            .expect("ctrl+s send succeeds")
+            .expect("composer send shortcut succeeds")
     );
 
     assert_eq!(app.queued_message_count(), 0);
@@ -8214,7 +8214,7 @@ async fn ctrl_s_sends_next_queued_message_into_running_turn() {
 }
 
 #[tokio::test]
-async fn ctrl_s_sends_edited_queued_draft_into_running_turn() {
+async fn composer_send_shortcut_sends_edited_queued_draft_into_running_turn() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.queued_draft = Some(crate::tui::app::QueuedMessage::new(
@@ -8227,9 +8227,9 @@ async fn ctrl_s_sends_edited_queued_draft_into_running_turn() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        send_ctrl_s_queued_message_now(&mut app, &config, &engine.handle)
+        send_shortcut_queued_message_now(&mut app, &config, &engine.handle)
             .await
-            .expect("ctrl+s draft send succeeds")
+            .expect("composer send shortcut succeeds")
     );
 
     assert!(app.queued_draft.is_none());
