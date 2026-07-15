@@ -17,8 +17,8 @@ use codewhale_app_server::{
     AppServerOptions, run as run_app_server, run_stdio as run_app_server_stdio,
 };
 use codewhale_config::{
-    CliRuntimeOverrides, ConfigStore, ProviderKind, ProviderSource, ResolvedRuntimeOptions,
-    RuntimeApiKeySource,
+    CliRuntimeOverrides, ConfigStore, ConfigToml, ProviderKind, ProviderSource,
+    ResolvedRuntimeOptions, RuntimeApiKeySource,
 };
 use codewhale_execpolicy::{AskForApproval, ExecPolicyContext, ExecPolicyEngine};
 use codewhale_mcp::{McpServerDefinition, run_stdio_server};
@@ -123,6 +123,25 @@ impl From<ProviderArg> for ProviderKind {
     }
 }
 
+fn builtin_provider_arg(value: &str) -> Option<ProviderArg> {
+    ProviderArg::from_str(value, false).ok()
+}
+
+fn parse_provider_identifier(value: &str) -> std::result::Result<String, String> {
+    if value.is_empty()
+        || value == "__custom__"
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(
+            "provider must be a simple identifier using letters, numbers, '-', '_', or '.'"
+                .to_string(),
+        );
+    }
+    Ok(value.to_string())
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "codewhale",
@@ -137,10 +156,11 @@ struct Cli {
     profile: Option<String>,
     #[arg(
         long,
-        value_enum,
-        help = "Advanced provider selector for non-TUI registry/config commands"
+        value_name = "PROVIDER",
+        value_parser = parse_provider_identifier,
+        help = "Provider selector; exec/fleet also accept configured custom provider identifiers"
     )]
-    provider: Option<ProviderArg>,
+    provider: Option<String>,
     #[arg(long)]
     model: Option<String>,
     #[arg(long = "output-mode")]
@@ -362,6 +382,63 @@ The command prints the completion script to stdout; redirect it to a path your s
     Metrics(MetricsArgs),
     /// Check for and apply updates to the `codewhale` binary.
     Update(UpdateArgs),
+}
+
+fn command_accepts_raw_provider(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::Exec(_) | Commands::Fleet(_)))
+}
+
+fn top_level_provider_override(
+    provider: Option<&str>,
+    command: Option<&Commands>,
+) -> Result<Option<ProviderKind>> {
+    let Some(provider) = provider else {
+        return Ok(None);
+    };
+    if let Some(provider) = builtin_provider_arg(provider) {
+        return Ok(Some(provider.into()));
+    }
+    if command_accepts_raw_provider(command) {
+        return Ok(None);
+    }
+
+    let expected = ProviderArg::value_variants()
+        .iter()
+        .filter_map(ValueEnum::to_possible_value)
+        .map(|value| value.get_name().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "invalid value '{provider}' for '--provider <PROVIDER>': expected one of {expected}; configured custom providers are accepted only by exec and fleet"
+    )
+}
+
+fn prepare_raw_provider_tui_dispatch(
+    cli: &Cli,
+    command: Option<&Commands>,
+    runtime_overrides: &CliRuntimeOverrides,
+) -> Result<Option<(ResolvedRuntimeOptions, Vec<String>)>> {
+    let Some(provider) = cli.provider.as_deref() else {
+        return Ok(None);
+    };
+    if builtin_provider_arg(provider).is_some() || !command_accepts_raw_provider(command) {
+        return Ok(None);
+    }
+
+    let passthrough = match command {
+        Some(Commands::Exec(args)) => {
+            reject_exec_global_flags(&args.args)?;
+            tui_args("exec", args.clone())
+        }
+        Some(Commands::Fleet(args)) => tui_args("fleet", args.clone()),
+        _ => unreachable!("raw provider validation only permits Exec and Fleet"),
+    };
+
+    // Dynamic provider config belongs to the TUI schema. Do not parse it
+    // through the dispatcher's enum-backed ConfigStore or recover credentials
+    // for an unrelated fallback provider before the TUI sees the raw id.
+    let resolved_runtime = ConfigToml::default().resolve_runtime_options(runtime_overrides);
+    Ok(Some((resolved_runtime, passthrough)))
 }
 
 #[derive(Debug, Args)]
@@ -1488,9 +1565,10 @@ fn run() -> Result<()> {
         return run_lane_log_proxy_command(args);
     }
 
-    let mut store = ConfigStore::load(cli.config.clone())?;
+    let runtime_provider = top_level_provider_override(cli.provider.as_deref(), command.as_ref())?;
+    let uses_raw_tui_provider = cli.provider.is_some() && runtime_provider.is_none();
     let runtime_overrides = CliRuntimeOverrides {
-        provider: cli.provider.map(Into::into),
+        provider: runtime_provider,
         model: cli.model.clone(),
         api_key: cli.api_key.clone(),
         base_url: cli.base_url.clone(),
@@ -1503,6 +1581,14 @@ fn run() -> Result<()> {
         yolo: Some(cli.yolo),
         verbosity: cli.verbosity.clone(),
     };
+    if uses_raw_tui_provider
+        && let Some((resolved_runtime, passthrough)) =
+            prepare_raw_provider_tui_dispatch(&cli, command.as_ref(), &runtime_overrides)?
+    {
+        return delegate_to_tui(&cli, &resolved_runtime, passthrough);
+    }
+
+    let mut store = ConfigStore::load(cli.config.clone())?;
     match command {
         Some(Commands::Run(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
@@ -3066,15 +3152,29 @@ fn build_tui_command_with_paths(
     }
     cmd.args(passthrough);
 
+    let uses_raw_tui_provider = cli
+        .provider
+        .as_deref()
+        .is_some_and(|provider| builtin_provider_arg(provider).is_none());
     let keyring_bridge_provider = resolved_runtime.provider;
     let keyring_bridge_api_key = resolved_runtime.api_key.as_ref();
     let keyring_bridge_source = resolved_runtime.api_key_source;
 
-    if let Some(provider) = cli.provider.map(ProviderKind::from) {
-        cmd.env("DEEPSEEK_PROVIDER", provider.as_str());
+    if let Some(provider) = cli.provider.as_deref() {
+        let provider = builtin_provider_arg(provider)
+            .map(ProviderKind::from)
+            .map_or_else(
+                || provider.to_string(),
+                |provider| provider.as_str().to_string(),
+            );
+        // Set both names so an inherited CODEWHALE_PROVIDER cannot outrank the
+        // explicit CLI pin when the TUI applies its environment overrides.
+        cmd.env("CODEWHALE_PROVIDER", &provider);
+        cmd.env("DEEPSEEK_PROVIDER", provider);
     }
-    if !(cli.profile.is_some()
-        && matches!(resolved_runtime.provider_source, ProviderSource::Config))
+    if !uses_raw_tui_provider
+        && !(cli.profile.is_some()
+            && matches!(resolved_runtime.provider_source, ProviderSource::Config))
         && matches!(keyring_bridge_source, Some(RuntimeApiKeySource::Keyring))
         && let Some(api_key) = keyring_bridge_api_key
     {
@@ -3126,7 +3226,7 @@ fn build_tui_command_with_paths(
         // saved API-key slots. Preserve legacy provider envs only when their
         // identity is already unambiguous here.
         cmd.env("CODEWHALE_CLI_API_KEY", api_key);
-        if cli.profile.is_none() || cli.provider.is_some() {
+        if !uses_raw_tui_provider && (cli.profile.is_none() || cli.provider.is_some()) {
             cmd.env("DEEPSEEK_API_KEY", api_key);
             for var in provider_env_vars(resolved_runtime.provider) {
                 if *var != "DEEPSEEK_API_KEY" {
@@ -3575,7 +3675,7 @@ mod tests {
         assert_eq!(model_command_provider_hint(None, None), None);
 
         let cli = parse_ok(&["codewhale", "--provider", "zai", "model", "list"]);
-        assert_eq!(cli.provider, Some(ProviderArg::Zai));
+        assert_eq!(cli.provider.as_deref(), Some("zai"));
         assert!(matches!(
             cli.command,
             Some(Commands::Model(ModelArgs {
@@ -3904,6 +4004,104 @@ mod tests {
                 && runtime == "tmux"
                 && issue.as_deref() == Some("4090")
         ));
+    }
+
+    #[test]
+    fn exec_and_fleet_accept_builtin_and_raw_provider_identifiers() {
+        let builtin = parse_ok(&["codewhale", "--provider", "openrouter", "exec", "Reply OK"]);
+        assert_eq!(builtin.provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            top_level_provider_override(builtin.provider.as_deref(), builtin.command.as_ref())
+                .expect("built-in Exec provider"),
+            Some(ProviderKind::Openrouter)
+        );
+
+        for (provider, command) in [
+            ("qianfan", vec!["exec", "Reply OK"]),
+            ("lm-studio", vec!["exec", "Reply OK"]),
+            ("lm-studio", vec!["fleet", "status"]),
+        ] {
+            let argv = std::iter::once("codewhale")
+                .chain(["--provider", provider])
+                .chain(command.iter().copied())
+                .collect::<Vec<_>>();
+            let cli = parse_ok(&argv);
+            assert_eq!(cli.provider.as_deref(), Some(provider));
+            assert_eq!(
+                top_level_provider_override(cli.provider.as_deref(), cli.command.as_ref())
+                    .expect("raw TUI provider"),
+                None,
+                "{argv:?} should defer the raw provider id to the TUI"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_provider_ids_remain_restricted_to_exec_and_fleet() {
+        let cli = parse_ok(&["codewhale", "--provider", "lm-studio", "model", "list"]);
+        let err = top_level_provider_override(cli.provider.as_deref(), cli.command.as_ref())
+            .expect_err("model registry commands still require a built-in provider");
+        assert!(
+            err.to_string()
+                .contains("configured custom providers are accepted only by exec and fleet")
+        );
+
+        let err = Cli::try_parse_from(["codewhale", "auth", "set", "--provider", "lm-studio"])
+            .expect_err("auth keeps enum-only provider validation");
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+
+        let err = Cli::try_parse_from([
+            "codewhale",
+            "--provider",
+            "../../lm-studio",
+            "exec",
+            "Reply OK",
+        ])
+        .expect_err("provider ids must stay simple tokens");
+        assert!(
+            err.to_string()
+                .contains("provider must be a simple identifier")
+        );
+    }
+
+    #[test]
+    fn raw_provider_dispatch_defers_dynamic_config_to_the_tui() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"provider = "lm-studio"
+
+[providers.lm-studio]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:1234/v1"
+model = "qwen-2.5-7b"
+"#,
+        )
+        .expect("custom provider config fixture");
+        assert!(
+            ConfigStore::load(Some(config_path.clone())).is_err(),
+            "the enum-backed dispatcher store must not be the owner of dynamic provider config"
+        );
+
+        let config = config_path.to_string_lossy().into_owned();
+        let cli = parse_ok(&[
+            "codewhale",
+            "--config",
+            &config,
+            "--provider",
+            "lm-studio",
+            "exec",
+            "Reply OK",
+        ]);
+        let prepared = prepare_raw_provider_tui_dispatch(
+            &cli,
+            cli.command.as_ref(),
+            &CliRuntimeOverrides::default(),
+        )
+        .expect("prepare raw provider dispatch")
+        .expect("Exec with a raw provider should bypass dispatcher config resolution");
+        assert_eq!(prepared.1, ["exec", "Reply OK"].map(str::to_string));
     }
 
     #[test]
@@ -4969,7 +5167,7 @@ mod tests {
             "deepseek-v4-pro",
         ]);
 
-        assert!(matches!(cli.provider, Some(ProviderArg::Openai)));
+        assert_eq!(cli.provider.as_deref(), Some("openai"));
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/deepseek.toml")));
         assert_eq!(cli.profile.as_deref(), Some("work"));
         assert_eq!(cli.model.as_deref(), Some("deepseek-v4-pro"));
@@ -5013,6 +5211,60 @@ mod tests {
     }
 
     #[test]
+    fn build_tui_command_forwards_raw_exec_and_fleet_provider_without_secret_bridge() {
+        let _lock = env_lock();
+        let (_dir, _bin) = install_fake_tui_binary();
+        let _ambient_provider = ScopedEnvVar::set("CODEWHALE_PROVIDER", "openrouter");
+
+        let cases = [
+            (
+                parse_ok(&["codewhale", "--provider", "lm-studio", "exec", "Reply OK"]),
+                vec!["exec".to_string(), "Reply OK".to_string()],
+            ),
+            (
+                parse_ok(&["codewhale", "--provider", "lm-studio", "fleet", "status"]),
+                vec!["fleet".to_string(), "status".to_string()],
+            ),
+        ];
+
+        for (cli, passthrough) in cases {
+            let mut resolved =
+                resolved_runtime_for_test(ProviderKind::Openrouter, ProviderSource::Config);
+            resolved.api_key = Some("unrelated-keyring-secret".to_string());
+            resolved.api_key_source = Some(RuntimeApiKeySource::Keyring);
+
+            let cmd = build_tui_command(&cli, &resolved, passthrough.clone())
+                .expect("raw provider should dispatch to the TUI");
+            assert_eq!(
+                command_env(&cmd, "CODEWHALE_PROVIDER").as_deref(),
+                Some("lm-studio")
+            );
+            assert_eq!(
+                command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
+                Some("lm-studio")
+            );
+            for secret_var in [
+                "CODEWHALE_CLI_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "OPENROUTER_API_KEY",
+                "DEEPSEEK_API_KEY_SOURCE",
+            ] {
+                assert_eq!(
+                    command_env(&cmd, secret_var),
+                    None,
+                    "raw provider dispatch must not bridge {secret_var}"
+                );
+            }
+            assert_eq!(
+                cmd.get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                passthrough
+            );
+        }
+    }
+
+    #[test]
     fn build_tui_command_allows_openai_and_forwards_provider_key() {
         let _lock = env_lock();
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -5050,6 +5302,10 @@ mod tests {
         };
 
         let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
+        assert_eq!(
+            command_env(&cmd, "CODEWHALE_PROVIDER").as_deref(),
+            Some("openai")
+        );
         assert_eq!(
             command_env(&cmd, "DEEPSEEK_PROVIDER").as_deref(),
             Some("openai")
