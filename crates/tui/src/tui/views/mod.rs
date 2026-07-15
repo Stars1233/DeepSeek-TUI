@@ -959,6 +959,10 @@ impl ViewStack {
         self.views.last().map(|view| view.kind())
     }
 
+    pub fn top_occupied_region(&self, area: Rect) -> Option<Rect> {
+        self.views.last().map(|view| view.occupied_region(area))
+    }
+
     pub fn push<V: ModalView + 'static>(&mut self, view: V) {
         let kind = view.kind();
         self.views.push(Box::new(view));

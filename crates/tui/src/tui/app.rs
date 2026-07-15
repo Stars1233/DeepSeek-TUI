@@ -1391,6 +1391,9 @@ pub struct ViewportState {
     pub transcript_scrollbar_dragging: bool,
     pub last_transcript_area: Option<Rect>,
     pub last_composer_area: Option<Rect>,
+    /// Painted band occupied by the active inline approval. Stored so wheel
+    /// routing can prefer the visible card over side surfaces underneath it.
+    pub last_approval_area: Option<Rect>,
     /// Outer rect of the right-hand sidebar (when visible), stored at render
     /// time so mouse hit-testing can keep scroll events over the sidebar from
     /// leaking into the transcript viewport.
@@ -1426,6 +1429,7 @@ impl Default for ViewportState {
             transcript_scrollbar_dragging: false,
             last_transcript_area: None,
             last_composer_area: None,
+            last_approval_area: None,
             last_sidebar_area: None,
             last_workflow_panel_area: None,
             last_workflow_cancel_area: None,
@@ -4804,6 +4808,7 @@ impl App {
         self.viewport.transcript_selection.clear();
 
         self.viewport.last_transcript_area = None;
+        self.viewport.last_approval_area = None;
         self.viewport.last_transcript_top = 0;
         // Seed visible height from the resize event so paging keys use a
         // useful page size immediately, before the next render updates it.

@@ -189,7 +189,8 @@ fn approval_wheel_preserves_sidebar_and_work_surface_ownership() {
         "approval-scroll-key",
     )));
     app.viewport.last_sidebar_area = Some(Rect::new(60, 0, 20, 20));
-    app.work_surface.last_area = Some(Rect::new(0, 0, 30, 12));
+    app.work_surface.last_area = Some(Rect::new(0, 0, 30, 20));
+    app.viewport.last_approval_area = Some(Rect::new(0, 12, 80, 8));
 
     for (column, row) in [(65, 4), (10, 4)] {
         let events = handle_mouse_event(
@@ -205,6 +206,24 @@ fn approval_wheel_preserves_sidebar_and_work_surface_ownership() {
         assert_eq!(
             app.viewport.pending_scroll_delta, 0,
             "approval wheel leaked from side surface at ({column}, {row})"
+        );
+    }
+
+    for (column, row) in [(65, 15), (10, 15)] {
+        let before = app.viewport.pending_scroll_delta;
+        let events = handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(events.is_empty());
+        assert!(
+            app.viewport.pending_scroll_delta < before,
+            "visible approval did not outrank underlying side surface at ({column}, {row})"
         );
     }
     assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));

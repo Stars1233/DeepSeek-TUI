@@ -10288,6 +10288,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     let size = f.area();
     let classic_shell = app.ocean_treatment.is_classic();
     app.sidebar_hover = crate::tui::app::SidebarHoverState::default();
+    app.viewport.last_approval_area = None;
 
     // Clear entire area with the configured app background.
     let background = Block::default().style(Style::default().bg(app.ui_theme.surface_bg));
@@ -10303,6 +10304,9 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         crate::tui::underwater::render_launch_screen(size, f.buffer_mut(), app);
         crate::tui::underwater::record_launch_row_areas(size, &mut app.launch);
         if !app.view_stack.is_empty() {
+            if app.view_stack.top_kind() == Some(ModalKind::Approval) {
+                app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
+            }
             let buf = f.buffer_mut();
             app.view_stack.render(size, buf);
         }
@@ -10696,6 +10700,9 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
             refresh_live_transcript_overlay(app);
         } else if app.view_stack.top_kind() == Some(ModalKind::ContextInspector) {
             refresh_context_inspector_overlay(app);
+        }
+        if app.view_stack.top_kind() == Some(ModalKind::Approval) {
+            app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
         }
         let buf = f.buffer_mut();
         app.view_stack.render(size, buf);
