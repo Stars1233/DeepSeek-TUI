@@ -8563,6 +8563,29 @@ async fn operate_streaming_enter_queues_another_parallel_task() {
 }
 
 #[tokio::test]
+async fn inline_skill_request_keeps_instruction_when_busy_queueing() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.streaming_message_index = Some(0);
+    app.active_skill = Some("Use the test skill".to_string());
+    let config = Config::default();
+    let engine = crate::core::engine::mock_engine_handle();
+
+    let queued = build_queued_message(&mut app, "do X".to_string());
+    assert!(app.active_skill.is_none(), "skill must be consumed once");
+    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
+        .await
+        .expect("streaming skill request queues");
+
+    let queued = app.queued_messages.front().expect("queued skill request");
+    assert_eq!(queued.display, "do X");
+    assert_eq!(
+        queued.skill_instruction.as_deref(),
+        Some("Use the test skill")
+    );
+}
+
+#[tokio::test]
 async fn numeric_plan_choice_still_queues_follow_up_when_busy() {
     let mut app = create_test_app();
     app.mode = AppMode::Plan;

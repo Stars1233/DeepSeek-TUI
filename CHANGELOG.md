@@ -241,7 +241,8 @@ quieter, docs-first community foundation.
   x64 instead of promising assets that the mirror does not build.
 - Preserve task text when a skill is invoked through dollar, unified-slash, or
   explicit skill syntax, while keeping bare skill invocations and management
-  subcommands intact (#3915, co-authored by @CCChisato).
+  subcommands intact (PR #4372 by @nightt5879, co-authored by @CCChisato;
+  #3915).
 - Honor MCP server discovery capabilities: require advertised or legacy
   `tools/list`, keep optional resource/template/prompt probes independently
   bounded and fail-soft, and format descriptions Unicode-safely (#4308,

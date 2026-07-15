@@ -96,7 +96,8 @@ and dead-code removal landed alongside Cursor dogfood evidence for v0.8.67.
   into thread records so `/v1` engine reloads keep compacted context (#4091)
 - **[nightt5879](https://github.com/nightt5879)** — keep native terminal
   selection usable when mouse capture is disabled, and advance fuzzy edit
-  matches on UTF-8 character boundaries (#4088, #4045)
+  matches on UTF-8 character boundaries; preserve inline skill task text in
+  PR #4372 (#4088, #4045, #3915)
 - **[gaord](https://github.com/gaord)** — add the community-maintained
   CodeWhale for VS Code GUI frontend to the English and Chinese READMEs (#4035)
 - **[Darrell Thomas](https://github.com/DarrellThomas)** — remove the unused
