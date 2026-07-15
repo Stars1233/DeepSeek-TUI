@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.68] - 2026-07-14
+## [0.8.68] - 2026-07-15
 
 Codewhale v0.8.68 replaces the default terminal shell with the underwater
 interaction system, makes Operate message-first, and hardens the Fleet,
@@ -66,6 +66,31 @@ quieter, docs-first community foundation.
   events remain visible to `turn_end` observers as explicitly non-model
   lifecycle records. This builds on the scorecard introduced by @findshan in
   #3388.
+- Preserve named custom-provider identity across TUI sessions, `exec --resume`,
+  runtime threads, exports, cache and Workflow receipts. Restores resolve the
+  saved provider against live configuration before creating a client, never
+  infer a provider from the model ID, and fail closed when the named route was
+  removed, invalid, or ambiguous (#4334).
+- Make Fleet launch and teardown deterministic: route flags are placed before
+  `exec`, workers are contained in owned Unix sessions or Windows Job Objects,
+  and cancellation reaps surviving descendants with bounded escalation before
+  manager state settles.
+- Keep the stopship Workflow fixture bounded to measured 24k-per-turn role
+  budgets and a 360k aggregate. Free-form descriptions no longer fabricate
+  write, shell, or network risk; unknown structured risk remains fail-closed.
+- Keep repository trust affirmative and explicit: only `1`/`Y` are advertised
+  as acceptance keys, while Enter remains non-affirmative and explains the
+  required choice.
+- Keep the transcript reviewable while an inline approval card is active:
+  Page Up/Down, modified arrows, Home/End, and the mouse wheel now move through
+  the visible evidence without changing or dismissing the pending decision
+  (#4371 by @amuthantamil).
+- Match generated worker names to the active UI language while preserving
+  explicit user names, and tighten the 89x50 shell rhythm across Fleet rows,
+  choice dialogs, transcript boundaries, and the idle composer.
+- Put docs content and search before the full index on small screens, reduce
+  mobile dead space, and keep the public community copy focused on issues,
+  pull requests, and international contributors.
 
 ### Changed — the underwater shell
 
@@ -168,6 +193,16 @@ quieter, docs-first community foundation.
 
 ### Added
 
+- MiniMax Messages provider support for MiniMax-M3 and MiniMax-M2.7, with
+  OpenAI-compatible and Messages routes, regional endpoint guidance, request
+  coverage, catalog limits, and tier-aware pricing (PR #4354 by @octo-patch).
+- Dynamic MCP server infrastructure and an approval-gated tool that lets the
+  model start a configured MCP server from chat context. Harvested from
+  #3869 and #3866 by @bistack with authorship preserved.
+- Parent `--disallowed-tools` restrictions now flow into sub-agents and Fleet
+  workers by default, including deny-wins, wildcard, catalog-filtering, and
+  multi-generation inheritance coverage. Harvested from #4096 by @JayBeest
+  (#4042).
 - Korean (ko) UI locale with full key parity and onboarding/setup wiring
   (PR #4347 by @moduvoice).
 - Localize the entire underwater layer: 104 new UI strings — launch menu,
@@ -188,11 +223,32 @@ quieter, docs-first community foundation.
 - NetBSD: generate QuickJS bindings at build time so `codewhale-workflow-js`
   compiles (PR #4349 by @ci4ic4).
 - Real-PTY release gates for six-worker fan-out liveness with Esc cancel,
-  multi-terminal route isolation, queued steering via Ctrl+S, the one-shot
+  multi-terminal route isolation, queued steering via terminal-safe Ctrl+G
+  (with Ctrl+S retained where the terminal forwards it), the one-shot
   completion footer, and per-theme ANSI output for every shipped palette.
 
 ### Fixed
 
+- Make release publication complete and source-anchored: every build checks out
+  the resolved tag commit, tag movement is rejected before GHCR, GitHub
+  Release, Homebrew, Cargo, or npm writes, and registry helpers require a clean
+  checkout exactly matching the remote tag. Manual recovery runs are
+  exact-tag-only and execute the same parity gate as automatic tag pushes.
+- Publish a coherent distribution set: both checksum manifests now contain
+  usable public basenames and cover the full 29-asset matrix; GHCR, Homebrew,
+  GitHub archives, and the Linux x64 CNB mirror carry `codewhale`, `codew`, and
+  `codewhale-tui`. The CNB shortcut now fails clearly outside Linux/OpenHarmony
+  x64 instead of promising assets that the mirror does not build.
+- Preserve task text when a skill is invoked through dollar, unified-slash, or
+  explicit skill syntax, while keeping bare skill invocations and management
+  subcommands intact (#3915, co-authored by @CCChisato).
+- Honor MCP server discovery capabilities: require advertised or legacy
+  `tools/list`, keep optional resource/template/prompt probes independently
+  bounded and fail-soft, and format descriptions Unicode-safely (#4308,
+  harvested with co-authorship from @nsfoxer).
+- Age-evict terminal sub-agent worker records from the state ledger so
+  long-lived, high-fan-out sessions do not keep rewriting multi-megabyte
+  terminal history (#4217; root-cause and fix direction from @yekern).
 - Resolve the sub-agent completion/cancellation race with one terminal-state
   claim: cancellation suppresses late mailbox/parent/UI delivery, while a
   completed result remains publicly running until its notification is safely
@@ -398,12 +454,21 @@ quieter, docs-first community foundation.
   now map to Act + Full Access permissions via a compatibility shim and
   show a one-shot deprecation notice; removal is planned for 0.9.0.
 
+### Known issues
+
+- Android/Termux arm64 remains a preview in v0.8.68. The target, asset wiring,
+  updater selection, dependency graph, and source-build path have automated or
+  static coverage, but shell/PTY/config/TUI startup and runtime behavior remain
+  unverified on a real device (#4236, #4242). Do not use a GNU/Linux arm64
+  archive in Termux.
+
 ### Contributors
 
 Thank you to the international community whose code, reports, reviews, and
 reproductions shaped v0.8.68:
 
-- [@bistack](https://github.com/bistack),
+- [@amuthantamil](https://github.com/amuthantamil),
+  [@bistack](https://github.com/bistack),
   [@bruce6135](https://github.com/bruce6135),
   [@CCChisato](https://github.com/CCChisato),
   [@ci4ic4](https://github.com/ci4ic4),
