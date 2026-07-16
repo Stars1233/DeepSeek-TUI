@@ -222,7 +222,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
                 Some(app.model.clone())
             }
         }
-        "provider" => Some(app.api_provider.as_str().to_string()),
+        "provider" => Some(app.provider_identity_for_persistence().to_string()),
         "approval_mode" | "approval" => Some(app.approval_mode.permission_chip_label().to_string()),
         "allow_shell" | "shell" | "exec_shell" => Some(app.allow_shell.to_string()),
         "base_url" => {
@@ -239,7 +239,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             let config = match Config::load(app.config_path.clone(), app.config_profile.as_deref())
             {
                 Ok(mut config) => {
-                    config.provider = Some(app.api_provider.as_str().to_string());
+                    config.provider = Some(app.provider_identity_for_persistence().to_string());
                     config
                 }
                 Err(err) => {
@@ -724,7 +724,7 @@ fn config_editability_audit(app: &App) -> CommandResult {
         .unwrap_or_else(|_| "(unresolved)".to_string());
 
     let mut provider_config = config.clone();
-    provider_config.provider = Some(app.api_provider.as_str().to_string());
+    provider_config.provider = Some(app.provider_identity_for_persistence().to_string());
     let model = if app.auto_model {
         "auto".to_string()
     } else {
@@ -747,7 +747,7 @@ fn config_editability_audit(app: &App) -> CommandResult {
     let rows = [
         (
             "provider",
-            app.api_provider.as_str().to_string(),
+            app.provider_identity_for_persistence().to_string(),
             "session",
             "/config provider <name>",
             "Switches the active provider now; edit provider in config.toml for startup default.",
@@ -1863,21 +1863,25 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         "mention_menu_limit" | "mention_limit" => {
             app.mention_menu_limit = settings.mention_menu_limit;
             app.composer.mention_completion_cache = None;
+            app.composer.mention_discovery.invalidate();
             app.needs_redraw = true;
         }
         "mention_menu_behavior" | "mention_behavior" | "mention_menu" => {
             app.mention_menu_behavior = settings.mention_menu_behavior.clone();
             app.composer.mention_completion_cache = None;
+            app.composer.mention_discovery.invalidate();
             app.needs_redraw = true;
         }
         "mention_walk_depth" | "mention_depth" | "completions_walk_depth" => {
             app.mention_walk_depth = settings.mention_walk_depth;
             app.composer.mention_completion_cache = None;
+            app.composer.mention_discovery.invalidate();
             app.needs_redraw = true;
         }
         "workspace_follow_symlinks" | "follow_symlinks" => {
             app.workspace_follow_symlinks = settings.workspace_follow_symlinks;
             app.composer.mention_completion_cache = None;
+            app.composer.mention_discovery.invalidate();
             app.needs_redraw = true;
             // Engine tools use EngineConfig which is fixed at startup
             return CommandResult::message(if persist {
@@ -2234,8 +2238,8 @@ pub fn lsp_command(app: &mut App, arg: Option<&str>) -> CommandResult {
 /// `codewhale auth clear --provider <id>` and
 /// `codewhale auth set --provider <id>`.
 pub fn logout(app: &mut App) -> CommandResult {
-    let provider_name = app.api_provider.as_str();
-    match clear_active_provider_api_key(provider_name) {
+    let provider_name = app.provider_identity_for_persistence().to_string();
+    match clear_active_provider_api_key(&provider_name) {
         Ok(()) => {
             app.onboarding = OnboardingState::ApiKey;
             app.onboarding_needs_api_key = true;
@@ -4005,5 +4009,53 @@ max_concurrent = 4
 
         let updated = fs::read_to_string(config_path).unwrap();
         assert!(!updated.contains("api_key"));
+    }
+
+    #[test]
+    fn logout_clears_only_exact_named_custom_provider_key() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-custom-logout-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join(".deepseek").join("config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            "[providers.custom-a]\napi_key = \"a-key\"\n\n[providers.custom-b]\napi_key = \"b-key\"\n",
+        )
+        .unwrap();
+        let mut app = create_test_app();
+        app.set_provider_identity(ApiProvider::Custom, "custom-a");
+
+        let result = logout(&mut app);
+
+        assert!(result.message.is_some());
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(!updated.contains("a-key"), "{updated}");
+        assert!(updated.contains("b-key"), "{updated}");
+    }
+
+    #[test]
+    fn named_custom_provider_url_write_fails_closed() {
+        let mut app = create_test_app();
+        app.set_provider_identity(ApiProvider::Custom, "custom-a");
+
+        let result = config_command(
+            &mut app,
+            Some("provider_url http://127.0.0.1:18181/v1 --save"),
+        );
+        let message = result.message.expect("error message");
+
+        assert!(
+            message.contains("named [providers.<name>] table"),
+            "{message}"
+        );
     }
 }

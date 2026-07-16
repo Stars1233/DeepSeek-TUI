@@ -59,6 +59,10 @@ pub struct TaskRequest {
     /// Explicit token budget: forks an isolated pool on the driver side.
     /// Omit it so the child inherits (and debits) the shared run pool.
     pub token_budget: Option<u64>,
+    /// Maximum model turns for this child (driver clamps to its ceiling).
+    pub max_steps: Option<u32>,
+    /// Hard wall-clock limit for this child in seconds.
+    pub wall_time_secs: Option<u64>,
     /// JSON schema the reply must satisfy; validated in the VM after the
     /// driver returns the raw text (see [`crate`] docs for decode rules).
     pub response_schema: Option<serde_json::Value>,

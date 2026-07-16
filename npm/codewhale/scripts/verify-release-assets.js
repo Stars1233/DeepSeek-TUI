@@ -1,10 +1,15 @@
 const https = require("https");
 const http = require("http");
 const {
-  allAssetNames,
   allReleaseAssetNames,
+  BUNDLE_ASSET_NAMES,
+  BUNDLE_CHECKSUM_MANIFEST,
+  checksummedReleaseAssetNames,
   checksumManifestUrl,
+  CNB_BINARY_ASSET_NAMES,
+  CNB_RELEASE_ASSET_NAMES,
   releaseAssetUrl,
+  usesCnbMirror,
 } = require("./artifacts");
 
 const pkg = require("../package.json");
@@ -233,7 +238,7 @@ function assertReleaseAssetsFresh(release, expectedAssets, run) {
   const assetsByName = new Map((release.assets || []).map((asset) => [asset.name, asset]));
   const missing = expectedAssets.filter((asset) => !assetsByName.has(asset));
   if (missing.length > 0) {
-    throw new Error(`GitHub Release is missing required npm-facing asset(s): ${missing.join(", ")}`);
+    throw new Error(`GitHub Release is missing required release asset(s): ${missing.join(", ")}`);
   }
 
   const runStartedAt = parseGitHubTime(run.run_started_at || run.created_at, "workflow run start");
@@ -264,7 +269,7 @@ async function verifyGitHubReleaseFreshness(repo, version, expectedAssets) {
   const run = await findReleaseWorkflowRun(repo, tag, tagSha);
   assertReleaseAssetsFresh(release, expectedAssets, run);
   console.log(
-    `GitHub release asset freshness OK: ${expectedAssets.length} npm-facing assets for ${tag} were produced by run ${run.database_id || run.id} at ${tagSha.slice(0, 12)}.`,
+    `GitHub release asset freshness OK: ${expectedAssets.length} release assets for ${tag} were produced by run ${run.database_id || run.id} at ${tagSha.slice(0, 12)}.`,
   );
 }
 
@@ -284,10 +289,18 @@ function parseChecksumManifest(text) {
   return checksums;
 }
 
+function assertChecksumManifestIncludes(checksums, expectedAssets, label) {
+  const missing = expectedAssets.filter((asset) => !checksums.has(asset));
+  if (missing.length > 0) {
+    throw new Error(`${label} is missing ${missing.join(", ")}`);
+  }
+}
+
 async function run() {
   const version = resolveBinaryVersion();
   const repo = resolveRepo();
-  const assets = allReleaseAssetNames();
+  const cnbMirror = usesCnbMirror();
+  const assets = cnbMirror ? CNB_RELEASE_ASSET_NAMES : allReleaseAssetNames();
 
   assertPackageVersionMatchesBinaryVersion(version);
 
@@ -305,10 +318,20 @@ async function run() {
   const checksums = parseChecksumManifest(
     await downloadText(checksumManifestUrl(version, repo)),
   );
-  for (const asset of allAssetNames()) {
-    if (!checksums.has(asset)) {
-      throw new Error(`Checksum manifest is missing ${asset}`);
-    }
+  assertChecksumManifestIncludes(
+    checksums,
+    cnbMirror ? CNB_BINARY_ASSET_NAMES : checksummedReleaseAssetNames(),
+    "Canonical checksum manifest",
+  );
+  if (!cnbMirror) {
+    const bundleChecksums = parseChecksumManifest(
+      await downloadText(releaseAssetUrl(BUNDLE_CHECKSUM_MANIFEST, version, repo)),
+    );
+    assertChecksumManifestIncludes(
+      bundleChecksums,
+      BUNDLE_ASSET_NAMES,
+      "Bundle checksum manifest",
+    );
   }
   console.log("Release assets verified.");
 }
@@ -321,6 +344,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertChecksumManifestIncludes,
   assertPackageVersionMatchesBinaryVersion,
   assertReleaseAssetsFresh,
   hasReleaseBaseOverride,

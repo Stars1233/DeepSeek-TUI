@@ -1,6 +1,6 @@
 //! MCP manager formatting and UI action helpers.
 
-use crate::mcp::{McpManagerSnapshot, McpServerSnapshot};
+use crate::mcp::{McpManagerSnapshot, McpServerSnapshot, format_mcp_tool_description};
 use crate::tui::app::App;
 use crate::tui::history::HistoryCell;
 use crate::tui::pager::PagerView;
@@ -72,9 +72,7 @@ fn push_server(lines: &mut Vec<String>, server: &McpServerSnapshot) {
         lines.push(format!(
             "    tool {}{}",
             tool.model_name,
-            tool.description
-                .as_ref()
-                .map_or(String::new(), |desc| format!(" - {desc}"))
+            format_mcp_tool_description(tool.description.as_deref())
         ));
     }
     for resource in &server.resources {

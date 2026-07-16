@@ -1151,8 +1151,8 @@ mod tests {
         let mut record = reg
             .create_pending(
                 Some("stopship".into()),
-                Some("v0868-stopship".into()),
-                Some("4090".into()),
+                Some("stopship".into()),
+                Some("4375".into()),
                 None,
                 RuntimeBackendKind::Tmux,
                 None,
@@ -1436,7 +1436,8 @@ mod tests {
             "sh".to_string(),
             "-c".to_string(),
             "test \"$LANE_PROXY_SECRET\" = present || exit 9; \
-             printf '%s\\n' '{\"type\":\"workflow_event\",\"workflow_run_id\":\"real\"}'; \
+             printf '%s\\n' '{\"type\":\"workflow_event\",\"schema\":\"codewhale.exec-stream\",\"schema_version\":1,\"run_id\":\"workflow_1234\",\"event\":{\"type\":\"handoff_promoted\",\"artifact_id\":\"workflow_1234:agent_1:review-gate:review_report\",\"gate_id\":\"review-gate\",\"kind\":\"review_report\",\"from_role\":\"reviewer\",\"to_role\":\"verifier\",\"producer_task_id\":\"agent_1\"}}'; \
+             printf '%s\\n' '{\"type\":\"workflow_event\",\"schema\":\"codewhale.exec-stream\",\"schema_version\":1,\"run_id\":\"workflow_1234\",\"event\":{\"type\":\"handoff_consumed\",\"artifact_id\":\"workflow_1234:agent_1:review-gate:review_report\",\"kind\":\"review_report\",\"from_role\":\"reviewer\",\"to_role\":\"verifier\",\"consumer_task_id\":\"agent_2\"}}'; \
              printf 'unterminated\\377'; \
              printf '%s\\n' '{\"type\":\"lane_process_exit\",\"exit_code\":0}' >&2; \
              exit 7"
@@ -1460,10 +1461,47 @@ mod tests {
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>();
         assert!(lines.len() >= 3, "log={}", String::from_utf8_lossy(&log));
-        for line in &lines {
-            serde_json::from_slice::<serde_json::Value>(line)
-                .unwrap_or_else(|error| panic!("invalid NDJSON {line:?}: {error}"));
-        }
+        let values = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_slice::<serde_json::Value>(line)
+                    .unwrap_or_else(|error| panic!("invalid NDJSON {line:?}: {error}"))
+            })
+            .collect::<Vec<_>>();
+        let workflow_event = values
+            .iter()
+            .find(|value| value["type"] == "workflow_event")
+            .expect("preserved workflow handoff receipt");
+        assert_eq!(workflow_event["schema"], "codewhale.exec-stream");
+        assert_eq!(workflow_event["schema_version"], 1);
+        assert_eq!(workflow_event["run_id"], "workflow_1234");
+        assert_eq!(workflow_event["event"]["type"], "handoff_promoted");
+        assert_eq!(
+            workflow_event["event"]["artifact_id"],
+            "workflow_1234:agent_1:review-gate:review_report"
+        );
+        assert_eq!(workflow_event["event"]["gate_id"], "review-gate");
+        assert_eq!(workflow_event["event"]["kind"], "review_report");
+        assert_eq!(workflow_event["event"]["from_role"], "reviewer");
+        assert_eq!(workflow_event["event"]["to_role"], "verifier");
+        assert_eq!(workflow_event["event"]["producer_task_id"], "agent_1");
+        assert!(workflow_event["event"].get("payload").is_none());
+        let consumed_event = values
+            .iter()
+            .find(|value| value["event"]["type"] == "handoff_consumed")
+            .expect("preserved workflow handoff consumption receipt");
+        assert_eq!(consumed_event["schema"], "codewhale.exec-stream");
+        assert_eq!(consumed_event["schema_version"], 1);
+        assert_eq!(consumed_event["run_id"], "workflow_1234");
+        assert_eq!(
+            consumed_event["event"]["artifact_id"],
+            workflow_event["event"]["artifact_id"]
+        );
+        assert_eq!(consumed_event["event"]["kind"], "review_report");
+        assert_eq!(consumed_event["event"]["from_role"], "reviewer");
+        assert_eq!(consumed_event["event"]["to_role"], "verifier");
+        assert_eq!(consumed_event["event"]["consumer_task_id"], "agent_2");
+        assert!(consumed_event["event"].get("payload").is_none());
         let rendered = String::from_utf8_lossy(&log);
         assert!(rendered.contains("workflow_event"));
         assert!(rendered.contains("lane_process_exit"));

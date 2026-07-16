@@ -1,4 +1,4 @@
-//! Runtime HTTP/SSE API for local CodeWhale automation.
+//! Runtime HTTP/SSE API for local Codewhale automation.
 
 use std::convert::Infallible;
 use std::fs;
@@ -39,6 +39,7 @@ use crate::automation_manager::{
     CreateAutomationRequest, SharedAutomationManager, UpdateAutomationRequest, spawn_scheduler,
 };
 use crate::config::{Config, DEFAULT_TEXT_MODEL};
+use crate::fleet::executor::{FleetExecutor, configured_codewhale_binary};
 use crate::fleet::ledger::{FleetLedgerState, FleetTaskLedgerStatus};
 use crate::fleet::manager::{
     FleetManager, FleetStatusSnapshot, FleetWorkerInspection, FleetWorkerRuntimeProjection,
@@ -98,6 +99,9 @@ pub struct RuntimeApiState {
     /// GUI-driven config changes target the same file the server was
     /// started with, instead of falling back to the default discovery.
     config_path: Option<PathBuf>,
+    /// Effective initial profile (`--profile` or `DEEPSEEK_PROFILE`).
+    /// Reload must retain this overlay so profile-scoped routes do not vanish.
+    config_profile: Option<String>,
     automations: SharedAutomationManager,
     sub_agent_manager: SharedSubAgentManager,
     runtime_token: Option<String>,
@@ -106,6 +110,9 @@ pub struct RuntimeApiState {
     bind_host: String,
     bind_port: u16,
     mobile_enabled: bool,
+    /// Executable used by Runtime API-owned Fleet manager loops. Stored on
+    /// state so tests and embedded callers can provide a hermetic worker.
+    fleet_codewhale_binary: String,
     /// Shared McpPool reused for explicit live MCP discovery. Passive API
     /// calls do not initialize this pool so dashboards cannot accidentally
     /// become a second stdio-process owner. The outer mutex guards only the
@@ -140,6 +147,8 @@ pub struct RuntimeApiOptions {
     /// `Some`, GUI-driven config reloads and persistence target this file
     /// instead of the default discovery path.
     pub config_path: Option<PathBuf>,
+    /// Effective profile used to load the server's initial Config.
+    pub config_profile: Option<String>,
 }
 
 impl Default for RuntimeApiOptions {
@@ -154,6 +163,7 @@ impl Default for RuntimeApiOptions {
             mobile: false,
             show_qr: false,
             config_path: None,
+            config_profile: None,
         }
     }
 }
@@ -463,6 +473,7 @@ pub async fn run_http_server(
         cors_origins: options.cors_origins.clone(),
         sessions_dir,
         config_path: options.config_path.clone(),
+        config_profile: options.config_profile.clone(),
         automations,
         sub_agent_manager,
         runtime_token: runtime_token.clone(),
@@ -471,6 +482,7 @@ pub async fn run_http_server(
         bind_host: options.host.clone(),
         bind_port: options.port,
         mobile_enabled: options.mobile,
+        fleet_codewhale_binary: configured_codewhale_binary(),
         mcp_pool: Arc::new(Mutex::new(None)),
     };
     let app = build_router(state);
@@ -739,16 +751,6 @@ async fn create_thread(
     State(state): State<RuntimeApiState>,
     Json(mut req): Json<CreateThreadRequest>,
 ) -> Result<(StatusCode, Json<ThreadRecord>), ApiError> {
-    if req.model.as_ref().is_none_or(|m| m.trim().is_empty()) {
-        req.model = Some(
-            state
-                .config
-                .read()
-                .default_text_model
-                .clone()
-                .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string()),
-        );
-    }
     if req.workspace.is_none() {
         req.workspace = Some(state.workspace.clone());
     }
@@ -1003,14 +1005,41 @@ async fn restart_fleet_worker(
     Path(worker_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let manager = open_fleet_manager(&state)?;
-    let inspection = manager.restart_worker(&worker_id).map_err(|err| {
+    let report = manager.restart_worker(&worker_id).map_err(|err| {
         ApiError::bad_request(format!(
             "Failed to restart fleet worker '{worker_id}': {err}"
         ))
     })?;
+    let worker = fleet_worker_json(&report.inspection);
+    let run_id = report.run_id.clone();
+    let max_workers = report.max_workers;
+    let workspace = state.workspace.clone();
+    let codewhale_binary = state.fleet_codewhale_binary.clone();
+    tokio::spawn(async move {
+        let mut executor = FleetExecutor::new(&workspace);
+        if let Err(err) = manager
+            .run_to_completion(
+                &run_id,
+                max_workers,
+                &mut executor,
+                &codewhale_binary,
+                None,
+                Duration::from_millis(250),
+            )
+            .await
+        {
+            tracing::error!(
+                run_id = %run_id.0,
+                error = %err,
+                "Runtime API Fleet restart manager exited with an error"
+            );
+        }
+    });
     Ok(Json(json!({
         "action": "restart",
-        "worker": fleet_worker_json(&inspection),
+        "execution": "scheduled",
+        "run_id": report.run_id.0,
+        "worker": worker,
     })))
 }
 
@@ -1035,7 +1064,7 @@ async fn stop_fleet_run(
 }
 
 fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError> {
-    let (exec_config, session_model) = {
+    let (exec_config, session_model, route_config) = {
         let config = state.config.read();
         let exec_config = config
             .fleet
@@ -1044,7 +1073,7 @@ fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError>
             .unwrap_or_default();
         // The active session route is the operator: workers without a
         // task/profile model pin inherit the model the user picked in /model.
-        (exec_config, config.default_model())
+        (exec_config, config.default_model(), config.clone())
     };
     FleetManager::open(&state.workspace)
         .map(|manager| {
@@ -1052,6 +1081,7 @@ fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError>
                 .with_exec_config(exec_config)
                 .with_sub_agent_manager(state.sub_agent_manager.clone())
                 .with_session_model(session_model)
+                .with_route_config(route_config)
         })
         .map_err(|err| ApiError::internal(format!("Failed to open fleet manager: {err}")))
 }
@@ -2592,13 +2622,9 @@ async fn get_config(
     let settings = crate::settings::Settings::load_persisted().unwrap_or_default();
     let mcp_config_path = config.mcp_config_path().display().to_string();
 
-    // Determine effective model: prefer config default, then constant.
-    let model = config
-        .default_text_model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string());
+    let model = config.default_model();
 
-    let provider = config.api_provider().as_str().to_string();
+    let provider = config.provider_identity_for(config.api_provider());
     let approval_mode = config
         .approval_policy
         .as_deref()
@@ -2824,20 +2850,19 @@ async fn set_config(
 async fn reload_config(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<ReloadConfigResponse>, ApiError> {
-    let reloaded = Config::load(state.config_path.clone(), None)
+    let reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
         .map_err(|e| ApiError::internal(format!("Failed to reload config: {e}")))?;
+    state
+        .runtime_threads
+        .reload_config(reloaded.clone())
+        .await
+        .map_err(|err| ApiError::bad_request(format!("Config reload rejected: {err}")))?;
     {
         let mut config = state.config.write();
         *config = reloaded;
     }
-    // Propagate config to RuntimeThreadManager so model routing uses the new values.
-    state
-        .runtime_threads
-        .reload_config(state.config.read().clone());
-    // Sync running engines with the new config (model, compaction, timeouts, subagent settings).
-    state.runtime_threads.sync_engines_with_config().await;
     Ok(Json(ReloadConfigResponse {
-        message: "Config reloaded from disk, propagated to runtime and synced to active engines"
+        message: "Config reloaded from disk; new turns will resolve the updated provider routes"
             .to_string(),
     }))
 }
@@ -2905,7 +2930,10 @@ fn map_automation_err(err: anyhow::Error) -> ApiError {
 
 fn map_thread_err(err: anyhow::Error) -> ApiError {
     let message = err.to_string();
-    if message.contains("not found") {
+    let lower = message.to_ascii_lowercase();
+    if (lower.starts_with("thread '") && lower.ends_with("' not found"))
+        || lower.starts_with("thread not found:")
+    {
         ApiError::not_found(message)
     } else if message.contains("already has an active turn")
         || message.contains("No active turn")

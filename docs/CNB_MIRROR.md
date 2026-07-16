@@ -57,6 +57,7 @@ When CNB receives a `v*` tag, the root `.cnb.yml` tag pipeline builds Linux x64
 release assets from source and publishes a CNB release with:
 
 - `codewhale-linux-x64`
+- `codew-linux-x64`
 - `codewhale-tui-linux-x64`
 - `codewhale-artifacts-sha256.txt`
 
@@ -120,12 +121,16 @@ If the workflow is healthy but happened to fail on the release run
 without pushing anything:
 
 ```bash
-gh workflow run sync-cnb.yml --repo Hmbown/CodeWhale
+# Prefer rerunning the existing failed tag run when one exists.
+gh run rerun <failed-tag-run-id> --repo Hmbown/CodeWhale
+
+# If no tag run exists, dispatch from the exact existing release tag.
+gh workflow run sync-cnb.yml --repo Hmbown/CodeWhale --ref vX.Y.Z
 ```
 
-`workflow_dispatch` runs against the workflow's default branch
-(`main`), so this will sync the current `main` to CNB. To re-sync
-a specific tag, the manual `git push cnb` path above is the way.
+Do not omit `--ref` when repairing a tag: a default-branch dispatch syncs
+`main`, not `refs/tags/vX.Y.Z`. Afterward, prove the tag and its Linux x64
+release assets exist before directing users to CNB.
 
 ## Rotating `CNB_GIT_TOKEN`
 
@@ -162,9 +167,12 @@ behind GitHub-blocking networks should use one of these paths:
   [INSTALL.md](INSTALL.md#4-install-via-cargo-any-tier-1-rust-target).
 
 - **CNB release assets** for Linux x64, when the matching CNB tag pipeline has
-  completed successfully. Download `codewhale-linux-x64`,
+  completed successfully. Download `codewhale-linux-x64`, `codew-linux-x64`,
   `codewhale-tui-linux-x64`, and `codewhale-artifacts-sha256.txt` from the CNB
-  release for `vX.Y.Z`, then verify the binaries against the manifest.
+  release for `vX.Y.Z`, then verify the binaries against the manifest. The npm
+  wrapper can select this source with `CODEWHALE_USE_CNB_MIRROR=1` on Linux x64
+  and OpenHarmony x64 only; other platforms must use GitHub or a complete
+  `CODEWHALE_RELEASE_BASE_URL` mirror.
 
 - **`DEEPSEEK_TUI_RELEASE_BASE_URL`** environment variable, if a
   CDN mirror of release assets exists. The npm

@@ -41,6 +41,12 @@ pub struct FleetRun {
     pub id: FleetRunId,
     pub name: String,
     pub status: FleetRunStatus,
+    /// Maximum number of workers the manager may drive concurrently.
+    ///
+    /// Older ledgers omit this field; callers fall back to the persisted
+    /// worker roster when resuming those runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<usize>,
     #[serde(default)]
     pub task_specs: Vec<FleetTaskSpec>,
     #[serde(default)]
@@ -887,6 +893,15 @@ impl FleetAlertEndpoint {
 pub struct FleetResolvedRoute {
     /// Resolved provider canonical id (e.g. `"deepseek"`).
     pub provider_id: String,
+    /// Exact configured provider-table id when the worker used one.
+    ///
+    /// This is intentionally additive to `provider_id`: literal
+    /// `[providers.custom]` resolves to `Some("custom")`, while the legacy
+    /// idless root custom route resolves to `None`. Keeping the distinction
+    /// prevents a receipt from silently collapsing two different credential
+    /// and endpoint authorities into the same generic `custom` label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_exact_id: Option<String>,
     /// Resolved provider kind (e.g. `"deepseek"`).
     pub provider_kind: String,
     /// Canonical, provider-agnostic model identity, when known.
@@ -967,6 +982,17 @@ pub struct FleetReceipt {
     pub run_id: FleetRunId,
     pub task_id: String,
     pub worker_id: String,
+    /// Durable lease generation that produced this receipt.
+    ///
+    /// Optional for backward compatibility with receipts written before Fleet
+    /// attempts were fenced explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    /// Sequence of the terminal worker event finalized with this receipt.
+    ///
+    /// Optional so older ledger records remain replayable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_seq: Option<u64>,
     pub completed_at: String,
     pub result: FleetTaskResult,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1024,6 +1050,7 @@ mod tests {
             id: FleetRunId::from("run-001"),
             name: "dogfood smoke".to_string(),
             status: FleetRunStatus::Running,
+            max_workers: Some(1),
             task_specs: vec![FleetTaskSpec {
                 id: "task-1".to_string(),
                 name: "lint".to_string(),
@@ -1317,6 +1344,8 @@ mod tests {
             run_id: FleetRunId::from("run-003"),
             task_id: "task-1".to_string(),
             worker_id: "worker-b".to_string(),
+            attempt: Some(2),
+            terminal_seq: Some(7),
             completed_at: "2026-06-12T17:03:00Z".to_string(),
             result: FleetTaskResult::Pass,
             failure_kind: None,
@@ -1333,6 +1362,8 @@ mod tests {
         let back: FleetReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(back.result, FleetTaskResult::Pass);
         assert_eq!(back.score.as_ref().unwrap().value, 0.95);
+        assert_eq!(back.attempt, Some(2));
+        assert_eq!(back.terminal_seq, Some(7));
     }
 
     #[test]
@@ -1341,6 +1372,8 @@ mod tests {
             run_id: FleetRunId::from("run-004"),
             task_id: "task-2".to_string(),
             worker_id: "worker-c".to_string(),
+            attempt: None,
+            terminal_seq: None,
             completed_at: "2026-06-12T17:04:00Z".to_string(),
             result: FleetTaskResult::Partial,
             failure_kind: Some(FleetTaskFailureKind::Verifier),
@@ -1494,6 +1527,8 @@ mod tests {
             run_id: FleetRunId::from("run-route"),
             task_id: "task-route".to_string(),
             worker_id: "worker-route".to_string(),
+            attempt: Some(1),
+            terminal_seq: Some(4),
             completed_at: "2026-06-23T00:00:00Z".to_string(),
             result: FleetTaskResult::Pass,
             failure_kind: None,
@@ -1501,6 +1536,7 @@ mod tests {
             score: None,
             resolved_route: Some(FleetResolvedRoute {
                 provider_id: "deepseek".to_string(),
+                provider_exact_id: None,
                 provider_kind: "deepseek".to_string(),
                 canonical_model: Some("deepseek-v4-pro".to_string()),
                 wire_model_id: "deepseek-v4-pro".to_string(),
@@ -1590,6 +1626,8 @@ mod tests {
         let receipt: FleetReceipt = serde_json::from_str(legacy).unwrap();
         assert_eq!(receipt.task_id, "task-legacy");
         assert!(receipt.resolved_route.is_none());
+        assert!(receipt.attempt.is_none());
+        assert!(receipt.terminal_seq.is_none());
     }
 
     #[test]

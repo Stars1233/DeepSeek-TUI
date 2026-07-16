@@ -7,12 +7,22 @@ use crate::test_support::{EnvVarGuard, lock_test_env};
 use anyhow::{Context, bail};
 use futures_util::StreamExt;
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::sleep;
 use uuid::Uuid;
 
 struct MockExecutor;
+
+#[test]
+fn thread_route_credential_error_is_bad_request_not_not_found() {
+    let credential = map_thread_err(anyhow::anyhow!("DeepSeek API key not found"));
+    assert_eq!(credential.status, StatusCode::BAD_REQUEST);
+
+    let missing = map_thread_err(anyhow::anyhow!("thread 'thr_missing' not found"));
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
 
 #[test]
 fn runtime_tui_settings_reject_legacy_modes_and_do_not_save_env_overlays() -> Result<()> {
@@ -91,6 +101,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
             total_tokens: 0,
             model: "test-model".to_string(),
             model_provider: "deepseek".to_string(),
+            model_provider_id: None,
             workspace: PathBuf::from("."),
             mode: None,
             cost: Default::default(),
@@ -213,6 +224,8 @@ fn messages_from_thread_detail_batches_tool_results() {
         created_at: now,
         updated_at: now,
         model: DEFAULT_TEXT_MODEL.to_string(),
+        model_provider: None,
+        model_provider_id: None,
         workspace: PathBuf::from("."),
         mode: "agent".to_string(),
         allow_shell: false,
@@ -238,6 +251,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         duration_ms: Some(0),
         usage: None,
         effective_provider: None,
+        effective_provider_id: None,
         effective_billing_surface: None,
         effective_model: None,
         error: None,
@@ -373,6 +387,71 @@ fn messages_from_thread_detail_batches_tool_results() {
         }
         other => panic!("expected second tool result, got {other:?}"),
     }
+}
+
+#[test]
+fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
+    let now = Utc::now();
+    let detail = ThreadDetail {
+        thread: ThreadRecord {
+            schema_version: 2,
+            id: "thr_legacy_custom".to_string(),
+            created_at: now,
+            updated_at: now,
+            model: "local-model".to_string(),
+            // Pre-additive records overloaded this legacy field with the exact id.
+            model_provider: Some("lm-studio".to_string()),
+            model_provider_id: None,
+            workspace: PathBuf::from("."),
+            mode: "agent".to_string(),
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            latest_turn_id: None,
+            latest_response_bookmark: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            title: None,
+            session_id: None,
+        },
+        turns: Vec::new(),
+        items: Vec::new(),
+        latest_seq: 0,
+    };
+    let config = Config {
+        provider: Some("lm-studio".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom: std::collections::HashMap::from([(
+                "lm-studio".to_string(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+                    model: Some("local-model".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut session = crate::session_manager::create_saved_session_with_mode(
+        &[],
+        "local-model",
+        std::path::Path::new("."),
+        0,
+        None,
+        Some("agent"),
+    );
+
+    sessions::stamp_session_provider_from_thread(&config, &detail, &mut session.metadata)
+        .expect("normalize legacy exact provider");
+
+    assert_eq!(session.metadata.model_provider, "custom");
+    assert_eq!(
+        session.metadata.model_provider_id.as_deref(),
+        Some("lm-studio")
+    );
 }
 
 #[test]
@@ -522,8 +601,17 @@ async fn spawn_test_server_with_root_token_mobile_workspace(
         mobile_enabled,
         workspace,
         None,
+        None,
     )
     .await
+}
+
+#[derive(Default)]
+struct TestServerOverrides {
+    sub_agent_manager: Option<SharedSubAgentManager>,
+    fleet_codewhale_binary: Option<String>,
+    config_path: Option<PathBuf>,
+    config_profile: Option<String>,
 }
 
 async fn spawn_test_server_with_root_token_mobile_workspace_and_subagents(
@@ -533,6 +621,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_subagents(
     mobile_enabled: bool,
     workspace: PathBuf,
     sub_agent_manager: Option<SharedSubAgentManager>,
+    fleet_codewhale_binary: Option<String>,
 ) -> Result<
     Option<(
         SocketAddr,
@@ -540,26 +629,28 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_subagents(
         tokio::task::JoinHandle<()>,
     )>,
 > {
-    spawn_test_server_with_root_token_mobile_workspace_subagents_and_config_path(
+    spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         root,
         sessions_dir,
         runtime_token,
         mobile_enabled,
         workspace,
-        sub_agent_manager,
-        None,
+        TestServerOverrides {
+            sub_agent_manager,
+            fleet_codewhale_binary,
+            ..TestServerOverrides::default()
+        },
     )
     .await
 }
 
-async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config_path(
+async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
     root: PathBuf,
     sessions_dir: PathBuf,
     runtime_token: Option<String>,
     mobile_enabled: bool,
     workspace: PathBuf,
-    sub_agent_manager: Option<SharedSubAgentManager>,
-    config_path: Option<PathBuf>,
+    overrides: TestServerOverrides,
 ) -> Result<
     Option<(
         SocketAddr,
@@ -571,6 +662,11 @@ async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config
     fs::create_dir_all(&sessions_dir)?;
     fs::create_dir_all(&workspace)?;
     let config = Config {
+        // Runtime-API tests that exercise a real turn boundary must pass the
+        // same synchronous client preflight as production. Keep the client
+        // hermetic; any later request fails fast against loopback.
+        api_key: Some("runtime-api-test-key".to_string()),
+        base_url: Some("http://127.0.0.1:1/v1".to_string()),
         mcp_config_path: Some(root.join("mcp.json").to_string_lossy().to_string()),
         ..Config::default()
     };
@@ -599,8 +695,9 @@ async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config
     runtime_threads.attach_automation_manager(automations.clone());
 
     let auth_required = runtime_token.is_some();
-    let sub_agent_manager =
-        sub_agent_manager.unwrap_or_else(|| runtime_api_sub_agent_manager(&workspace, 2));
+    let sub_agent_manager = overrides
+        .sub_agent_manager
+        .unwrap_or_else(|| runtime_api_sub_agent_manager(&workspace, 2));
     let state = RuntimeApiState {
         config: Arc::new(parking_lot::RwLock::new(config)),
         workspace,
@@ -608,7 +705,8 @@ async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config
         runtime_threads: runtime_threads.clone(),
         cors_origins: Vec::new(),
         sessions_dir,
-        config_path: config_path.clone(),
+        config_path: overrides.config_path.clone(),
+        config_profile: overrides.config_profile,
         mcp_pool: Arc::new(Mutex::new(None)),
         automations,
         sub_agent_manager,
@@ -620,6 +718,9 @@ async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config
         bind_host: "127.0.0.1".to_string(),
         bind_port: 0,
         mobile_enabled,
+        fleet_codewhale_binary: overrides
+            .fleet_codewhale_binary
+            .unwrap_or_else(configured_codewhale_binary),
     };
     let app = build_router(state);
     let listener = match TcpListener::bind("127.0.0.1:0").await {
@@ -659,14 +760,45 @@ async fn spawn_test_server_with_config_path(
     let sessions_dir = root.join("sessions");
     let workspace = root.join("workspace");
     fs::create_dir_all(&root)?;
-    spawn_test_server_with_root_token_mobile_workspace_subagents_and_config_path(
+    spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         root,
         sessions_dir,
         None,
         false,
         workspace,
+        TestServerOverrides {
+            config_path: Some(config_path),
+            ..TestServerOverrides::default()
+        },
+    )
+    .await
+}
+
+async fn spawn_test_server_with_config_path_and_profile(
+    config_path: PathBuf,
+    config_profile: String,
+) -> Result<
+    Option<(
+        SocketAddr,
+        SharedRuntimeThreadManager,
+        tokio::task::JoinHandle<()>,
+    )>,
+> {
+    let root = std::env::temp_dir().join(format!("codewhale-config-api-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&root)?;
+    spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        root,
+        sessions_dir,
         None,
-        Some(config_path),
+        false,
+        workspace,
+        TestServerOverrides {
+            config_path: Some(config_path),
+            config_profile: Some(config_profile),
+            ..TestServerOverrides::default()
+        },
     )
     .await
 }
@@ -690,6 +822,60 @@ async fn read_first_sse_frame(resp: reqwest::Response) -> Result<String> {
             bail!("SSE frame exceeded 64KB without delimiter");
         }
     }
+}
+
+#[cfg(unix)]
+fn write_fake_fleet_binary(root: &Path, marker: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let binary = root.join("fake-codewhale");
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '{{\"type\":\"content\",\"content\":\"restarted through Runtime API\"}}\\n'\nexit 0\n",
+            marker.display()
+        ),
+    )?;
+    let mut permissions = fs::metadata(&binary)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&binary, permissions)?;
+    Ok(binary)
+}
+
+#[cfg(windows)]
+fn write_fake_fleet_binary(root: &Path, marker: &Path) -> Result<PathBuf> {
+    // Exercise the same executable/Job Object path as a released Windows
+    // Codewhale binary. A `.cmd` fake introduces an extra `cmd.exe` wrapper
+    // whose lifetime can end before the Fleet host attaches its Job Object,
+    // making the test race a process topology production does not use.
+    let source = root.join("fake-codewhale.rs");
+    let binary = root.join("fake-codewhale.exe");
+    let helper = format!(
+        r##"fn main() {{
+    std::fs::File::create({marker:?}).expect("create Fleet restart marker");
+    println!("{{}}", r#"{{"type":"content","content":"restarted through Runtime API"}}"#);
+    std::thread::sleep(std::time::Duration::from_millis(750));
+}}
+"##,
+        marker = marker.to_string_lossy().as_ref(),
+    );
+    fs::write(&source, helper)?;
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = std::process::Command::new(rustc)
+        .arg("--edition=2024")
+        .arg("--crate-name=codewhale_fleet_test_helper")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .context("compile Windows Fleet restart helper")?;
+    if !output.status.success() {
+        bail!(
+            "failed to compile Windows Fleet restart helper: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(binary)
 }
 
 fn parse_sse_frame(frame: &str) -> Result<(String, serde_json::Value)> {
@@ -1253,6 +1439,8 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
         },
         1,
     )?;
+    let restarted_marker = root.join("restarted-worker-ran");
+    let fake_codewhale = write_fake_fleet_binary(&root, &restarted_marker)?;
     let worker_id = report.worker_ids[0].clone();
     let sessions_dir = root.join("sessions");
     let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, 2);
@@ -1286,6 +1474,7 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
             false,
             workspace,
             Some(sub_agent_manager),
+            Some(fake_codewhale.display().to_string()),
         )
         .await?
     else {
@@ -1343,7 +1532,47 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
         .json()
         .await?;
     assert_eq!(restarted["action"], "restart");
+    assert_eq!(restarted["execution"], "scheduled");
     assert_eq!(restarted["worker"]["status"], "busy");
+
+    let terminal_status = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status = manager.run_status(&report.run_id).unwrap();
+            if status.queued == 0 && status.running == 0 {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("Runtime API restart never drove the replacement attempt to completion")?;
+    assert_eq!(
+        terminal_status.completed, 1,
+        "replacement attempt did not complete successfully: {terminal_status:?}"
+    );
+    assert_eq!(
+        terminal_status.failed, 0,
+        "replacement attempt failed: {terminal_status:?}"
+    );
+    assert!(
+        restarted_marker.is_file(),
+        "Runtime API reported a restart without launching its Fleet worker"
+    );
+    let ledger_state = manager.rebuild_state()?;
+    let restarted_task = ledger_state
+        .tasks
+        .values()
+        .find(|task| task.entry.run_id == report.run_id && task.entry.task_id == "task-a")
+        .context("missing restarted task")?;
+    assert_eq!(restarted_task.entry.attempts, 2);
+    assert_eq!(restarted_task.status, FleetTaskLedgerStatus::Completed);
+    let receipt = ledger_state
+        .receipts
+        .values()
+        .find(|receipt| receipt.run_id == report.run_id && receipt.task_id == "task-a")
+        .context("missing restarted receipt")?;
+    assert_eq!(receipt.attempt, Some(2));
+    assert!(receipt.terminal_seq.is_some());
 
     let stopped: serde_json::Value = client
         .post(format!(
@@ -1356,8 +1585,8 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
         .json()
         .await?;
     assert_eq!(stopped["action"], "stop");
-    assert_eq!(stopped["stopped"], 1);
-    assert_eq!(stopped["status"]["cancelled"], 1);
+    assert_eq!(stopped["stopped"], 0);
+    assert_eq!(stopped["status"]["completed"], 1);
 
     handle.abort();
     Ok(())
@@ -1736,7 +1965,7 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                         })
                         .await;
                 }
-                Op::CompactContext => {
+                Op::CompactContext { .. } => {
                     let _ = tx_event
                         .send(EngineEvent::TurnComplete {
                             usage: Usage {
@@ -2375,6 +2604,63 @@ async fn session_resume_thread_returns_404_for_missing_session() -> Result<()> {
 }
 
 #[tokio::test]
+async fn session_resume_thread_returns_400_when_saved_custom_provider_was_removed() -> Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-session-removed-provider-{}",
+        Uuid::new_v4()
+    ));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let session = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_removed_custom_provider",
+            "title": "Removed custom provider",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 1,
+            "total_tokens": 10,
+            "model": "local-code-model",
+            "model_provider": "lm-studio",
+            "workspace": "/tmp/test",
+            "mode": "agent"
+        },
+        "messages": [{
+            "role": "user",
+            "content": [{ "type": "text", "text": "Resume me" }]
+        }],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_removed_custom_provider.json"),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root, sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/sessions/sess_removed_custom_provider/resume-thread"
+        ))
+        .json(&json!({}))
+        .send()
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await?;
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("[providers.lm-studio]"), "{message}");
+    assert!(message.contains("will not fall back"), "{message}");
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_resume_thread_creates_thread_from_saved_session() -> Result<()> {
     let root = std::env::temp_dir().join(format!("deepseek-session-resume-{}", Uuid::new_v4()));
     let sessions_dir = root.join("sessions");
@@ -2439,6 +2725,8 @@ async fn session_resume_thread_creates_thread_from_saved_session() -> Result<()>
         .json()
         .await?;
     assert_eq!(detail["thread"]["id"], thread_id);
+    assert_eq!(detail["thread"]["model_provider"], "deepseek");
+    assert_eq!(detail["thread"]["workspace"], "/tmp/test");
     assert_eq!(detail["turns"].as_array().map_or(0, Vec::len), 1);
     assert_eq!(detail["items"].as_array().map_or(0, Vec::len), 2);
 
@@ -3420,7 +3708,7 @@ async fn mobile_page_is_available_only_when_enabled() -> Result<()> {
         .await?
         .error_for_status()?;
     let html = enabled.text().await?;
-    assert!(html.contains("CodeWhale Mobile"));
+    assert!(html.contains("Codewhale Mobile"));
     assert!(html.contains("/v1/approvals/"));
     assert!(html.contains("MAX_VISIBLE_EVENTS = 100"));
     assert!(html.contains("replay_limit="));
@@ -3449,7 +3737,7 @@ async fn mobile_page_serves_shell_when_auth_enabled() -> Result<()> {
         .await?
         .error_for_status()?;
     let html = shell.text().await?;
-    assert!(html.contains("CodeWhale Mobile"));
+    assert!(html.contains("Codewhale Mobile"));
     assert!(html.contains("TOKEN_COOKIE"));
 
     let bearer = client
@@ -3458,7 +3746,7 @@ async fn mobile_page_serves_shell_when_auth_enabled() -> Result<()> {
         .send()
         .await?
         .error_for_status()?;
-    assert!(bearer.text().await?.contains("CodeWhale Mobile"));
+    assert!(bearer.text().await?.contains("Codewhale Mobile"));
 
     handle.abort();
     Ok(())
@@ -3481,7 +3769,7 @@ async fn mobile_insecure_mode_allows_page_and_v1_routes_without_token() -> Resul
         .send()
         .await?
         .error_for_status()?;
-    assert!(page.text().await?.contains("CodeWhale Mobile"));
+    assert!(page.text().await?.contains("Codewhale Mobile"));
 
     let summary = client
         .get(format!("http://{addr}/v1/threads/summary"))
@@ -4202,6 +4490,52 @@ async fn reload_config_reads_from_config_path_and_updates_in_memory_state() -> R
         Some(5),
         "after reload, subagents_max_depth should be 5"
     );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_config_preserves_profile_selected_named_custom_route() -> Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-config-reload-profile-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("custom-config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "deepseek"
+default_text_model = "deepseek-v4-pro"
+
+[profiles.local]
+provider = "lm-studio"
+
+[profiles.local.providers.lm-studio]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18190/v1"
+model = "profile-local-model"
+api_key = "profile-test-key"
+"#,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path_and_profile(config_file, "local".to_string()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let response = client
+        .post(format!("http://{addr}/v1/config/reload"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let config = get_config(&client, &addr).await;
+    assert_eq!(config["provider"], "lm-studio");
+    assert_eq!(config["model"], "profile-local-model");
+    assert_eq!(config["base_url"], "http://127.0.0.1:18190/v1");
 
     handle.abort();
     Ok(())

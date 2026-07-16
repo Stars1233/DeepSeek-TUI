@@ -20,8 +20,8 @@ use codewhale_protocol::fleet::{
 };
 
 use super::profile::AgentProfile;
-use crate::config::ApiProvider;
-use crate::route_runtime::resolve_route_candidate;
+use crate::config::{ApiProvider, Config};
+use crate::route_runtime::{resolve_route_candidate, resolve_runtime_route};
 use crate::tools::subagent::{AgentWorkerSpec, AgentWorkerToolProfile, SubAgentType};
 use crate::worker_profile::{ModelRoute, ToolScope, WorkerRuntimeProfile};
 
@@ -139,6 +139,18 @@ pub(crate) fn resolve_fleet_route(
     agent_profiles: &[AgentProfile],
     session_model: Option<&str>,
 ) -> Option<FleetResolvedRoute> {
+    resolve_fleet_route_with_config(task_spec, agent_profiles, session_model, None)
+}
+
+/// Resolve a Fleet receipt from the same live Config used to launch workers.
+/// Named custom identities are emitted only through this proof-bearing path;
+/// the hermetic fallback above cannot truthfully validate arbitrary ids.
+pub(crate) fn resolve_fleet_route_with_config(
+    task_spec: &FleetTaskSpec,
+    agent_profiles: &[AgentProfile],
+    session_model: Option<&str>,
+    config: Option<&Config>,
+) -> Option<FleetResolvedRoute> {
     let agent_profile = resolve_task_agent_profile(task_spec, agent_profiles)
         .ok()
         .flatten();
@@ -155,20 +167,48 @@ pub(crate) fn resolve_fleet_route(
         fleet_route_model_selector_with_source(worker_profile, agent_profile, session_model);
     let model_selector = model_selector.as_deref();
 
-    // Resolve within the profile's own explicit provider scope when it has
-    // one (#4093); otherwise fall back to the existing default scope (mirrors
-    // `ProviderKind::default()`). The resolver is fully offline/hermetic and
-    // never reads secrets, env, or config. User-named custom providers need the
-    // session Config to resolve their table, so this receipt path omits the
-    // route instead of fabricating DeepSeek details for them (#3965).
-    let provider = match explicit_fleet_provider_id(agent_profile).as_deref() {
-        Some(provider_id) => ApiProvider::parse(provider_id)?,
-        None => ApiProvider::Deepseek,
+    let explicit_provider_id = explicit_fleet_provider_id(agent_profile);
+    let (candidate, provider_id, provider_exact_id, route_source) = if let Some(config) = config {
+        let identity = match explicit_provider_id.as_deref() {
+            Some(provider_id) => config.resolve_provider_identity(provider_id).ok()?,
+            None => config
+                .resolve_provider_identity(&config.provider_identity_for(config.api_provider()))
+                .ok()?,
+        };
+        let mut scoped = config.clone();
+        scoped.provider = Some(identity.key.clone());
+        let route = resolve_runtime_route(&scoped, identity.provider, model_selector)
+            .ok()?
+            .validate()
+            .ok()?;
+        let provider_exact_id = (route.identity.provider == ApiProvider::Custom)
+            .then_some(route.identity.exact_id)
+            .flatten();
+        (
+            route.candidate,
+            route.identity.key,
+            provider_exact_id,
+            "runtime_route",
+        )
+    } else {
+        let provider = match explicit_provider_id.as_deref() {
+            Some(provider_id) => {
+                let provider = ApiProvider::parse(provider_id)?;
+                if provider == ApiProvider::Custom {
+                    return None;
+                }
+                provider
+            }
+            None => ApiProvider::Deepseek,
+        };
+        let candidate = resolve_route_candidate(provider, model_selector, None, None, None).ok()?;
+        let provider_id = candidate.provider_id.as_str().to_string();
+        (candidate, provider_id, None, "resolver")
     };
-    let candidate = resolve_route_candidate(provider, model_selector, None, None, None).ok()?;
 
     Some(FleetResolvedRoute {
-        provider_id: candidate.provider_id.as_str().to_string(),
+        provider_id,
+        provider_exact_id,
         provider_kind: candidate.provider_kind.as_str().to_string(),
         canonical_model: candidate
             .canonical_model
@@ -191,7 +231,69 @@ pub(crate) fn resolve_fleet_route(
         loadout_source: loadout_source.map(str::to_string),
         model_class_source: model_class_source.map(str::to_string),
         model_source: Some(model_source.to_string()),
-        source: "resolver".to_string(),
+        source: route_source.to_string(),
+    })
+}
+
+/// Build the receipt route from route identity reported by the worker itself.
+///
+/// Provider/model fields in this path are process-boundary evidence, not a
+/// second resolution attempt in the manager's potentially different config.
+/// Fleet task/profile fields remain intent metadata and are safe to derive
+/// locally. Protocol and canonical model stay explicitly unreported because
+/// the current exec terminal envelope does not carry them.
+pub(crate) fn resolve_fleet_route_from_worker_report(
+    task_spec: &FleetTaskSpec,
+    agent_profiles: &[AgentProfile],
+    session_model: Option<&str>,
+    provider: &str,
+    provider_exact_id: Option<&str>,
+    model: &str,
+) -> Option<FleetResolvedRoute> {
+    let provider = non_empty_trimmed(provider)?;
+    let model = non_empty_trimmed(model)?;
+    let provider_exact_id = match provider_exact_id {
+        Some(provider_exact_id) => Some(non_empty_trimmed(provider_exact_id)?),
+        None => None,
+    };
+    let provider_kind = ApiProvider::parse(provider)?;
+    if provider_exact_id.is_some() && provider_kind != ApiProvider::Custom {
+        return None;
+    }
+    let provider_id = provider_exact_id.unwrap_or(provider);
+    let agent_profile = resolve_task_agent_profile(task_spec, agent_profiles)
+        .ok()
+        .flatten();
+    let worker_profile = task_spec.worker.as_ref();
+    let (role, role_source) = effective_fleet_role_with_source(worker_profile, agent_profile);
+    let (loadout, loadout_source) =
+        effective_fleet_loadout_with_source(worker_profile, agent_profile);
+    let (model_class, model_class_source) = task_model_class_with_source(worker_profile);
+    let (model_selector, model_source) =
+        fleet_route_model_selector_with_source(worker_profile, agent_profile, session_model);
+    Some(FleetResolvedRoute {
+        provider_id: provider_id.to_string(),
+        provider_exact_id: provider_exact_id.map(str::to_string),
+        provider_kind: provider_kind.as_str().to_string(),
+        canonical_model: None,
+        wire_model_id: model.to_string(),
+        protocol: "unreported".to_string(),
+        role,
+        loadout: loadout_intent_label(&loadout),
+        model_class,
+        model_route: Some(
+            model_route_label(&fleet_model_route_for_loadout(
+                model_selector.as_deref().unwrap_or("auto"),
+                &loadout,
+            ))
+            .to_string(),
+        ),
+        reasoning_effort: effective_fleet_reasoning_effort(agent_profile),
+        role_source: role_source.map(str::to_string),
+        loadout_source: loadout_source.map(str::to_string),
+        model_class_source: model_class_source.map(str::to_string),
+        model_source: Some(model_source.to_string()),
+        source: "worker_terminal_metadata".to_string(),
     })
 }
 
@@ -248,7 +350,7 @@ fn fleet_task_prompt_with_profile(
         .filter(|role| !role.is_empty())
         .unwrap_or("general");
     let mut prompt = String::new();
-    prompt.push_str("You have been summoned as a CodeWhale Fleet member (");
+    prompt.push_str("You have been summoned as a Codewhale Fleet member (");
     prompt.push_str(role);
     prompt.push_str(") by the Fleet orchestrator.\n\n");
     prompt.push_str("Fleet operating contract:\n");
@@ -763,6 +865,7 @@ fn profile_origin_label(origin: crate::fleet::roster::ProfileOrigin) -> &'static
     match origin {
         crate::fleet::roster::ProfileOrigin::BuiltIn => "built_in",
         crate::fleet::roster::ProfileOrigin::Config => "config",
+        crate::fleet::roster::ProfileOrigin::Personal => "personal",
         crate::fleet::roster::ProfileOrigin::Workspace => "workspace",
     }
 }
@@ -1170,7 +1273,7 @@ mod tests {
 
         let prompt = fleet_task_prompt(&task);
 
-        assert!(prompt.contains("summoned as a CodeWhale Fleet member (general)"));
+        assert!(prompt.contains("summoned as a Codewhale Fleet member (general)"));
         assert!(prompt.contains("Fleet operating contract:"));
         assert!(prompt.contains("keep sibling or topology assumptions out of your answer"));
         assert!(prompt.contains("Review protocol"));
@@ -1226,7 +1329,7 @@ mod tests {
         assert_eq!(spec.agent_type, SubAgentType::Review);
         assert!(
             spec.objective
-                .contains("summoned as a CodeWhale Fleet member (reviewer)")
+                .contains("summoned as a Codewhale Fleet member (reviewer)")
         );
         assert!(spec.objective.contains("Fleet profile: reviewer"));
         assert!(
@@ -1451,7 +1554,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_fleet_route_omits_custom_provider_without_config_snapshot() {
+    fn resolve_fleet_route_preserves_exact_named_custom_provider_without_secrets() {
         let mut profile = agent_profile(
             "local",
             "scout",
@@ -1472,11 +1575,204 @@ mod tests {
             )),
         );
 
-        let route = resolve_fleet_route(&task, &[profile], Some("deepseek-v4-pro"));
+        assert!(
+            resolve_fleet_route(&task, &[profile.clone()], Some("deepseek-v4-pro")).is_none(),
+            "a profile string alone is not proof that a named custom route exists"
+        );
+        let config = Config {
+            provider: Some("lm-studio".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: std::collections::HashMap::from([(
+                    "lm-studio".to_string(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+                        model: Some("qwen-2.5-7b".to_string()),
+                        api_key: Some("receipt-must-redact-this".to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let route = resolve_fleet_route_with_config(
+            &task,
+            &[profile],
+            Some("deepseek-v4-pro"),
+            Some(&config),
+        )
+        .expect("live config should prove the named custom route");
+
+        assert_eq!(route.provider_id, "lm-studio");
+        assert_eq!(route.provider_exact_id.as_deref(), Some("lm-studio"));
+        assert_eq!(route.provider_kind, "custom");
+        assert_eq!(route.wire_model_id, "qwen-2.5-7b");
+        assert_eq!(route.protocol, "chat_completions");
+        assert_eq!(route.model_source.as_deref(), Some("agent_profile.model"));
+        assert_eq!(route.source, "runtime_route");
+
+        // The exact identity and wire model are durable, while endpoint/auth
+        // config remains outside the receipt. The generic Custom descriptor's
+        // placeholder endpoint is never serialized either.
+        let json = serde_json::to_string(&route).unwrap();
+        let haystack = json.to_ascii_lowercase();
+        assert!(haystack.contains("lm-studio"));
+        assert!(!haystack.contains("base_url"));
+        assert!(!haystack.contains("http://"));
+        assert!(!haystack.contains("https://"));
+        for needle in [
+            "api_key",
+            "apikey",
+            "api-key",
+            "authorization",
+            "bearer ",
+            "auth_token",
+            "auth-token",
+            "password",
+            "credential",
+            "sk-ant-",
+            "sk-proj-",
+            "sk-or-",
+            "secret",
+            "receipt-must-redact-this",
+        ] {
+            assert!(
+                !haystack.contains(needle),
+                "named-custom route JSON must not contain secret marker {needle:?}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn fleet_receipt_prefers_live_case_colliding_custom_identity() {
+        let mut profile = agent_profile(
+            "case-local",
+            "scout",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.model = Some("case-model".to_string());
+        profile.profile.provider = Some("CUSTOM".to_string());
+        let task = fleet_task(
+            "case-custom-receipt",
+            Some(worker_profile(
+                Some("case-local"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+        let config = Config {
+            provider: Some("CUSTOM".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: std::collections::HashMap::from([(
+                    "CUSTOM".to_string(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        base_url: Some("http://127.0.0.1:5678/v1".to_string()),
+                        model: Some("case-model".to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let route = resolve_fleet_route_with_config(
+            &task,
+            &[profile],
+            Some("deepseek-v4-pro"),
+            Some(&config),
+        )
+        .expect("live config route proof");
+        assert_eq!(route.provider_id, "CUSTOM");
+        assert_eq!(route.provider_exact_id.as_deref(), Some("CUSTOM"));
+        assert_eq!(route.provider_kind, "custom");
+        assert_eq!(route.source, "runtime_route");
+    }
+
+    #[test]
+    fn worker_report_route_preserves_literal_custom_vs_idless_root_without_local_resolution() {
+        let task = fleet_task("reported-custom", None);
+        let literal = resolve_fleet_route_from_worker_report(
+            &task,
+            &[],
+            Some("manager-model-y"),
+            "custom",
+            Some("custom"),
+            "worker-model-x",
+        )
+        .expect("literal custom worker report");
+        let root = resolve_fleet_route_from_worker_report(
+            &task,
+            &[],
+            Some("manager-model-y"),
+            "custom",
+            None,
+            "worker-model-root",
+        )
+        .expect("idless root custom worker report");
+
+        assert_eq!(literal.provider_id, "custom");
+        assert_eq!(literal.provider_exact_id.as_deref(), Some("custom"));
+        assert_eq!(literal.wire_model_id, "worker-model-x");
+        assert_eq!(root.provider_id, "custom");
+        assert_eq!(root.provider_exact_id, None);
+        assert_eq!(root.wire_model_id, "worker-model-root");
+        assert_eq!(literal.source, "worker_terminal_metadata");
+        assert_eq!(root.source, "worker_terminal_metadata");
+
+        let literal_json = serde_json::to_value(&literal).unwrap();
+        let root_json = serde_json::to_value(&root).unwrap();
+        assert_eq!(literal_json["provider_exact_id"], "custom");
+        assert!(root_json.get("provider_exact_id").is_none());
+        assert_ne!(literal, root);
+    }
+
+    #[test]
+    fn worker_report_builtin_route_does_not_become_custom_exact_route() {
+        let task = fleet_task("reported-built-in", None);
+        let route = resolve_fleet_route_from_worker_report(
+            &task,
+            &[],
+            None,
+            "deepseek",
+            None,
+            "deepseek-v4-pro",
+        )
+        .expect("built-in worker report");
+
+        assert_eq!(route.provider_id, "deepseek");
+        assert_eq!(route.provider_exact_id, None);
+        assert_eq!(route.provider_kind, "deepseek");
 
         assert!(
-            route.is_none(),
-            "custom providers need the session Config snapshot; do not fabricate a DeepSeek receipt"
+            resolve_fleet_route_from_worker_report(
+                &task,
+                &[],
+                None,
+                "deepseek",
+                Some("custom-x"),
+                "deepseek-v4-pro",
+            )
+            .is_none(),
+            "built-in kind plus custom exact id is contradictory provenance"
+        );
+        assert!(
+            resolve_fleet_route_from_worker_report(
+                &task,
+                &[],
+                None,
+                "custom",
+                Some("   "),
+                "root-model",
+            )
+            .is_none(),
+            "present-empty exact id must not collapse to idless custom root"
         );
     }
 

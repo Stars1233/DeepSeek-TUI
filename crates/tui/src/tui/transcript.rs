@@ -66,6 +66,13 @@ struct CachedCell {
     /// Whether this cell is conversational (User/Assistant/Thinking). Used
     /// for spacer calculations.
     is_conversational: bool,
+    /// Whether this cell is model reasoning. Thinking and the answer that
+    /// follows are one response unit, so they should not acquire the same
+    /// full turn gap used between user and assistant messages.
+    is_thinking: bool,
+    /// Whether this cell is assistant prose. Kept separate from the broader
+    /// conversational flag so spacer policy can join it to adjacent thinking.
+    is_assistant: bool,
     /// Whether this cell is a System or Tool cell (affects spacer rules).
     is_system_or_tool: bool,
     /// Whether this cell participates in the compact tool-card rail group.
@@ -297,6 +304,8 @@ impl TranscriptViewCache {
                 is_empty,
                 is_stream_continuation: cell.is_stream_continuation(),
                 is_conversational: cell.is_conversational(),
+                is_thinking: matches!(cell, HistoryCell::Thinking { .. }),
+                is_assistant: matches!(cell, HistoryCell::Assistant { .. }),
                 is_system_or_tool: matches!(
                     cell,
                     HistoryCell::System { .. }
@@ -480,9 +489,22 @@ fn spacer_rows_between(
         return 0;
     }
 
+    // Reasoning and answer prose are two states of one model response, not
+    // separate turns. Keep that bundle visually continuous; whitespace then
+    // marks the actual handoff between the user and Codewhale and avoids the
+    // stacked-card rhythm seen at compact release sizes.
+    if (current.is_thinking && (next.is_thinking || next.is_assistant))
+        || (current.is_assistant && next.is_thinking)
+    {
+        return 0;
+    }
+
     let conversational_gap = match spacing {
-        TranscriptSpacing::Compact => 0,
-        TranscriptSpacing::Comfortable => 1,
+        // Compact still separates distinct people/turn blocks. It removes
+        // secondary chrome and tool gaps, not the boundary between a user and
+        // an assistant; without this floor dense 89-column transcripts read
+        // as one uninterrupted paragraph.
+        TranscriptSpacing::Compact | TranscriptSpacing::Comfortable => 1,
         TranscriptSpacing::Spacious => 2,
     };
     let secondary_gap = match spacing {
@@ -1078,6 +1100,54 @@ mod tests {
         assert!(
             !lines.iter().any(String::is_empty),
             "adjacent tool cells should not be separated by blank spacer rows: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn compact_spacing_keeps_conversation_blocks_separate() {
+        let cells = vec![
+            user_cell("Please verify the release."),
+            assistant_cell("I will check the receipts.", false),
+        ];
+        let revisions = vec![1u64, 1];
+        let mut cache = TranscriptViewCache::new();
+        let options = TranscriptRenderOptions {
+            spacing: TranscriptSpacing::Compact,
+            ..TranscriptRenderOptions::default()
+        };
+
+        cache.ensure(&cells, &revisions, 89, options);
+        let lines = plain_lines(&cache);
+
+        assert!(
+            lines.iter().any(String::is_empty),
+            "compact density still needs one user/assistant boundary: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn compact_spacing_keeps_reasoning_and_answer_in_one_response_block() {
+        let cells = vec![
+            HistoryCell::Thinking {
+                content: "I should verify the release receipts first.".to_string(),
+                streaming: false,
+                duration_secs: Some(0.4),
+            },
+            assistant_cell("The release receipts are green.", false),
+        ];
+        let revisions = vec![1u64, 1];
+        let mut cache = TranscriptViewCache::new();
+        let options = TranscriptRenderOptions {
+            spacing: TranscriptSpacing::Compact,
+            ..TranscriptRenderOptions::default()
+        };
+
+        cache.ensure(&cells, &revisions, 89, options);
+        let lines = plain_lines(&cache);
+
+        assert!(
+            !lines.iter().any(String::is_empty),
+            "reasoning and its answer should read as one response block: {lines:?}"
         );
     }
 

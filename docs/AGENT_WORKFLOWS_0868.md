@@ -1,14 +1,18 @@
 # CodeWhale v0.8.68 — Agent Workflow Playbook
 
-> **Status (2026-07-13): Historical execution playbook for an unpublished
-> release candidate.** v0.8.68 has not yet been tagged or publicly published,
+> **Status (2026-07-15): Historical execution playbook superseded by v0.9.0.**
+> v0.8.68 was never tagged or publicly published,
 > and the waves/checkmarks below are not proof that current acceptance criteria
 > or release gates pass. Use the current
-> [v0.8.68 release-candidate ledger](releases/v0.8.68-release-candidate.md) for
+> [v0.9.0 release-candidate ledger](releases/v0.9.0-release-candidate.md) for
 > release truth. The settled product vocabulary remains useful and should not
 > be re-derived: **Fleet = who · Workflow = what order · Lane = running
 > instance · Runtime = where/how**. The architecture/dogfood issues linked
 > below remain GitHub-tracked work until their acceptance evidence is reviewed.
+> As of 2026-07-15, milestone #53 is closed historical. Do not use this
+> playbook or the `v0868_*` workflows to assign new issues. Current agent-task
+> intake is version-neutral, and maintainers assign the active milestone
+> explicitly (the first post-v0.9.0 roadmap milestone is `v0.9.1`).
 
 This document tells autonomous agents how to systematically complete the v0.8.68
 release. It pairs with:
@@ -59,11 +63,9 @@ DEFER (0.9.0) during sweep unless tied to a stopship fix.
 ## Quick start
 
 ```bash
-# 1. Sync and verify branch (implementation always from main)
+# 1. Use a clean disposable checkout for acceptance. Do not create a fix branch.
 cd CodeWhale
 git fetch origin
-git checkout main && git pull origin main
-git checkout -b codex/v0868-fix-<issue>   # e.g. codex/v0868-fix-4090
 git status -sb
 
 # 2. Board truth
@@ -85,13 +87,14 @@ cargo build --release -p codewhale-tui
 
 ## Execution order (waves)
 
-Work top-to-bottom. **Do not start Waves 2–4 or v0.8.69 refactors until stopship
-is green** (#4090, #4093, #4094 closed or verified fixed on `main`).
+The implementation waves below are historical. The active Wave 1 task is the
+read-only orchestration acceptance run; do not use it to reopen or recreate fix
+branches for the already-landed #4090/#4093/#4094 work.
 
 | Wave | Workflow file | Theme | GitHub issues | Status |
 |------|---------------|-------|---------------|--------|
 | 0 | `v0868_issue_sweep.workflow.js` | Triage + release plan | all milestone | On demand |
-| 1 | `v0868_stopship_lane.workflow.js` | Release blockers + dogfood regressions | #4090, #4093, #4094, #3986, #3990 | **Active** |
+| 1 | `v0868_stopship_lane.workflow.js` | Read-only orchestration acceptance | #4175, #4177, #4178, #4179 | **Active** |
 | 2 | `v0868_catalog_lane.workflow.js` | Model catalog + Models.dev live catalog | #4109, #4114–#4119, #4139–#4141, #4184–#4188 | Deferred |
 | 3 | `v0868_workflow_ui_lane.workflow.js` | Workflow orchestration UI | #4038, #4110, #4120–#4135 | Deferred |
 | 4 | `v0868_tui_copy_lane.workflow.js` | Transcript/copy polish | #4112, #4142–#4148 | Deferred |
@@ -115,14 +118,7 @@ Parent tracker: [#4109](https://github.com/Hmbown/CodeWhale/issues/4109).
 
 ## How to launch a workflow
 
-Branch from `main` before starting implementation agents:
-
-```bash
-git checkout main && git pull origin main
-git checkout -b codex/v0868-stopship-<issue>
-```
-
-### Fleet-backed stopship lane (dogfood #4178)
+### Fleet-backed acceptance lane (dogfood #4178)
 
 Named fleet file: [`fleets/v0868-stopship.toml`](../fleets/v0868-stopship.toml)
 (roles: `scout`, `implementer`, `reviewer`, `verifier`, `release_lead`).
@@ -132,12 +128,14 @@ Workflow: `workflows/v0868_stopship_lane.workflow.js` (steps bind fleet
 **Target shape** (Phase 1 Lane CLI #4176 + Phase 2 role resolution #4177):
 
 ```bash
-# Create a durable tmux-backed lane bound to stopship + fleet and launch Workflow
+# Launch from a disposable checkout. The fixture is host-enforced read-only and
+# does not create fix branches or edit the workspace.
 codewhale workflow run stopship \
-  --issue 4090 \
+  --issue 4178 \
   --fleet v0868-stopship \
   --runtime tmux \
-  --goal "Fix #4090, #4093, #4094. Branch implementation from main."
+  --token-budget 360000 \
+  --goal "Verify v0.8.68 role resolution, gates, and terminal receipts without editing the workspace."
 
 codewhale lane list
 codewhale lane status <lane-id>          # reconciles a finished tmux process
@@ -169,12 +167,34 @@ of reporting a fictional Running Lane.
 The public `workflow run` command is the explicit approval of the Workflow
 plan envelope and records `approved_explicit_cli_command` in the durable plan
 receipt. That approval does not silently grant child shell or full-disk
-authority: the host runner preserves the resolved profile/provider/model,
-configured `allow_shell`, sandbox, external sandbox, network, and MCP posture.
-Only a global `--yolo` request selects bypass/full-authority behavior. Runtime
+authority. This acceptance fixture declares every role `read_only`; the host
+therefore narrows every child to file listing, reading, and search even when
+the named Fleet maps `implementer` to the built-in `builder` profile. Runtime
 secrets are bridged outside persisted Lane argv, and an isolated worktree run
 resolves its workspace from the Runtime-owned worktree cwd rather than the
 original checkout.
+
+The ordered chain explicitly exercises `scout`, `implementer`, `reviewer`,
+`verifier`, and `release_lead`. Workflow-owned gates promote each successful
+role output as a lane-scoped handoff and block the next role if the upstream
+child fails or returns an exact first-line rejection verdict. Each fixture role
+must begin its response with standalone `APPROVE` or `BLOCK`; the host maps that
+first non-empty line to the gate outcome, while verdict words later in prose do
+not control admission. Every fixture gate sets `require_explicit_verdict`, so a
+missing or malformed first-line verdict blocks the next role instead of passing
+on child completion alone. The host-emitted `gate_updated` receipt remains
+authoritative. Prompts require grep-first, bounded source reads. Live DeepSeek
+Flash and GLM-5-Turbo acceptance measured 17,457 and 17,550 tokens respectively
+before the first useful tool turn completed, so the old 16k/12k/12k/12k/8k
+caps could not admit even one turn. The fixture now budgets 24k per intended
+model turn, with paired step/token caps of 4/96k, 3/72k, 3/72k, 3/72k, and
+2/48k from scout through release lead. The 360k shared cap above matches that
+bounded aggregate; a lower caller-supplied shared cap can still stop the chain
+before every role runs. These are structural guardrails with measured
+headroom, not proof that a live provider run will complete.
+Acceptance needs all of these in `lane logs`: role-resolved `task_started`
+events, passed or blocked `gate_updated` events, `run_completed`, and the
+terminal Lane receipt.
 
 Validate fleet role resolution without launching agents:
 
@@ -183,31 +203,29 @@ Validate fleet role resolution without launching agents:
 cargo test -p codewhale-workflow --lib named_fleet
 ```
 
-### Direct tool paths
+### Direct tool path
 
-From CodeWhale TUI or the direct headless Workflow entrypoint:
+From a disposable checkout, the inline runtime provides a faster non-tmux check:
 
 ```bash
-# Headless stopship lane (deterministic host dispatch)
+# Inline acceptance lane (deterministic host dispatch)
 codewhale workflow run stopship \
   --fleet v0868-stopship \
   --runtime inline \
-  --goal "Fix #4090, #4093, #4094. Branch implementation from main."
-
-# Per-issue headless (single stopship issue)
-codewhale exec --auto --output-format stream-json \
-  "Run workflows/v0868_issue_implement.workflow.js for issue #4090. Branch from main."
-
-# TUI explicit path
-/workflow start workflows/v0868_stopship_lane.workflow.js
+  --issue 4178 \
+  --goal "Verify v0.8.68 orchestration receipts without editing the workspace."
 ```
 
-Workflows use read-only scouts first, then implementation agents in sequence.
-`workflow run` is an explicit execution command and approves that checked-in
-plan envelope; its children still inherit the configured durable-task
-permission and sandbox posture. Interactive `/workflow` runs retain their
-normal approval surfaces.
-Do **not** close #4090/#4093/#4094 until human-verified on `main`.
+The acceptance Workflow uses every Fleet role in sequence, including the
+`implementer` role, while keeping each task host-enforced read-only. The
+`workflow run` command approves only that checked-in plan envelope; its
+children inherit the configured durable-task permission and sandbox posture. Interactive
+`/workflow` runs retain their normal approval surfaces, but they are not a
+substitute for the named-Fleet CLI acceptance path. The final `release_lead`
+child owns synthesis so every spawned task remains Fleet-bound; do not append
+an unroled reducer to this fixture. Keep `#4175`, `#4177`, `#4178`, and `#4179`
+open until the live Lane log contains complete role, gate, and terminal
+receipts.
 
 ## Per-issue implementation (single issue)
 

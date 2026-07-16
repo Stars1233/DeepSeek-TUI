@@ -1,8 +1,10 @@
 # Workflow Authoring
 
-> **Ordinary multi-agent work does not require this file.** Prefer natural
-> language + soft-auto launch: CodeWhale decides, indicates the plan, and may
-> ask setup questions via the TUI modal. See
+> **Ordinary multi-agent work does not require this file.** In Operate, send
+> normal messages; Codewhale can work directly or prefer background workers
+> when parallelism, isolation, or duration makes delegation useful. Use Workflow
+> when ordered phases, gates, shared budgets, replay, or deterministic fan-in
+> matter; Act/Agent may also use optional soft-auto launch. See
 > [Automatic Workflows](AUTOMATIC_WORKFLOWS.md).
 
 Workflow has one runtime boundary: authored source lowers to typed

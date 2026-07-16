@@ -178,8 +178,8 @@ release anxiety: contributors cannot tell whether their work merged.
       ./scripts/release/verify-release-assets.sh X.Y.Z
       ```
       This checks the local tag, remote tag, successful Release workflow SHA,
-      npm-facing assets, and `codewhale-artifacts-sha256.txt` manifest. If it
-      fails, rerun or repair the GitHub Release workflow before touching any
+      full binary/archive/installer asset set, and both checksum manifests. If
+      it fails, rerun or repair the GitHub Release workflow before touching any
       registry.
 - [ ] The live GitHub Release body has its own `## Contributors` or
       `## Credits` section; do not rely on "see CHANGELOG" alone. Verify with:
@@ -192,7 +192,7 @@ release anxiety: contributors cannot tell whether their work merged.
 - [ ] `npm view deepseek-tui deprecated` is non-empty. The legacy npm package
       is deprecated and must not receive an `X.Y.Z` publish.
 - [ ] Distribution channels are canonical-first: the website install page
-      (codewhale.net/install) shows CodeWhale-native commands first (`npm install -g
+      (codewhale.net/install) shows Codewhale-native commands first (`npm install -g
       codewhale`, `curl .../install.sh | sh`); Homebrew is labeled as legacy
       compatibility; the shell installer uses codewhale-native names as documented
       in `docs/REBRAND.md#homebrew`.

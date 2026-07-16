@@ -1097,6 +1097,7 @@ mod tests {
             total_tokens: 100,
             model: "deepseek-v4-pro".to_string(),
             model_provider: "deepseek".to_string(),
+            model_provider_id: None,
             workspace: std::path::PathBuf::from("/tmp"),
             mode: Some("agent".to_string()),
             cost: crate::session_manager::SessionCostSnapshot::default(),

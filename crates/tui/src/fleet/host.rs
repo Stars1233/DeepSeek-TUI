@@ -17,8 +17,24 @@ use std::time::{Duration, Instant};
 use codewhale_protocol::fleet::FleetHostSpec;
 use thiserror::Error;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
+};
+#[cfg(windows)]
+use windows::core::PCWSTR;
+
 const DEFAULT_LOG_LIMIT_BYTES: usize = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 10;
+const WORKER_STOP_GRACE: Duration = Duration::from_millis(750);
 
 pub type FleetHostResult<T> = Result<T, FleetHostError>;
 
@@ -158,6 +174,10 @@ pub struct LocalProcessFleetHostAdapter {
 struct LocalWorkerProcess {
     request: FleetWorkerStartRequest,
     child: Child,
+    #[cfg(unix)]
+    session_id: libc::pid_t,
+    #[cfg(windows)]
+    windows_job: FleetWindowsJob,
     host_kind: FleetHostKind,
     log_path: PathBuf,
     stopped: bool,
@@ -210,8 +230,32 @@ impl LocalProcessFleetHostAdapter {
             command.current_dir(cwd);
         }
 
+        // Fleet owns the complete worker tree, not only the dispatcher PID.
+        // `codewhale` spawns `codewhale-tui`, which can in turn spawn tool
+        // processes; isolating the root prevents a stop from signalling the
+        // operator's own process group.
+        #[cfg(unix)]
+        // SAFETY: `setsid` is async-signal-safe and the closure does not touch
+        // allocator or parent-held state between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+
         let child = command.spawn().map_err(|err| {
             classify_spawn_error(err, format!("starting worker {}", request.worker_id))
+        })?;
+        #[cfg(windows)]
+        let (child, windows_job) = attach_fleet_windows_job(child).map_err(|err| {
+            FleetHostError::retryable(format!(
+                "containing worker {} in a Windows Job Object: {err}",
+                request.worker_id
+            ))
         })?;
         let pid = child.id();
         let handle = FleetWorkerHandle {
@@ -225,6 +269,10 @@ impl LocalProcessFleetHostAdapter {
             LocalWorkerProcess {
                 request,
                 child,
+                #[cfg(unix)]
+                session_id: pid as libc::pid_t,
+                #[cfg(windows)]
+                windows_job,
                 host_kind,
                 log_path,
                 stopped: false,
@@ -322,12 +370,12 @@ impl FleetHostAdapter for LocalProcessFleetHostAdapter {
                 .processes
                 .get_mut(worker_id)
                 .ok_or_else(|| FleetHostError::terminal(format!("unknown worker {worker_id}")))?;
-            if process.last_exit.is_some() {
-                return self.read_status(worker_id);
-            }
-            interrupt_child(&mut process.child)?;
+            // The direct dispatcher may already be reaped while delegated
+            // session/job descendants remain. Interrupt the containment
+            // boundary unconditionally.
+            interrupt_worker_tree(process)?;
         }
-        wait_for_exit(self, worker_id, Duration::from_millis(750))
+        wait_for_exit(self, worker_id, WORKER_STOP_GRACE)
     }
 
     fn restart_worker(&mut self, worker_id: &str) -> FleetHostResult<FleetWorkerHandle> {
@@ -353,17 +401,7 @@ impl FleetHostAdapter for LocalProcessFleetHostAdapter {
                     Ok(Some(status)) => {
                         process.last_exit = Some(status);
                     }
-                    Ok(None) => {
-                        process.child.kill().map_err(|err| {
-                            FleetHostError::retryable(format!("stopping worker {worker_id}: {err}"))
-                        })?;
-                        let status = process.child.wait().map_err(|err| {
-                            FleetHostError::retryable(format!(
-                                "waiting for worker {worker_id}: {err}"
-                            ))
-                        })?;
-                        process.last_exit = Some(status);
-                    }
+                    Ok(None) => {}
                     Err(err) => {
                         return Err(FleetHostError::retryable(format!(
                             "reading worker {worker_id} status before stop: {err}"
@@ -371,15 +409,22 @@ impl FleetHostAdapter for LocalProcessFleetHostAdapter {
                     }
                 }
             }
+            // Always tear down the containment boundary. A dispatcher can
+            // exit before a delegated TUI/tool child, so direct-child status
+            // is not proof that the complete worker tree is gone.
+            stop_worker_tree(process).map_err(|err| FleetHostError {
+                kind: err.kind,
+                message: format!("stopping worker {worker_id}: {}", err.message),
+            })?;
         }
         self.read_status(worker_id)
     }
 
     fn cleanup_worker(&mut self, worker_id: &str) -> FleetHostResult<()> {
-        if matches!(
-            self.read_status(worker_id).map(|status| status.state),
-            Ok(FleetHostWorkerState::Running)
-        ) {
+        if self.processes.contains_key(worker_id) {
+            // Cleanup is the final containment boundary. Even when the direct
+            // dispatcher already exited, delegated children may still occupy
+            // its Unix session or Windows Job Object.
             let _ = self.stop_worker(worker_id)?;
         }
         self.processes.remove(worker_id);
@@ -716,25 +761,300 @@ fn wait_for_exit(
 }
 
 #[cfg(unix)]
-fn interrupt_child(child: &mut Child) -> FleetHostResult<()> {
-    let pid = child.id() as libc::pid_t;
-    let rc = unsafe { libc::kill(pid, libc::SIGINT) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(FleetHostError::retryable(format!(
-            "interrupting worker pid {}: {}",
-            child.id(),
-            std::io::Error::last_os_error()
-        )))
+fn interrupt_worker_tree(process: &mut LocalWorkerProcess) -> FleetHostResult<()> {
+    shutdown_unix_worker_session(process, &[libc::SIGINT, libc::SIGTERM])
+}
+
+#[cfg(windows)]
+fn interrupt_worker_tree(process: &mut LocalWorkerProcess) -> FleetHostResult<()> {
+    process.windows_job.terminate().map_err(|err| {
+        FleetHostError::retryable(format!("interrupting Windows worker tree: {err}"))
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn interrupt_worker_tree(process: &mut LocalWorkerProcess) -> FleetHostResult<()> {
+    process
+        .child
+        .kill()
+        .map_err(|err| FleetHostError::retryable(format!("interrupting worker: {err}")))
+}
+
+#[cfg(unix)]
+fn stop_worker_tree(process: &mut LocalWorkerProcess) -> FleetHostResult<()> {
+    shutdown_unix_worker_session(process, &[libc::SIGTERM])
+}
+
+#[cfg(windows)]
+fn stop_worker_tree(process: &mut LocalWorkerProcess) -> FleetHostResult<()> {
+    process.windows_job.terminate().map_err(|err| {
+        FleetHostError::retryable(format!("terminating Windows worker job: {err}"))
+    })?;
+    if process.last_exit.is_none() {
+        process.last_exit =
+            Some(process.child.wait().map_err(|err| {
+                FleetHostError::retryable(format!("reaping Windows worker: {err}"))
+            })?);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stop_worker_tree(process: &mut LocalWorkerProcess) -> FleetHostResult<()> {
+    process
+        .child
+        .kill()
+        .map_err(|err| FleetHostError::retryable(format!("killing worker: {err}")))?;
+    process.last_exit = Some(
+        process
+            .child
+            .wait()
+            .map_err(|err| FleetHostError::retryable(format!("reaping worker: {err}")))?,
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn shutdown_unix_worker_session(
+    process: &mut LocalWorkerProcess,
+    graceful_signals: &[libc::c_int],
+) -> FleetHostResult<()> {
+    let mut signal_errors = Vec::new();
+    for signal in graceful_signals {
+        signal_errors.extend(signal_unix_session(process.session_id, *signal)?);
+        if wait_for_unix_session_exit(process, WORKER_STOP_GRACE)? {
+            return Ok(());
+        }
+    }
+
+    signal_errors.extend(signal_unix_session(process.session_id, libc::SIGKILL)?);
+    if wait_for_unix_session_exit(process, WORKER_STOP_GRACE)? {
+        return Ok(());
+    }
+
+    let alive = unix_session_members(process.session_id)?;
+    Err(FleetHostError::retryable(format!(
+        "Fleet session {} still has live processes after SIGKILL: {alive:?}{}",
+        process.session_id,
+        if signal_errors.is_empty() {
+            String::new()
+        } else {
+            format!("; signal errors: {}", signal_errors.join("; "))
+        }
+    )))
+}
+
+#[cfg(unix)]
+fn wait_for_unix_session_exit(
+    process: &mut LocalWorkerProcess,
+    timeout: Duration,
+) -> FleetHostResult<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if process.last_exit.is_none() {
+            process.last_exit = process.child.try_wait().map_err(|err| {
+                FleetHostError::retryable(format!("checking Fleet dispatcher exit: {err}"))
+            })?;
+        }
+        if process.last_exit.is_some() && unix_session_members(process.session_id)?.is_empty() {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
-#[cfg(not(unix))]
-fn interrupt_child(child: &mut Child) -> FleetHostResult<()> {
-    child
-        .kill()
-        .map_err(|err| FleetHostError::retryable(format!("interrupting worker: {err}")))
+#[cfg(unix)]
+fn unix_session_members(session_id: libc::pid_t) -> FleetHostResult<Vec<libc::pid_t>> {
+    let pids = unix_process_ids()?;
+    let mut members = Vec::new();
+    for pid in pids {
+        if pid > 0 {
+            // Revalidate against the kernel after parsing the snapshot. A PID
+            // reused by an unrelated process must never receive our signal.
+            if unsafe { libc::getsid(pid) } == session_id {
+                members.push(pid);
+            }
+        }
+    }
+    Ok(members)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn unix_process_ids() -> FleetHostResult<Vec<libc::pid_t>> {
+    let entries = std::fs::read_dir("/proc").map_err(|err| {
+        FleetHostError::retryable(format!("listing Fleet session through /proc: {err}"))
+    })?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse().ok())
+        .collect())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn unix_process_ids() -> FleetHostResult<Vec<libc::pid_t>> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pid="])
+        .output()
+        .map_err(|err| {
+            FleetHostError::retryable(format!("listing Fleet session with ps: {err}"))
+        })?;
+    if !output.status.success() {
+        return Err(FleetHostError::retryable(format!(
+            "listing Fleet session with ps exited {:?}",
+            output.status.code()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect())
+}
+
+#[cfg(unix)]
+fn signal_unix_session(
+    session_id: libc::pid_t,
+    signal: libc::c_int,
+) -> FleetHostResult<Vec<String>> {
+    let own_session = unsafe { libc::getsid(0) };
+    if session_id <= 0 || session_id == own_session {
+        return Err(FleetHostError::terminal(format!(
+            "refusing to signal unsafe Fleet session {session_id}"
+        )));
+    }
+
+    let mut errors = Vec::new();
+    for pid in unix_session_members(session_id)? {
+        // Verify identity again immediately before signalling. Session IDs
+        // remain stable across reparenting and separate process groups.
+        if unsafe { libc::getsid(pid) } != session_id {
+            continue;
+        }
+        if unsafe { libc::kill(pid, signal) } != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                errors.push(format!("pid {pid}: {err}"));
+            }
+        }
+    }
+    Ok(errors)
+}
+
+#[cfg(all(unix, test))]
+fn unix_pid_is_running(pid: libc::pid_t) -> bool {
+    let visible = if unsafe { libc::kill(pid, 0) } == 0 {
+        true
+    } else {
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    };
+    if !visible {
+        return false;
+    }
+
+    // `kill(pid, 0)` also succeeds for zombies. The Fleet containment code
+    // has already finished its job once a descendant is dead; on macOS an
+    // orphan can remain visible as a zombie briefly while launchd reaps it.
+    // Ask `ps` for the process state so test assertions do not mistake that
+    // transient kernel bookkeeping for a live leaked worker. If `ps` itself
+    // cannot be launched, stay conservative and treat the PID as running.
+    match Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .is_some_and(|state| !state.starts_with('Z')),
+        // A failed status does not prove exit: preserve the positive kernel
+        // visibility result and let the bounded waiter retry.
+        Ok(_) => true,
+        Err(_) => true,
+    }
+}
+
+#[cfg(all(unix, test))]
+fn wait_for_unix_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !unix_pid_is_running(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct FleetWindowsJob {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+// SAFETY: Job handles are process-wide kernel handles. The adapter owns this
+// wrapper exclusively and mutates workers through `&mut self`.
+unsafe impl Send for FleetWindowsJob {}
+
+#[cfg(windows)]
+// SAFETY: The wrapper exposes only kernel job operations; shared access does
+// not mutate Rust-owned memory.
+unsafe impl Sync for FleetWindowsJob {}
+
+#[cfg(windows)]
+impl FleetWindowsJob {
+    fn attach_to_child(child: &Child) -> std::io::Result<Self> {
+        let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()).map_err(windows_io_error)? };
+        let job = Self { handle };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .map_err(windows_io_error)?;
+            AssignProcessToJobObject(job.handle, HANDLE(child.as_raw_handle()))
+                .map_err(windows_io_error)?;
+        }
+        Ok(job)
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        unsafe { TerminateJobObject(self.handle, 1).map_err(windows_io_error) }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for FleetWindowsJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn attach_fleet_windows_job(mut child: Child) -> std::io::Result<(Child, FleetWindowsJob)> {
+    match FleetWindowsJob::attach_to_child(&child) {
+        Ok(job) => Ok((child, job)),
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(err)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_io_error(error: windows::core::Error) -> std::io::Error {
+    std::io::Error::other(error)
 }
 
 fn filtered_env(
@@ -864,6 +1184,176 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    const DESCENDANT_HELPER_TEST: &str =
+        "fleet::host::tests::fleet_host_stop_reaps_dispatcher_descendants";
+
+    #[cfg(unix)]
+    fn run_descendant_helper_if_requested() -> bool {
+        let Ok(mode) = std::env::var("FLEET_DESCENDANT_HELPER") else {
+            return false;
+        };
+        let test_binary = std::env::current_exe().expect("current test binary");
+        let pid_file = std::env::var("FLEET_DESCENDANT_PID_FILE").expect("helper pid file");
+        match mode.as_str() {
+            "dispatcher" | "detached-dispatcher" => {
+                let mut command = Command::new(&test_binary);
+                command
+                    .args(["--exact", DESCENDANT_HELPER_TEST, "--nocapture"])
+                    .env("FLEET_DESCENDANT_HELPER", "worker")
+                    .env("FLEET_DESCENDANT_PID_FILE", &pid_file);
+                if mode == "detached-dispatcher" {
+                    command.spawn().expect("spawn detached dispatcher child");
+                    std::process::exit(0);
+                }
+                let status = command.status().expect("spawn dispatcher child");
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            "worker" => {
+                let mut command = Command::new(&test_binary);
+                command
+                    .args(["--exact", DESCENDANT_HELPER_TEST, "--nocapture"])
+                    .env("FLEET_DESCENDANT_HELPER", "tool")
+                    .env("FLEET_DESCENDANT_PID_FILE", &pid_file);
+                // Real shell tools deliberately own a separate process group.
+                // This makes a root-group-only Fleet stop leak the helper.
+                command.process_group(0);
+                let status = command.status().expect("spawn worker tool");
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            "tool" => {
+                // A shell tool can ignore graceful signals and live in its own
+                // process group. Fleet's session boundary must still reap it.
+                unsafe {
+                    libc::signal(libc::SIGINT, libc::SIG_IGN);
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                }
+                std::fs::write(&pid_file, std::process::id().to_string()).expect("write tool pid");
+                thread::sleep(Duration::from_secs(30));
+                true
+            }
+            other => panic!("unknown descendant helper mode {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn start_dispatcher_tree(
+        adapter: &mut LocalProcessFleetHostAdapter,
+        tmp: &TempDir,
+        worker_id: &str,
+        helper_mode: &str,
+    ) -> (libc::pid_t, libc::pid_t) {
+        let pid_file = tmp.path().join(format!("{worker_id}-tool.pid"));
+        let test_binary = std::env::current_exe().expect("current test binary");
+        let mut request = FleetWorkerStartRequest::new(
+            worker_id,
+            FleetWorkerCommand::new(
+                test_binary.display().to_string(),
+                ["--exact", DESCENDANT_HELPER_TEST, "--nocapture"],
+            ),
+        );
+        request.env.insert(
+            "FLEET_DESCENDANT_HELPER".to_string(),
+            helper_mode.to_string(),
+        );
+        request.env.insert(
+            "FLEET_DESCENDANT_PID_FILE".to_string(),
+            pid_file.display().to_string(),
+        );
+        request.env_allowlist = BTreeSet::from([
+            "FLEET_DESCENDANT_HELPER".to_string(),
+            "FLEET_DESCENDANT_PID_FILE".to_string(),
+        ]);
+
+        let handle = adapter.start_worker(request).expect("start dispatcher");
+        let root_pid = handle.pid.expect("dispatcher pid") as libc::pid_t;
+        let tool_pid = wait_for_valid_pid_file(&pid_file, Duration::from_secs(5));
+        if helper_mode != "detached-dispatcher" {
+            assert!(unix_pid_is_running(root_pid));
+        }
+        assert!(unix_pid_is_running(tool_pid));
+        (root_pid, tool_pid)
+    }
+
+    #[cfg(unix)]
+    fn wait_for_valid_pid_file(pid_file: &Path, timeout: Duration) -> libc::pid_t {
+        let deadline = Instant::now() + timeout;
+        let mut last_observation = "file not created".to_string();
+        loop {
+            match std::fs::read_to_string(pid_file) {
+                Ok(contents) => {
+                    let trimmed = contents.trim();
+                    match trimmed.parse::<libc::pid_t>() {
+                        Ok(pid) if pid > 0 => return pid,
+                        _ => last_observation = format!("invalid contents {trimmed:?}"),
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => last_observation = format!("read failed: {err}"),
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "separate-group tool never published a valid PID to {} ({last_observation})",
+                    pid_file.display()
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_file_wait_ignores_created_but_incomplete_file() {
+        let tmp = TempDir::new().unwrap();
+        let pid_file = tmp.path().join("worker.pid");
+        std::fs::write(&pid_file, "pid=").unwrap();
+        let expected_pid = std::process::id() as libc::pid_t;
+        let writer_path = pid_file.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            std::fs::write(writer_path, expected_pid.to_string()).unwrap();
+        });
+
+        assert_eq!(
+            wait_for_valid_pid_file(&pid_file, Duration::from_secs(1)),
+            expected_pid
+        );
+        writer.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_pid_running_treats_zombie_as_exited() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn short-lived child");
+        let pid = child.id() as libc::pid_t;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let saw_zombie = loop {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("inspect child state");
+            let is_zombie = String::from_utf8_lossy(&state.stdout)
+                .split_whitespace()
+                .next()
+                .is_some_and(|state| state.starts_with('Z'));
+            if is_zombie {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        let reported_running = unix_pid_is_running(pid);
+        child.wait().expect("reap zombie child");
+        assert!(saw_zombie, "child never became a zombie");
+        assert!(!reported_running, "zombie was reported as running");
+    }
+
     fn wait_for_log(
         adapter: &LocalProcessFleetHostAdapter,
         worker_id: &str,
@@ -893,6 +1383,8 @@ mod tests {
         request.log_limit_bytes = 16 + line_ending_bytes;
 
         let handle = adapter.start_worker(request).unwrap();
+        #[cfg(unix)]
+        let direct_pid = handle.pid.expect("local worker pid");
         assert_eq!(handle.host_kind, FleetHostKind::LocalProcess);
         assert!(handle.pid.is_some());
         let status = adapter.read_status("local-1").unwrap();
@@ -907,9 +1399,110 @@ mod tests {
 
         let status = adapter.stop_worker("local-1").unwrap();
         assert_eq!(status.state, FleetHostWorkerState::Stopped);
+        #[cfg(unix)]
+        assert!(
+            wait_for_unix_pid_exit(direct_pid as libc::pid_t, Duration::from_secs(1)),
+            "stopped direct worker was not reaped"
+        );
         adapter.cleanup_worker("local-1").unwrap();
         assert_eq!(
             adapter.read_status("local-1").unwrap_err().kind,
+            FleetHostErrorKind::Terminal
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fleet_host_stop_reaps_dispatcher_descendants() {
+        if run_descendant_helper_if_requested() {
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
+        let (root_pid, tool_pid) =
+            start_dispatcher_tree(&mut adapter, &tmp, "dispatcher-tree", "dispatcher");
+
+        let status = adapter
+            .stop_worker("dispatcher-tree")
+            .expect("stop complete worker tree");
+
+        assert_eq!(status.state, FleetHostWorkerState::Stopped);
+        assert!(
+            wait_for_unix_pid_exit(root_pid, Duration::from_secs(1)),
+            "dispatcher survived stop"
+        );
+        assert!(
+            wait_for_unix_pid_exit(tool_pid, Duration::from_secs(1)),
+            "separate-process-group tool survived stop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fleet_host_interrupt_reaps_dispatcher_descendants() {
+        let tmp = TempDir::new().unwrap();
+        let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
+        let (root_pid, tool_pid) =
+            start_dispatcher_tree(&mut adapter, &tmp, "interrupt-tree", "dispatcher");
+
+        let status = adapter
+            .interrupt_worker("interrupt-tree")
+            .expect("interrupt complete worker session");
+
+        assert_ne!(status.state, FleetHostWorkerState::Running);
+        assert!(
+            wait_for_unix_pid_exit(root_pid, Duration::from_secs(1)),
+            "dispatcher survived interrupt"
+        );
+        assert!(
+            wait_for_unix_pid_exit(tool_pid, Duration::from_secs(1)),
+            "separate-process-group tool survived interrupt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fleet_host_cleanup_reaps_session_after_dispatcher_exits() {
+        let tmp = TempDir::new().unwrap();
+        let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
+        let (root_pid, tool_pid) = start_dispatcher_tree(
+            &mut adapter,
+            &tmp,
+            "exited-dispatcher-tree",
+            "detached-dispatcher",
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let status = adapter.read_status("exited-dispatcher-tree").unwrap();
+            if status.state != FleetHostWorkerState::Running || Instant::now() >= deadline {
+                assert_ne!(status.state, FleetHostWorkerState::Running);
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            wait_for_unix_pid_exit(root_pid, Duration::from_secs(1)),
+            "dispatcher should have exited"
+        );
+        assert!(
+            unix_pid_is_running(tool_pid),
+            "delegated tool exited too early"
+        );
+
+        adapter
+            .cleanup_worker("exited-dispatcher-tree")
+            .expect("clean up surviving dispatcher session");
+
+        assert!(
+            wait_for_unix_pid_exit(tool_pid, Duration::from_secs(1)),
+            "tool survived after its dispatcher exited"
+        );
+        assert_eq!(
+            adapter
+                .read_status("exited-dispatcher-tree")
+                .unwrap_err()
+                .kind,
             FleetHostErrorKind::Terminal
         );
     }

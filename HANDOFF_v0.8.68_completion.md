@@ -1,10 +1,11 @@
 # CodeWhale 0.8.68 Handoff — Finish the Landing
 
-> **Status (2026-07-13): Historical handoff, not completion proof.** v0.8.68 is
-> still an unpublished release candidate. Paths, branch counts, checkmarks, and
+> **Status (2026-07-15): Historical handoff superseded by v0.9.0, not
+> completion proof.** v0.8.68 was never tagged or publicly published. Paths,
+> branch counts, checkmarks, and
 > verification claims below describe the checkout that produced this handoff;
 > do not use them as evidence for the current candidate. Use the current
-> [v0.8.68 release-candidate ledger](docs/releases/v0.8.68-release-candidate.md)
+> [v0.9.0 release-candidate ledger](docs/releases/v0.9.0-release-candidate.md)
 > instead. Some listed work is now present in the candidate and some was
 > superseded — notably, #4132 keeps `todo_*`/`checklist_*` as hidden replay
 > aliases, so do not execute the old instruction to remove them. The

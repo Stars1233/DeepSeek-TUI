@@ -171,7 +171,7 @@ export function callbackAction(data) {
   return null;
 }
 
-const MARKDOWN_V2_SPECIALS = /([_*\[\]()~`>#+\-=|{}.!])/g;
+const MARKDOWN_V2_SPECIALS = /([_*\[\]()~`>#+\-=|{}.!\\])/g;
 const BLOCK_PLACEHOLDER_PREFIX = "\u0000mdv2:block:";
 const INLINE_PLACEHOLDER_PREFIX = "\u0000mdv2:inline:";
 const PLACEHOLDER_SUFFIX = "\u0000";

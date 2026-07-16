@@ -20,11 +20,9 @@ use crate::tui::views::{
     render_modal_footer, render_modal_surface,
 };
 
-// Operate remains parseable for restored sessions and explicit compatibility
-// inputs, but it is not a truthful interactive choice until Workflow dispatch
-// exists. Keep the visible roster local to this picker so compatibility does
-// not become a customer-visible affordance.
-const VISIBLE_MODES: [AppMode; 2] = [AppMode::Agent, AppMode::Plan];
+// Operate is visible because the engine now enforces a coordinator/worker
+// boundary while allowing ordinary conversation and asynchronous dispatch.
+const VISIBLE_MODES: [AppMode; 3] = [AppMode::Agent, AppMode::Plan, AppMode::Operate];
 
 pub struct ModePickerView {
     cursor: usize,
@@ -302,18 +300,23 @@ mod tests {
     }
 
     #[test]
-    fn operate_is_not_advertised_until_workflow_dispatch_exists() {
+    fn operate_is_advertised_as_a_visible_mode() {
         let (buf, area) = render_at(80, 24);
         let text = rows(&buf, area).join("\n");
-        assert!(!text.contains("Operate"), "{text}");
+        assert!(text.contains("Operate"), "{text}");
     }
 
     #[test]
     fn number_keys_select_modes() {
-        // Visible roster: 1 Act, 2 Plan. Operate remains compatibility-only.
+        // Visible roster: 1 Act, 2 Plan, 3 Operate.
         let mut view = ModePickerView::new(AppMode::Agent, Locale::En);
         let action = view.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
-        assert!(matches!(action, ViewAction::None));
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::ModeSelected {
+                mode: AppMode::Operate
+            })
+        ));
 
         // Legacy YOLO shorthand (4) is not offered by the picker.
         let mut view = ModePickerView::new(AppMode::Agent, Locale::En);

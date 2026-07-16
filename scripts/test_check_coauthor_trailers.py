@@ -66,6 +66,46 @@ class CheckCoauthorTrailersTests(unittest.TestCase):
         errors = mod.validate([merge], self.aliases, False)
         self.assertEqual(errors, [])
 
+    def test_allows_only_the_exact_immutable_automation_trailer(self) -> None:
+        legacy = mod.Commit(
+            sha="9a74825cd182a62465943bcbbcbcf591d1ce99ee",
+            parents="parent",
+            author_name="Maintainer",
+            author_email="1+maintainer@users.noreply.github.com",
+            subject="legacy automation commit",
+            body="Co-authored-by: CodeWhale Agent <codewhale-agent@hmbown.local>",
+        )
+        errors = mod.validate([legacy], self.aliases, False)
+        self.assertEqual(errors, [])
+
+        other_commit = mod.Commit(
+            sha="deadbeef" * 5,
+            parents=legacy.parents,
+            author_name=legacy.author_name,
+            author_email=legacy.author_email,
+            subject=legacy.subject,
+            body=legacy.body,
+        )
+        errors = mod.validate([other_commit], self.aliases, False)
+        self.assertTrue(errors)
+        self.assertIn("codewhale-agent@hmbown.local", errors[0])
+
+    def test_legacy_exception_does_not_hide_another_bad_trailer(self) -> None:
+        legacy_with_extra = mod.Commit(
+            sha="9a74825cd182a62465943bcbbcbcf591d1ce99ee",
+            parents="parent",
+            author_name="Maintainer",
+            author_email="1+maintainer@users.noreply.github.com",
+            subject="legacy automation commit",
+            body=(
+                "Co-authored-by: CodeWhale Agent <codewhale-agent@hmbown.local>\n"
+                "Co-authored-by: Unknown Person <unknown@example.com>"
+            ),
+        )
+        errors = mod.validate([legacy_with_extra], self.aliases, False)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unknown@example.com", errors[0])
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

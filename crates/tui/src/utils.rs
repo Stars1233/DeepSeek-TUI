@@ -254,6 +254,32 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     std::io::Write::write_all(&mut tmp, contents)?;
     tmp.as_file().sync_all()?;
+    #[cfg(windows)]
+    {
+        // Windows can briefly deny replacement while Defender, indexing, or a
+        // concurrent reader still holds the destination without delete sharing.
+        // Keep the already-synced tempfile and retry only the transient Win32
+        // sharing/lock failures; permanent permission errors still surface.
+        const MAX_PERSIST_ATTEMPTS: usize = 6;
+        let mut pending = tmp;
+        for attempt in 0..MAX_PERSIST_ATTEMPTS {
+            match pending.persist(path) {
+                Ok(_) => break,
+                Err(err) => {
+                    let retryable = err.error.kind() == std::io::ErrorKind::PermissionDenied
+                        || matches!(err.error.raw_os_error(), Some(5 | 32 | 33));
+                    if !retryable || attempt + 1 == MAX_PERSIST_ATTEMPTS {
+                        return Err(err.error);
+                    }
+                    pending = err.file;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        10u64.saturating_mul(1u64 << attempt),
+                    ));
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
     tmp.persist(path)?;
     // Fsync the parent directory so the rename (the new directory entry) is
     // itself durable — otherwise a power loss right after the rename can lose
@@ -719,6 +745,33 @@ mod atomic_write_tests {
         write_atomic(&path, b"new content").expect("write_atomic");
         let read = fs::read_to_string(&path).expect("read");
         assert_eq!(read, "new content");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn write_atomic_retries_windows_replace_contention() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("contended.json");
+        fs::write(&path, b"old content").expect("write old");
+
+        // FILE_SHARE_READ | FILE_SHARE_WRITE deliberately omits
+        // FILE_SHARE_DELETE, reproducing the short-lived handle contention
+        // that makes MoveFileExW report access denied during replacement.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&path)
+            .expect("hold destination without delete sharing");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        });
+
+        write_atomic(&path, b"new content").expect("retry contended atomic replacement");
+        release.join().expect("release destination handle");
+        assert_eq!(fs::read(&path).expect("read replacement"), b"new content");
     }
 
     #[test]

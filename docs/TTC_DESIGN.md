@@ -1,6 +1,6 @@
 # Test-Time Compute (TTC) in CodeWhale — design
 
-Status: **approved direction** (maintainer greenlit). Synthesized from three independent reviews — the verify-tool implementation contributor, GLM 5.2, and an internal analysis — which all converged. This doc is the spec; implementation lands post-stopship (v0.8.69) and is split so nothing here blocks the v0.8.68 release.
+Status: **approved direction** (maintainer greenlit). Synthesized from three independent reviews — the verify-tool implementation contributor, GLM 5.2, and an internal analysis — which all converged. This doc is the spec; implementation is deferred beyond v0.9.0 and is split so nothing here blocks the current release.
 
 ## What TTC means here
 
@@ -72,4 +72,6 @@ The bug in `auto_reasoning.rs` was never "Low is wrong" — it's that **Low is a
 - **(B) resolver** — `auto_reasoning.rs` clamp→floor + Fleet-role-aware Auto resolution.
 - **#3982 / #4013** — rebase onto the `CriticEngine` as additional triggers (later).
 
-All of the above is **v0.8.69, behind the v0.8.68 stopship** (which is green).
+All of the above is **post-v0.9.0 work**. PR #4199 remains a useful, green
+implementation candidate, but it is too large to join the release at the final
+gate without the shared `CriticEngine` refactor and fresh end-to-end review.

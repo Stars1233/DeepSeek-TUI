@@ -11,12 +11,14 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
         { label: "安装", href: "/zh/install" },
         { label: "模型", href: "/zh/models" },
         { label: "运行时", href: "/zh/runtime" },
+        { label: "应用预览", href: "https://app.codewhale.net" },
       ]
     : [
         { label: "Docs", href: "/en/docs" },
         { label: "Install", href: "/en/install" },
         { label: "Models", href: "/en/models" },
         { label: "Runtime", href: "/en/runtime" },
+        { label: "App preview", href: "https://app.codewhale.net" },
       ];
 
   const project = isZh

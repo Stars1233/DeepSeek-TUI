@@ -1,6 +1,6 @@
 # codewhale-web
 
-Community site for [CodeWhale](https://github.com/Hmbown/CodeWhale) — lives at **codewhale.net**.
+Documentation and community site for [Codewhale](https://github.com/Hmbown/CodeWhale) — lives at **codewhale.net**.
 
 Next.js 15 (App Router) + Tailwind, deployed to Cloudflare Workers via [`@opennextjs/cloudflare`](https://opennext.js.org/cloudflare). Curated "Today's Dispatch" content is regenerated every 6 hours by a Cloudflare Cron Trigger that calls `deepseek-v4-flash` to summarise recent repo activity, and stored in Workers KV.
 
@@ -70,7 +70,7 @@ see `lib/i18n/config.ts`). Copy changes must update both locales.
 ```
 web/
 ├── app/
-│   ├── globals.css             design system: paper grain, hairlines, type, seal
+│   ├── globals.css             ocean portal, docs layout, type, and shared surfaces
 │   ├── [locale]/               en / zh — every page is bilingual
 │   │   ├── layout.tsx          root + locale layout: html shell, fonts, nav, footer
 │   │   ├── page.tsx            home — hero, dispatch, stats, how-it-works, join
@@ -88,7 +88,7 @@ web/
 ├── components/
 │   ├── nav.tsx                 sticky header w/ date strip + CJK accents
 │   ├── footer.tsx              dense 5-column footer
-│   ├── seal.tsx                red Chinese-seal mark used as section anchor
+│   ├── whale.tsx               shared Codewhale mark
 │   ├── ticker.tsx              animated live activity strip
 │   ├── stat-grid.tsx           tabular repo stats row
 │   ├── feed-card.tsx           one issue/PR card
@@ -133,12 +133,12 @@ be added to the `labelMap` in **both** `scripts/derive-facts.mjs` and
 `lib/facts-drift.ts` (or to the `EXCLUDED` set if deliberately hidden). Both
 fail loudly on unmapped variants, so the build / cron will tell you.
 
-## Aesthetic
+## Visual direction
 
-"Yamen tech": Qing memorial document × WeChat news feed × Bloomberg terminal.
+The public site is a documentation portal with a restrained underwater atmosphere. Content and navigation come first; ocean depth, currents, and the whale mark provide identity without turning every section into a themed card.
 
-- **Palette**: white paper `#FFFFFF`, ink `#0E0E10`, indigo `#4D6BFE`, aged ochre, jade green, cobalt blue.
-- **Type**: Fraunces (display), IBM Plex Sans (body), JetBrains Mono (UI/code), Noto Serif SC (decorative CJK anchors).
-- **Structure**: hairline 1px dividers, multi-column grids, big tabular numbers, surgical use of red for "hot" markers, decorative Chinese-seal squares as section anchors.
+- **Palette**: cool paper and mist for reading surfaces, deep navy for terminal and community sections, muted current blue for links, and small gold/coral signals where status needs contrast.
+- **Type**: Space Grotesk for headings, IBM Plex Sans for body copy, and JetBrains Mono for commands and compact interface labels.
+- **Structure**: compact documentation rows, quiet hairline dividers, generous but bounded reading widths, and responsive layouts that remove chrome before content.
 
 If you want to retune the palette, edit `:root` in `app/globals.css` and the `colors` block in `tailwind.config.ts`.

@@ -6,6 +6,7 @@
 use crate::compaction::CompactionConfig;
 use crate::config::ApiProvider;
 use crate::models::{Message, SystemPrompt};
+use crate::route_runtime::ResolvedRuntimeRoute;
 use crate::tools::goal::GoalStatus;
 use crate::tui::app::AppMode;
 use crate::tui::approval::ApprovalMode;
@@ -22,7 +23,10 @@ pub struct SessionSnapshot {
     pub messages: Vec<Message>,
     pub total_tokens: u64,
     pub model: String,
+    /// Generic provider kind retained for serialized compatibility.
     pub model_provider: String,
+    /// Exact non-secret configured provider key.
+    pub model_provider_id: Option<String>,
     pub workspace: PathBuf,
     pub system_prompt: Option<SystemPrompt>,
     pub mode: String,
@@ -76,19 +80,16 @@ impl UserInputProvenance {
 }
 
 /// Operations that can be submitted to the engine.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Op {
     /// Send a message to the AI
     SendMessage {
         content: String,
         mode: AppMode,
-        /// Provider route to use for this turn. `None` keeps the session
-        /// provider; auto model routing sets this when the inventory selects a
-        /// different authenticated provider.
-        provider: Option<ApiProvider>,
-        model: String,
-        /// Provider-route limits resolved by the host for this exact turn.
-        route_limits: Option<codewhale_config::route::RouteLimits>,
+        /// Exact, structurally resolved route authority for this turn. The
+        /// engine activates its client before mutating turn state; injected
+        /// engines may use their already-supplied client with the same receipt.
+        route: Box<ResolvedRuntimeRoute>,
         /// Compaction policy derived from the same provider route. Carrying it
         /// atomically avoids a model/limit mismatch before `SendMessage`.
         compaction: Box<CompactionConfig>,
@@ -201,6 +202,13 @@ pub enum Op {
         heartbeat_timeout_secs: u64,
     },
 
+    /// Replace the engine's merged Fleet roster after the setup wizard saves a
+    /// project or personal profile. Subsequent turns can use the new role
+    /// immediately instead of requiring an application restart.
+    SetFleetRoster {
+        roster: std::sync::Arc<crate::fleet::roster::FleetRoster>,
+    },
+
     /// Sync engine session state (used for resume/load)
     SyncSession {
         session_id: Option<String>,
@@ -212,8 +220,12 @@ pub enum Op {
         mode: AppMode,
     },
 
-    /// Run context compaction immediately.
-    CompactContext,
+    /// Run context compaction on one exact, structurally resolved provider
+    /// route with policy derived from that same descriptor.
+    CompactContext {
+        route: Box<ResolvedRuntimeRoute>,
+        compaction: Box<CompactionConfig>,
+    },
 
     /// Get a snapshot of the current session state (messages, tokens, etc.)
     /// for saving to disk. Returns the result via the oneshot sender so

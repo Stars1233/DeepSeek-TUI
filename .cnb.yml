@@ -52,9 +52,15 @@
     - *rust_workspace_gates_stage
 
     - name: linux npm wrapper smoke
+      # Full LTO can link silently for longer than CNB's default 10-minute
+      # no-output window. Keep the production profile and give the job enough
+      # time to emit its version and wrapper receipts.
+      timeout: 45m
       script: |
         set -eu
-        cargo build --release --locked -p codewhale-cli -p codewhale-tui
+        # The release profile uses full LTO and one codegen unit. Bound Cargo's
+        # parallelism so the final links cannot exhaust a shared CNB runner.
+        cargo build --jobs 2 --release --locked -p codewhale-cli -p codewhale-tui
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version
@@ -85,9 +91,15 @@
         ./scripts/release/publish-crates.sh dry-run
 
     - name: release binary smoke
+      # Full LTO can link silently for longer than CNB's default 10-minute
+      # no-output window. Keep the production profile and give the job enough
+      # time to emit its version and wrapper receipts.
+      timeout: 45m
       script: |
         set -eu
-        cargo build --release --locked -p codewhale-cli -p codewhale-tui
+        # Keep the production release profile intact while avoiding a burst of
+        # concurrent rustc/linker processes on the shared release runner.
+        cargo build --jobs 2 --release --locked -p codewhale-cli -p codewhale-tui
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version
@@ -113,6 +125,9 @@ $:
         image: rust:1.88-bookworm
       stages:
         - name: build linux x64 release assets (static)
+          # The static full-LTO link can also outlive CNB's default no-output
+          # window. Do not weaken the release profile to keep the runner alive.
+          timeout: 45m
           script: |
             set -eu
 
@@ -122,16 +137,18 @@ $:
 
             ./scripts/release/check-versions.sh
             ./scripts/release/check-ohos-deps.sh
-            cargo build --release --locked \
+            cargo build --jobs 2 --release --locked \
               --target x86_64-unknown-linux-musl \
               -p codewhale-cli -p codewhale-tui
 
             mkdir -p target/cnb-release
             BIN_DIR="target/x86_64-unknown-linux-musl/release"
             cp "$BIN_DIR/codewhale" target/cnb-release/codewhale-linux-x64
+            cp "$BIN_DIR/codew" target/cnb-release/codew-linux-x64
             cp "$BIN_DIR/codewhale-tui" target/cnb-release/codewhale-tui-linux-x64
             strip \
               target/cnb-release/codewhale-linux-x64 \
+              target/cnb-release/codew-linux-x64 \
               target/cnb-release/codewhale-tui-linux-x64 \
               || true
 
@@ -139,6 +156,7 @@ $:
               cd target/cnb-release
               sha256sum \
                 codewhale-linux-x64 \
+                codew-linux-x64 \
                 codewhale-tui-linux-x64 \
                 > codewhale-artifacts-sha256.txt
             )
@@ -167,6 +185,7 @@ $:
               echo
               echo "Assets:"
               echo "- codewhale-linux-x64"
+              echo "- codew-linux-x64"
               echo "- codewhale-tui-linux-x64"
               echo "- codewhale-artifacts-sha256.txt"
             } > target/cnb-release/CNB_RELEASE.md
@@ -182,5 +201,6 @@ $:
           settings:
             attachments:
               - target/cnb-release/codewhale-linux-x64
+              - target/cnb-release/codew-linux-x64
               - target/cnb-release/codewhale-tui-linux-x64
               - target/cnb-release/codewhale-artifacts-sha256.txt

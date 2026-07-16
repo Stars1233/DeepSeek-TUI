@@ -59,7 +59,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     if !lines.is_empty() {
         let mut panel = Block::default()
             .title(Line::from(Span::styled(
-                " CodeWhale ",
+                " Codewhale ",
                 Style::default()
                     .fg(palette::WHALE_ACCENT_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -426,6 +426,21 @@ mod tests {
         assert!(body.contains("/model"));
         assert!(body.contains("open setup if it needs attention"));
         assert!(!body.contains("open the workspace"));
+    }
+
+    #[test]
+    fn trust_footer_advertises_only_explicit_trust_keys() {
+        let app = test_app_with_locale(Locale::En);
+        let lines = trust_directory::lines(&app);
+        let footer = lines
+            .last()
+            .expect("trust footer")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(footer, "Press 1/Y to trust and continue, 2/N/Esc to quit");
     }
 
     #[test]

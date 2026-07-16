@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::timeout as tokio_timeout;
 
-use crate::config::wire_model_for_provider;
+use crate::config::{TOGETHER_INKLING_MODEL, wire_model_for_provider_route};
 
 /// Default timeout for the initial streaming response headers.
 ///
@@ -101,6 +101,39 @@ fn apply_openai_reasoning_effort(
     body["reasoning_effort"] = json!(effort);
 }
 
+fn apply_inkling_reasoning_effort(
+    body: &mut Value,
+    provider: ApiProvider,
+    model: &str,
+    effort: Option<&str>,
+) {
+    if provider != ApiProvider::Together
+        || !model.trim().eq_ignore_ascii_case(TOGETHER_INKLING_MODEL)
+    {
+        return;
+    }
+
+    // Inkling's official chat template accepts OpenAI's top-level
+    // `reasoning_effort` field with this exact vocabulary. It does not use
+    // Together's generic `thinking` extension or the `xhigh` wire value.
+    if let Some(object) = body.as_object_mut() {
+        object.remove("thinking");
+    }
+    let Some(effort) = effort else {
+        return;
+    };
+    let wire_effort = match effort.trim().to_ascii_lowercase().as_str() {
+        "off" | "disabled" | "none" | "false" => "none",
+        "minimal" => "minimal",
+        "low" => "low",
+        "medium" | "mid" | "" => "medium",
+        "high" => "high",
+        "max" | "xhigh" | "highest" | "ultracode" => "max",
+        _ => return,
+    };
+    body["reasoning_effort"] = json!(wire_effort);
+}
+
 fn openai_compatible_reasoning_effort(
     effort: &str,
     supports_max: bool,
@@ -162,7 +195,8 @@ impl DeepSeekClient {
     ) -> Result<MessageResponse> {
         let cacheable = crate::llm_response_cache::request_is_cacheable(request);
         let messages = build_chat_messages_for_request_and_provider(request, self.api_provider);
-        let model = wire_model_for_provider(self.api_provider, &request.model);
+        let model =
+            wire_model_for_provider_route(self.api_provider, &self.base_url, &request.model);
         let mut body = json!({
             "model": model.clone(),
             "messages": messages,
@@ -206,6 +240,12 @@ impl DeepSeekClient {
             &mut body,
             request.reasoning_effort.as_deref(),
             self.api_provider,
+        );
+        apply_inkling_reasoning_effort(
+            &mut body,
+            self.api_provider,
+            &model,
+            request.reasoning_effort.as_deref(),
         );
         apply_openai_reasoning_effort(
             &mut body,
@@ -285,7 +325,8 @@ impl DeepSeekClient {
     ) -> Result<StreamEventBox> {
         // Try true SSE streaming via chat completions (widely supported)
         let messages = build_chat_messages_for_request_and_provider(&request, self.api_provider);
-        let model = wire_model_for_provider(self.api_provider, &request.model);
+        let model =
+            wire_model_for_provider_route(self.api_provider, &self.base_url, &request.model);
         let mut body = json!({
             "model": model.clone(),
             "messages": messages,
@@ -333,6 +374,12 @@ impl DeepSeekClient {
             &mut body,
             request.reasoning_effort.as_deref(),
             self.api_provider,
+        );
+        apply_inkling_reasoning_effort(
+            &mut body,
+            self.api_provider,
+            &model,
+            request.reasoning_effort.as_deref(),
         );
         apply_openai_reasoning_effort(
             &mut body,
@@ -4457,9 +4504,10 @@ mod alias_thinking_detection_tests {
     //! turn. See upstream API docs:
     //! https://api-docs.deepseek.com/guides/thinking_mode
     use super::{
-        apply_openai_reasoning_effort, apply_provider_token_limit, is_reasoning_model_for_stream,
-        provider_accepts_reasoning_content, requires_reasoning_content,
-        should_replay_reasoning_content, should_replay_reasoning_content_for_provider,
+        apply_inkling_reasoning_effort, apply_openai_reasoning_effort, apply_provider_token_limit,
+        is_reasoning_model_for_stream, provider_accepts_reasoning_content,
+        requires_reasoning_content, should_replay_reasoning_content,
+        should_replay_reasoning_content_for_provider,
     };
     use crate::config::ApiProvider;
     use serde_json::json;
@@ -4635,6 +4683,57 @@ mod alias_thinking_detection_tests {
         assert!(body.get("max_tokens").is_none());
         assert_eq!(body["max_completion_tokens"], json!(8192));
         assert_eq!(body["reasoning_effort"], json!("max"));
+    }
+
+    #[test]
+    fn inkling_uses_its_exact_reasoning_vocabulary_without_thinking_extension() {
+        for (requested, expected) in [
+            ("off", "none"),
+            ("minimal", "minimal"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("max", "max"),
+            ("xhigh", "max"),
+        ] {
+            let mut body = json!({
+                "thinking": { "type": "enabled" },
+                "reasoning_effort": "xhigh",
+            });
+
+            apply_inkling_reasoning_effort(
+                &mut body,
+                ApiProvider::Together,
+                "thinkingmachines/inkling",
+                Some(requested),
+            );
+
+            assert_eq!(body["reasoning_effort"], json!(expected));
+            assert!(body.get("thinking").is_none());
+        }
+    }
+
+    #[test]
+    fn inkling_reasoning_override_is_scoped_to_the_exact_together_route() {
+        let mut other_model = json!({ "thinking": { "type": "enabled" } });
+        apply_inkling_reasoning_effort(
+            &mut other_model,
+            ApiProvider::Together,
+            "deepseek-ai/DeepSeek-V4-Pro",
+            Some("max"),
+        );
+        assert_eq!(other_model["thinking"]["type"], json!("enabled"));
+        assert!(other_model.get("reasoning_effort").is_none());
+
+        let mut other_provider = json!({ "thinking": { "type": "enabled" } });
+        apply_inkling_reasoning_effort(
+            &mut other_provider,
+            ApiProvider::Openrouter,
+            "thinkingmachines/inkling",
+            Some("max"),
+        );
+        assert_eq!(other_provider["thinking"]["type"], json!("enabled"));
+        assert!(other_provider.get("reasoning_effort").is_none());
     }
 
     #[test]

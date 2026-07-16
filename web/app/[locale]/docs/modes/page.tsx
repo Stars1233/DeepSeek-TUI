@@ -8,121 +8,160 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     locale,
     title: isZh ? "模式 · Codewhale 文档" : "Modes · Codewhale Docs",
     description: isZh
-      ? "Plan、Act、Operate 三种运行模式与正交审批姿态。"
-      : "Plan, Act, Operate modes and orthogonal approval posture.",
+      ? "Plan、Act、Operate 三种运行模式与独立的权限姿态。"
+      : "Plan, Act, Operate modes and independent permission postures.",
   });
 }
 
 export default async function ModesPage({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";
+  const bodyClass = isZh
+    ? "text-ink-soft leading-[1.9] tracking-wide"
+    : "text-ink-soft leading-relaxed";
+  const modes = isZh
+    ? [
+        {
+          name: "Plan",
+          description:
+            "用于只读调查与规划。Codewhale 可以检查工作区，但不能执行 Shell 命令或修改文件。",
+        },
+        {
+          name: "Act",
+          description:
+            "用于常规交互式编码。Codewhale 可以检查、编辑并使用工具；Shell 是否可用以及何时请求批准，取决于当前配置和权限姿态。",
+        },
+        {
+          name: "Operate",
+          description:
+            "用于从同一个输入区协调多项任务。父回合可以直接检查、编辑并使用 Shell 或 MCP 工具，其权限姿态、沙箱和安全规则与 Act 相同。独立、并行、后台或长时间工作会优先交给 Fleet worker，但并非所有可执行步骤都必须委派。只有需要有序阶段、门禁或确定性汇总时才需要 Workflow。",
+        },
+      ]
+    : [
+        {
+          name: "Plan",
+          description:
+            "Read-only investigation and planning. Codewhale can inspect the workspace, but it cannot run shell commands or edit files.",
+        },
+        {
+          name: "Act",
+          description:
+            "Normal interactive coding. Codewhale can inspect, edit, and use tools; shell availability and approval prompts follow the active configuration and permission posture.",
+        },
+        {
+          name: "Operate",
+          description:
+            "Multitask coordination from the same composer. The parent can inspect, edit, and use shell or MCP tools under the same permission posture, sandbox, and safety rules as Act. Fleet workers are preferred for independent, parallel, background, or long-running work, but delegation is not required for every executable step. Workflow is optional unless the work needs ordered phases, gates, or deterministic fan-in.",
+        },
+      ];
+  const postures = isZh
+    ? [
+        {
+          name: "Ask",
+          description: "在可能产生重要后果的工具执行前询问你。",
+        },
+        {
+          name: "Auto-Review",
+          description: "自动评估工具风险，只在确实需要你决定时询问。",
+        },
+        {
+          name: "Full Access",
+          description:
+            "无需批准提示即可运行工具，并启用受信任工作区访问。仓库规则和托管约束仍然有效；仅在你信任的工作区中使用。",
+        },
+      ]
+    : [
+        {
+          name: "Ask",
+          description: "Ask before tools that can make consequential changes.",
+        },
+        {
+          name: "Auto-Review",
+          description: "Review tool risk automatically and ask when a decision needs you.",
+        },
+        {
+          name: "Full Access",
+          description:
+            "Run tools without approval prompts and enable trusted-workspace access. Repository rules and managed constraints still apply; use it only in a workspace you trust.",
+        },
+      ];
 
   return (
     <section className="space-y-10">
       <section id="overview" className="scroll-mt-32">
-        <h2 className="font-display text-3xl mb-1">
-          {isZh ? "模式" : "Modes"}{" "}
-          <span className="font-cjk text-indigo text-2xl ml-2">
-            {isZh ? "Modes" : "模式"}
-          </span>
-        </h2>
-        {isZh ? (
-          <p className="text-ink-soft mt-3 leading-[1.9] tracking-wide">
-            三种运行模式——与审批系统正交。按{" "}
-            <kbd className="font-mono text-xs px-1.5 py-0.5 hairline-t hairline-b hairline-l hairline-r">
-              Tab
-            </kbd>{" "}
-            切换。
-          </p>
-        ) : (
-          <p className="text-ink-soft mt-3 leading-relaxed">
-            Three operating modes — orthogonal to the approval system. Press{" "}
-            <kbd className="font-mono text-xs px-1.5 py-0.5 hairline-t hairline-b hairline-l hairline-r">
-              Tab
-            </kbd>{" "}
-            to cycle.
-          </p>
-        )}
-        <div className="grid md:grid-cols-3 gap-0 col-rule hairline-t hairline-b mt-6">
-          {[
-            {
-              name: "Plan",
-              cn: "计划",
-              color: "text-cobalt",
-              en: "Read-only investigation. Grep, read files, list directories, fetch URLs — cannot write or execute shell.",
-              zh: "只读调查。可以 grep、读文件、列目录、抓取 URL——不能写入或执行 shell。",
-            },
-            {
-              name: "Agent",
-              cn: "代理",
-              color: "text-jade",
-              en: "Default mode. Multi-step tool use. Shell and side-effect tools require approval per approval_mode.",
-              zh: "默认模式。多步工具调用。Shell 和有副作用的工具需按 approval_mode 设置审批。",
-            },
-            {
-              name: "YOLO",
-              cn: "全权",
-              color: "text-indigo",
-              en: "Auto-approve all actions and enable trust mode. Workspace boundary lifted. Use carefully.",
-              zh: "自动批准所有操作并启用信任模式。工作区边界解除。请谨慎使用。",
-            },
-          ].map((m) => (
-            <div key={m.name} className="p-5">
-              <div className={`font-display text-xl ${m.color} mb-1`}>
-                {m.name} <span className="font-cjk text-base ml-1.5">{m.cn}</span>
-              </div>
-              <p className={`text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
-                {isZh ? m.zh : m.en}
-              </p>
-            </div>
+        <h2 className="font-display text-3xl mb-1">{isZh ? "模式" : "Modes"}</h2>
+        <p className={`${bodyClass} mt-3`}>
+          {isZh
+            ? "模式决定 Codewhale 如何组织工作；权限姿态决定它如何处理具有后果的工具调用。两者相互独立。"
+            : "A mode decides how Codewhale handles the work. A permission posture decides how it handles consequential tool calls. They are separate controls."}
+        </p>
+        <div className="hairline-t mt-6">
+          {modes.map((mode) => (
+            <section key={mode.name} className="py-4 hairline-b">
+              <h3 className="font-display text-xl">{mode.name}</h3>
+              <p className={`${bodyClass} mt-1 text-sm`}>{mode.description}</p>
+            </section>
           ))}
         </div>
       </section>
 
-      <section id="approval" className="scroll-mt-32">
+      <section id="switching" className="scroll-mt-32">
         <h2 className="font-display text-2xl mb-1">
-          {isZh ? "审批策略" : "Approval Policies"}
+          {isZh ? "切换模式" : "Switch modes"}
         </h2>
-        {isZh ? (
-          <p className="text-ink-soft mt-3 leading-[1.9] tracking-wide">
-            模式与审批是两个独立的维度。通过 <code className="inline">/config</code> 设置。
-          </p>
-        ) : (
-          <p className="text-ink-soft mt-3 leading-relaxed">
-            Modes and approval are independent dimensions. Set via{" "}
-            <code className="inline">/config</code>.
-          </p>
-        )}
-        <div className="hairline-t hairline-b mt-6 grid md:grid-cols-3 col-rule">
-          {[
-            {
-              name: "suggest",
-              cn: "建议",
-              en: "Default — follow mode rules. Ask before dangerous operations.",
-              zh: "默认——按模式规则执行。危险操作前询问。",
-            },
-            {
-              name: "auto",
-              cn: "自动",
-              en: "Auto-approve all tool calls. Equivalent to YOLO without trust.",
-              zh: "自动批准所有工具调用。等同于无信任的 YOLO。",
-            },
-            {
-              name: "never",
-              cn: "拒绝",
-              en: "Block any non-safe / non-read-only action. Investigation only.",
-              zh: "阻止任何非安全/非只读操作。仅限调查。",
-            },
-          ].map((a) => (
-            <div key={a.name} className="p-5">
-              <div className="font-mono text-sm text-indigo uppercase tracking-wider">
-                {a.name} ·{" "}
-                <span className="font-cjk normal-case tracking-normal">{a.cn}</span>
-              </div>
-              <p className={`text-sm text-ink-soft mt-2 ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
-                {isZh ? a.zh : a.en}
-              </p>
-            </div>
+        <p className={`${bodyClass} mt-3`}>
+          {isZh ? (
+            <>
+              输入区空闲时，按 <kbd className="font-mono text-xs px-1.5 py-0.5 hairline">Tab</kbd>{" "}
+              循环 Plan → Act → Operate。补全菜单打开时，Tab 接受补全；回合运行时，它可以把当前草稿排入下一个跟进消息。
+            </>
+          ) : (
+            <>
+              When the composer is idle, press{" "}
+              <kbd className="font-mono text-xs px-1.5 py-0.5 hairline">Tab</kbd> to cycle Plan →
+              Act → Operate. When a completion menu is open, Tab accepts the completion; during
+              an active turn, it can queue the current draft as the next follow-up.
+            </>
+          )}
+        </p>
+        <p className={`${bodyClass} mt-3`}>
+          {isZh
+            ? "运行 /mode 打开模式选择器，或使用以下命令直接切换："
+            : "Run /mode to open the picker, or switch directly:"}
+        </p>
+        <pre className="code-block mt-4">{`/mode plan
+/mode act
+/mode operate`}</pre>
+      </section>
+
+      <section id="permissions" className="scroll-mt-32">
+        <h2 className="font-display text-2xl mb-1">
+          {isZh ? "权限姿态" : "Permission postures"}
+        </h2>
+        <p className={`${bodyClass} mt-3`}>
+          {isZh ? (
+            <>
+              Plan 始终为只读。在 Act 或 Operate 中且输入区空闲时，按{" "}
+              <kbd className="font-mono text-xs px-1.5 py-0.5 hairline">Shift+Tab</kbd> 循环 Ask
+              → Auto-Review → Full Access。运行 <code className="inline">/config</code>{" "}
+              可查看或编辑当前会话权限；项目或托管策略可能会锁定或收紧它。
+            </>
+          ) : (
+            <>
+              Plan is always Read Only. When the composer is idle in Act or Operate, press{" "}
+              <kbd className="font-mono text-xs px-1.5 py-0.5 hairline">Shift+Tab</kbd> to cycle Ask
+              → Auto-Review → Full Access. Run <code className="inline">/config</code> to inspect
+              or edit the current session permission; project or managed policy may lock or
+              tighten it.
+            </>
+          )}
+        </p>
+        <div className="hairline-t mt-6">
+          {postures.map((posture) => (
+            <section key={posture.name} className="py-4 hairline-b">
+              <h3 className="font-display text-lg">{posture.name}</h3>
+              <p className={`${bodyClass} mt-1 text-sm`}>{posture.description}</p>
+            </section>
           ))}
         </div>
       </section>

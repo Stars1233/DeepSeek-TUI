@@ -16,6 +16,50 @@ pub use codewhale_config::{
 pub use super::roster::ProfileOrigin;
 
 pub const WORKSPACE_AGENT_PROFILE_DIR: &str = ".codewhale/agents";
+pub const PERSONAL_AGENT_PROFILE_DIR: &str = "agents";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FleetProfileScope {
+    Project,
+    Personal,
+}
+
+impl FleetProfileScope {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Personal => "personal",
+        }
+    }
+
+    #[must_use]
+    pub fn display_dir(self) -> &'static str {
+        match self {
+            Self::Project => WORKSPACE_AGENT_PROFILE_DIR,
+            Self::Personal => "$CODEWHALE_HOME/agents",
+        }
+    }
+
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Project => Self::Personal,
+            Self::Personal => Self::Project,
+        }
+    }
+}
+
+pub fn personal_agent_profile_dir() -> Result<PathBuf> {
+    Ok(codewhale_config::codewhale_home()?.join(PERSONAL_AGENT_PROFILE_DIR))
+}
+
+pub fn agent_profile_dir_for_scope(scope: FleetProfileScope, workspace: &Path) -> Result<PathBuf> {
+    match scope {
+        FleetProfileScope::Project => Ok(workspace.join(WORKSPACE_AGENT_PROFILE_DIR)),
+        FleetProfileScope::Personal => personal_agent_profile_dir(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -127,7 +171,19 @@ pub fn load_workspace_agent_profiles_tolerant(
     workspace: impl AsRef<Path>,
 ) -> Result<(Vec<AgentProfile>, Vec<String>)> {
     let dir = workspace.as_ref().join(WORKSPACE_AGENT_PROFILE_DIR);
-    let paths = agent_profile_paths(&dir)?;
+    load_agent_profiles_from_dir_tolerant(dir, ProfileOrigin::Workspace)
+}
+
+pub fn load_personal_agent_profiles_tolerant() -> Result<(Vec<AgentProfile>, Vec<String>)> {
+    load_agent_profiles_from_dir_tolerant(personal_agent_profile_dir()?, ProfileOrigin::Personal)
+}
+
+pub fn load_agent_profiles_from_dir_tolerant(
+    dir: impl AsRef<Path>,
+    origin: ProfileOrigin,
+) -> Result<(Vec<AgentProfile>, Vec<String>)> {
+    let dir = dir.as_ref();
+    let paths = agent_profile_paths(dir)?;
     let mut profiles = Vec::new();
     let mut issues = Vec::new();
     let mut seen = BTreeSet::new();
@@ -159,7 +215,10 @@ pub fn load_workspace_agent_profiles_tolerant(
             continue;
         }
         match load_agent_profile_file(&path) {
-            Ok(profile) => profiles.push(profile),
+            Ok(mut profile) => {
+                profile.origin = origin;
+                profiles.push(profile);
+            }
             Err(err) => issues.push(format!("{err:#}")),
         }
     }
@@ -174,7 +233,14 @@ pub fn load_workspace_agent_profile_identities(
     workspace: impl AsRef<Path>,
 ) -> Result<Vec<AgentProfileIdentity>> {
     let dir = workspace.as_ref().join(WORKSPACE_AGENT_PROFILE_DIR);
-    agent_profile_paths(&dir)?
+    load_agent_profile_identities_from_dir(dir)
+}
+
+pub fn load_agent_profile_identities_from_dir(
+    dir: impl AsRef<Path>,
+) -> Result<Vec<AgentProfileIdentity>> {
+    let dir = dir.as_ref();
+    agent_profile_paths(dir)?
         .into_iter()
         .map(|path| load_agent_profile_identity_file(&path))
         .collect()

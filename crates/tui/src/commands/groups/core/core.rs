@@ -7,7 +7,7 @@ use crate::config::{
     ApiProvider, COMMON_DEEPSEEK_MODELS, normalize_custom_model_id,
     normalize_model_name_for_provider,
 };
-use crate::localization::{MessageId, tr};
+use crate::localization::{Locale, MessageId, tr};
 use crate::route_runtime::resolve_route_candidate;
 use crate::tui::app::{App, AppAction, AppMode, ReasoningEffort};
 use crate::tui::views::{HelpView, ModalKind, SubAgentsView, subagent_view_agents};
@@ -156,10 +156,11 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 app.session.last_completion_tokens = None;
                 app.session.last_output_throughput = None;
             }
-            app.provider_models
-                .insert(app.api_provider.as_str().to_string(), "auto".to_string());
-            let persist_warning =
-                provider_model_selection_persist_warning(app.api_provider, "auto");
+            app.provider_models.insert(
+                app.provider_identity_for_persistence().to_string(),
+                "auto".to_string(),
+            );
+            let persist_warning = provider_model_selection_persist_warning(app, "auto");
             let mut message = tr(app.ui_locale, MessageId::ModelChanged)
                 .replace("{old}", &old_model)
                 .replace("{new}", "auto");
@@ -222,9 +223,11 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             app.session.last_completion_tokens = None;
             app.session.last_output_throughput = None;
         }
-        app.provider_models
-            .insert(app.api_provider.as_str().to_string(), model_id.clone());
-        let persist_warning = provider_model_selection_persist_warning(app.api_provider, &model_id);
+        app.provider_models.insert(
+            app.provider_identity_for_persistence().to_string(),
+            model_id.clone(),
+        );
+        let persist_warning = provider_model_selection_persist_warning(app, &model_id);
         let mut message = tr(app.ui_locale, MessageId::ModelChanged)
             .replace("{old}", &old_model)
             .replace("{new}", &model_id);
@@ -240,10 +243,17 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
     }
 }
 
-fn provider_model_selection_persist_warning(provider: ApiProvider, model: &str) -> Option<String> {
-    crate::settings::Settings::persist_provider_model_selection(provider, model)
-        .err()
-        .map(|err| format!(" (not persisted: {err})"))
+fn provider_model_selection_persist_warning(app: &App, model: &str) -> Option<String> {
+    let result = if app.api_provider == ApiProvider::Custom {
+        (|| -> anyhow::Result<()> {
+            let mut settings = crate::settings::Settings::load()?;
+            settings.set_model_for_provider(app.provider_identity_for_persistence(), model);
+            settings.save()
+        })()
+    } else {
+        crate::settings::Settings::persist_provider_model_selection(app.api_provider, model)
+    };
+    result.err().map(|err| format!(" (not persisted: {err})"))
 }
 
 /// Fetch and list available models from the configured API endpoint.
@@ -471,12 +481,48 @@ fn provider_link_info(provider_id: &str) -> ProviderLinkInfo {
     }
 }
 
-/// Show provider dashboard, token, and docs links.
-pub fn deepseek_links(app: &mut App) -> CommandResult {
+fn public_site_locale_segment(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans | Locale::ZhHant => "zh",
+        Locale::En | Locale::Ja | Locale::PtBr | Locale::Es419 | Locale::Vi | Locale::Ko => "en",
+    }
+}
+
+/// Show Codewhale documentation, community, managed-app, and provider links.
+pub fn codewhale_links(app: &mut App) -> CommandResult {
     let locale = app.ui_locale;
     let active_provider = app.api_provider.as_str();
+    let site_locale = public_site_locale_segment(locale);
     let mut message = format!(
         "{}\n─────────────────────────────\n",
+        tr(locale, MessageId::LinksProjectTitle)
+    );
+
+    let _ = writeln!(
+        message,
+        "{} `https://codewhale.net/{site_locale}/docs`",
+        tr(locale, MessageId::LinksDocumentation)
+    );
+    let _ = writeln!(
+        message,
+        "{} `https://codewhale.net/{site_locale}/community`",
+        tr(locale, MessageId::LinksCommunity)
+    );
+    let _ = writeln!(
+        message,
+        "{} `https://github.com/Hmbown/CodeWhale`",
+        tr(locale, MessageId::LinksGitHub)
+    );
+    let _ = writeln!(
+        message,
+        "{} `https://app.codewhale.net`",
+        tr(locale, MessageId::LinksManagedApp)
+    );
+    let _ = writeln!(message, "{}", tr(locale, MessageId::LinksManagedAppNote));
+
+    let _ = write!(
+        message,
+        "\n{}\n─────────────────────────────\n",
         tr(locale, MessageId::LinksTitle)
     );
 
@@ -775,7 +821,7 @@ mod tests {
         let result = help(&mut app, Some("links"));
         let msg = result.message.expect("help topic should return message");
         assert!(msg.contains("links"));
-        assert!(msg.contains("Show provider token, dashboard, and docs links"));
+        assert!(msg.contains("Show Codewhale, community, and provider links"));
         assert!(msg.contains("Usage: /links"));
         assert!(msg.contains("Aliases: dashboard, api"));
     }
@@ -924,6 +970,7 @@ mod tests {
         });
         app.push_turn_cache_record(TurnCacheRecord {
             provider: None,
+            provider_identity: None,
             model: None,
             auto_model: false,
             input_tokens: 100,
@@ -1188,6 +1235,7 @@ mod tests {
         app.model = "deepseek-v4-pro".to_string();
         app.push_turn_cache_record(TurnCacheRecord {
             provider: None,
+            provider_identity: None,
             model: None,
             auto_model: false,
             input_tokens: 100,
@@ -1212,6 +1260,7 @@ mod tests {
         app.model = "deepseek-v4-pro".to_string();
         app.push_turn_cache_record(TurnCacheRecord {
             provider: None,
+            provider_identity: None,
             model: None,
             auto_model: false,
             input_tokens: 100,
@@ -1364,11 +1413,18 @@ mod tests {
     }
 
     #[test]
-    fn test_deepseek_links() {
+    fn test_codewhale_links() {
         let mut app = create_test_app();
-        let result = deepseek_links(&mut app);
+        let result = codewhale_links(&mut app);
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
+        assert!(msg.contains("Codewhale & community"));
+        assert!(msg.contains("https://codewhale.net/en/docs"));
+        assert!(msg.contains("https://codewhale.net/en/community"));
+        assert!(msg.contains("https://github.com/Hmbown/CodeWhale"));
+        assert!(msg.contains("https://app.codewhale.net"));
+        assert!(msg.contains("separate sign-in"));
+        assert!(msg.contains("not connected to the current local session"));
         assert!(msg.contains("Provider Links"));
         assert!(msg.contains("DeepSeek (deepseek) <- current"));
         assert!(msg.contains("https://platform.deepseek.com/api_keys"));
@@ -1385,7 +1441,7 @@ mod tests {
     #[test]
     fn provider_links_emit_urls_as_inline_code_for_narrow_transcripts() {
         let mut app = create_test_app();
-        let result = deepseek_links(&mut app);
+        let result = codewhale_links(&mut app);
         let msg = result.message.expect("links should return a message");
 
         assert!(msg.contains("`https://platform.openai.com/api-keys`"));
@@ -1412,6 +1468,20 @@ mod tests {
 
         assert_eq!(links.docs_url, "https://codewhale.net/en/docs");
         assert_eq!(links.key_url, None);
+    }
+
+    #[test]
+    fn project_links_follow_the_available_public_site_locale() {
+        let mut app = create_test_app();
+        app.ui_locale = Locale::ZhHans;
+
+        let msg = codewhale_links(&mut app)
+            .message
+            .expect("links should return a message");
+
+        assert!(msg.contains("`https://codewhale.net/zh/docs`"));
+        assert!(msg.contains("`https://codewhale.net/zh/community`"));
+        assert!(msg.contains("`https://app.codewhale.net`"));
     }
 
     #[test]
@@ -1470,7 +1540,7 @@ mod tests {
         let msg = result
             .message
             .expect("home dashboard should return message");
-        assert!(msg.contains("/links      - Dashboard & API links"));
+        assert!(msg.contains("/links      - Codewhale, community & provider links"));
         assert!(msg.contains("/config      - Inspect and change settings"));
         assert!(
             !msg.lines()

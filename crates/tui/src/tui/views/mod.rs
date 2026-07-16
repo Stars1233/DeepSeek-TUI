@@ -17,7 +17,9 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::settings::Settings;
 use crate::tools::UserInputResponse;
-use crate::tools::subagent::{SubAgentAssignment, SubAgentResult, SubAgentStatus, SubAgentType};
+use crate::tools::subagent::{
+    SubAgentAssignment, SubAgentResult, SubAgentStatus, SubAgentType, localized_whale_display_names,
+};
 use crate::tui::app::App;
 use crate::tui::approval::{ElevationOption, ReviewDecision};
 use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
@@ -310,13 +312,21 @@ pub(crate) fn action_footer_lines(hints: &[ActionHint], width: u16) -> Vec<Line<
 /// Reserve `lines` worth of rows at the bottom of `inner`, paint them, and
 /// return the content area that remains above. Shared by the action-hint and
 /// free-text modal footers.
-fn place_footer_lines(inner: Rect, buf: &mut Buffer, lines: Vec<Line<'static>>) -> Rect {
+fn place_footer_lines(
+    inner: Rect,
+    buf: &mut Buffer,
+    lines: Vec<Line<'static>>,
+    quiet_gutter: bool,
+) -> Rect {
     if lines.is_empty() || inner.height == 0 {
         return inner;
     }
     let footer_height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .min(inner.height);
+    // Opted-in overlays keep one quiet row between scrollable body copy and
+    // the action rail. Degenerate heights keep every row for content.
+    let gutter_height = u16::from(quiet_gutter && inner.height >= footer_height.saturating_add(4));
     let footer_area = Rect {
         x: inner.x,
         y: inner.y + inner.height - footer_height,
@@ -328,7 +338,9 @@ fn place_footer_lines(inner: Rect, buf: &mut Buffer, lines: Vec<Line<'static>>) 
         x: inner.x,
         y: inner.y,
         width: inner.width,
-        height: inner.height - footer_height,
+        height: inner
+            .height
+            .saturating_sub(footer_height.saturating_add(gutter_height)),
     }
 }
 
@@ -341,7 +353,18 @@ fn place_footer_lines(inner: Rect, buf: &mut Buffer, lines: Vec<Line<'static>>) 
 /// reachable at narrow widths.
 pub(crate) fn render_modal_footer(inner: Rect, buf: &mut Buffer, hints: &[ActionHint]) -> Rect {
     let lines = action_footer_lines(hints, inner.width);
-    place_footer_lines(inner, buf, lines)
+    place_footer_lines(inner, buf, lines, false)
+}
+
+/// Render a modal action footer with one quiet body-to-footer row when the
+/// caller's responsive layout has explicitly budgeted for it.
+pub(crate) fn render_modal_footer_with_gutter(
+    inner: Rect,
+    buf: &mut Buffer,
+    hints: &[ActionHint],
+) -> Rect {
+    let lines = action_footer_lines(hints, inner.width);
+    place_footer_lines(inner, buf, lines, true)
 }
 
 /// Word-wrap a free-form footer string into styled lines that each fit `width`.
@@ -394,7 +417,10 @@ pub(crate) fn render_modal_text_footer(
     style: Style,
 ) -> Rect {
     let lines = wrapped_footer_lines(text, inner.width, style);
-    place_footer_lines(inner, buf, lines)
+    // Free-text status footers are already separated semantically from their
+    // table body and can carry the last visible receipt themselves. Do not
+    // spend another row here; action-rail layouts can opt into that gutter.
+    place_footer_lines(inner, buf, lines, false)
 }
 
 /// Shared list/detail geometry for modal managers and pickers.
@@ -663,6 +689,9 @@ pub enum ViewEvent {
     ModelPickerApplied {
         model: String,
         provider: Option<crate::config::ApiProvider>,
+        /// Exact named custom route key when the selected provider enum is
+        /// `Custom`; built-in routes leave this unset.
+        provider_id: Option<String>,
         effort: crate::tui::app::ReasoningEffort,
         previous_model: String,
         previous_effort: crate::tui::app::ReasoningEffort,
@@ -806,10 +835,11 @@ pub enum ViewEvent {
     FleetRosterOpenWorkersRequested,
     /// Emitted by the fleet setup Review step after the user previewed a
     /// model-drafted profile and pressed the explicit ratify key. The host
-    /// renders TOML deterministically from the validated draft and persists
-    /// it atomically under `.codewhale/agents/`.
+    /// renders TOML deterministically from the validated draft and persists it
+    /// atomically in the explicitly selected project or personal scope.
     FleetProfileDraftCommitRequested {
         draft: Box<crate::fleet::profile::FleetProfileDraft>,
+        scope: crate::fleet::profile::FleetProfileScope,
     },
     /// Emitted by the setup Runtime Posture card after the user has previewed
     /// and confirmed an explicit preset/config diff.
@@ -932,6 +962,10 @@ impl ViewStack {
 
     pub fn top_kind(&self) -> Option<ModalKind> {
         self.views.last().map(|view| view.kind())
+    }
+
+    pub fn top_occupied_region(&self, area: Rect) -> Option<Rect> {
+        self.views.last().map(|view| view.occupied_region(area))
     }
 
     pub fn push<V: ModalView + 'static>(&mut self, view: V) {
@@ -2143,21 +2177,12 @@ fn config_base_url_row_key(provider: ApiProvider) -> &'static str {
 }
 
 fn config_provider_row_value(app: &App, config: &Config) -> String {
-    if app.api_provider == ApiProvider::Custom
-        && let Some(provider_id) = config
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|provider_id| !provider_id.is_empty())
-        && config
-            .providers
-            .as_ref()
-            .and_then(|providers| providers.custom_provider_config(provider_id))
-            .is_some()
-    {
-        return provider_id.to_string();
-    }
-    app.api_provider.as_str().to_string()
+    config
+        .provider
+        .as_deref()
+        .filter(|provider| !provider.trim().is_empty())
+        .unwrap_or_else(|| app.provider_identity_for_persistence())
+        .to_string()
 }
 
 fn config_base_url_row_value(app: &App) -> String {
@@ -2165,8 +2190,12 @@ fn config_base_url_row_value(app: &App) -> String {
         .map(|mut config| {
             // A named custom provider is represented at runtime as `Custom`,
             // but its table lookup still needs the original provider ID.
-            if app.api_provider != ApiProvider::Custom {
-                config.provider = Some(app.api_provider.as_str().to_string());
+            if config
+                .provider
+                .as_deref()
+                .is_none_or(|provider| provider.trim().is_empty())
+            {
+                config.provider = Some(app.provider_identity_for_persistence().to_string());
             }
             config.deepseek_base_url()
         })
@@ -2528,7 +2557,7 @@ fn config_choice_label(key: &str, value: &str) -> String {
         ("default_mode", "agent") => "Agent".to_string(),
         ("default_mode", "plan") => "Plan (read only)".to_string(),
         ("reasoning_effort", "default") => "Provider default".to_string(),
-        ("status_indicator", "cw") => "CodeWhale mark".to_string(),
+        ("status_indicator", "cw") => "Codewhale mark".to_string(),
         ("status_indicator", "whale") => "Animated whale".to_string(),
         ("status_indicator", "dots") => "Animated dots".to_string(),
         ("status_indicator", "off") => "Off".to_string(),
@@ -3205,6 +3234,7 @@ pub(crate) fn subagent_view_agents(
     manager_agents: &[SubAgentResult],
 ) -> Vec<SubAgentResult> {
     let mut agents = manager_agents.to_vec();
+    let manager_agent_count = agents.len();
     let mut seen: std::collections::HashSet<String> =
         agents.iter().map(|agent| agent.agent_id.clone()).collect();
 
@@ -3258,6 +3288,22 @@ pub(crate) fn subagent_view_agents(
             }
             _ => {}
         }
+    }
+
+    let mut display_names = localized_whale_display_names(
+        agents[..manager_agent_count]
+            .iter()
+            .map(|agent| (agent.agent_id.as_str(), agent.nickname.as_deref())),
+        app.ui_locale.tag(),
+    );
+    for agent in &mut agents[..manager_agent_count] {
+        agent.nickname = display_names.remove(&agent.agent_id);
+    }
+    for agent in &mut agents[manager_agent_count..] {
+        // Progress and transcript rows can arrive before ListSubAgents. Keep
+        // their stable Agent-N placeholder until the manager snapshot supplies
+        // the locale-neutral identity needed for generated whale display.
+        agent.nickname = app.agent_label_map.get(&agent.agent_id).cloned();
     }
 
     agents
@@ -3717,8 +3763,8 @@ mod tests {
         ActionHint, ConfigListItem, ConfigScope, ConfigView, EmptyState, HelpView,
         ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, ViewStack,
         action_footer_lines, canonical_config_choice, centered_modal_area, config_choice_values,
-        config_label_for_key, render_modal_footer, render_underwater_surface, subagent_view_agents,
-        truncate_view_text,
+        config_label_for_key, render_modal_footer_with_gutter, render_underwater_surface,
+        subagent_view_agents, truncate_view_text,
     };
     use crate::config::Config;
     use crate::localization::{Locale, MessageId, tr};
@@ -3882,12 +3928,17 @@ mod tests {
             ActionHint::new("Enter", "save"),
             ActionHint::new("Esc", "cancel"),
         ];
-        let body = render_modal_footer(inner, &mut buf, &hints);
-        // The footer (a single row at this width) is reserved off the bottom and
-        // the body fills the rows above it.
+        let body = render_modal_footer_with_gutter(inner, &mut buf, &hints);
+        // Normal-height overlays reserve a single quiet gutter above the
+        // one-row footer, so body prose never runs into the action rail.
         assert_eq!(body.y, inner.y);
-        assert_eq!(body.height, inner.height - 1);
-        assert_eq!(body.y + body.height, inner.y + inner.height - 1);
+        assert_eq!(body.height, inner.height - 2);
+        assert_eq!(body.y + body.height, inner.y + inner.height - 2);
+        let gutter_y = inner.y + inner.height - 2;
+        assert!(
+            (inner.x..inner.right()).all(|x| buf[(x, gutter_y)].symbol().trim().is_empty()),
+            "modal footer gutter should stay visually quiet"
+        );
     }
 
     #[test]
@@ -4068,6 +4119,7 @@ mod tests {
     #[test]
     fn subagent_view_agents_includes_progress_only_running_agent() {
         let mut app = create_test_app();
+        app.ensure_agent_label("agent_live");
         app.agent_progress
             .insert("agent_live".to_string(), "reading code".to_string());
 
@@ -4078,6 +4130,30 @@ mod tests {
         assert!(matches!(agents[0].status, SubAgentStatus::Running));
         assert_eq!(agents[0].assignment.role.as_deref(), Some("live"));
         assert!(agents[0].assignment.objective.contains("reading code"));
+        assert_eq!(agents[0].nickname.as_deref(), Some("Agent 1"));
+    }
+
+    #[test]
+    fn subagent_view_replaces_progress_placeholder_after_manager_snapshot() {
+        let mut app = create_test_app();
+        app.ui_locale = Locale::En;
+        app.ensure_agent_label("agent_live");
+        app.agent_progress
+            .insert("agent_live".to_string(), "reading code".to_string());
+
+        let progress_only = subagent_view_agents(&app, &[]);
+        assert_eq!(progress_only[0].nickname.as_deref(), Some("Agent 1"));
+
+        let mut manager = manager_agent("agent_live", SubAgentStatus::Running);
+        manager.nickname = Some(crate::tools::subagent::whale_name_for_id_in_locale(
+            "agent_live",
+            "ja",
+        ));
+        let manager_backed = subagent_view_agents(&app, &[manager]);
+        assert_eq!(
+            manager_backed[0].nickname.as_deref(),
+            Some(crate::tools::subagent::whale_name_for_id_in_locale("agent_live", "en").as_str())
+        );
     }
 
     #[test]

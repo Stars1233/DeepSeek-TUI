@@ -3,18 +3,17 @@
 # cargo test -p codewhale-tui --bin codewhale-tui --features long-running-tests commands::groups::session::acceptance -- --test-threads=1
 Feature: Session command workflows
 
-  Scenario: Save, export, and load preserve the active session
+  Scenario: Save and export preserve data while load defers restoration
     Given a CodeWhale session workspace with one user message
     When the user saves the active session
     And the user exports the active transcript
     And the user clears the active conversation
     And the user loads the saved session
     Then the saved session file should contain the saved message
-    And the active session id should match the saved session file
+    And the load action should target the saved session file
     And the exported markdown should contain the active transcript
-    And the active session should contain the saved message
-    And the restored token count should match the saved session
-    And CodeWhale should report that the session was loaded
+    And the active session should be cleared without an active session id
+    And CodeWhale should defer the session-loaded receipt to the event loop
 
   Scenario: Fork keeps the original session resumable
     Given a CodeWhale persisted session workspace with one user message

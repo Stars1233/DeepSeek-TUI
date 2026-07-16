@@ -71,10 +71,20 @@ pub struct GateSpec {
     /// Optional artifact type this gate produces/consumes (e.g. `findings`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_kind: Option<String>,
+    /// Require a standalone first-line PASS/APPROVE/BLOCK/FAIL verdict from a
+    /// successfully completed role. When enabled, missing or malformed
+    /// verdicts fail closed instead of inheriting legacy pass-on-success
+    /// behavior.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_explicit_verdict: bool,
 }
 
 fn default_max_retries() -> u32 {
     1
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Live state of one gate within a lane.
@@ -320,6 +330,7 @@ pub fn stopship_gate_pipeline() -> Vec<GateSpec> {
             blocks_role: Some("implementer".into()),
             max_retries: 0,
             artifact_kind: Some("findings".into()),
+            require_explicit_verdict: false,
         },
         GateSpec {
             id: "reviewer-diff".into(),
@@ -330,6 +341,7 @@ pub fn stopship_gate_pipeline() -> Vec<GateSpec> {
             blocks_role: Some("verifier".into()),
             max_retries: 1,
             artifact_kind: Some("diff_review".into()),
+            require_explicit_verdict: false,
         },
         GateSpec {
             id: "verifier-suite".into(),
@@ -340,6 +352,7 @@ pub fn stopship_gate_pipeline() -> Vec<GateSpec> {
             blocks_role: Some("release_lead".into()),
             max_retries: 2,
             artifact_kind: Some("verify_report".into()),
+            require_explicit_verdict: false,
         },
     ]
 }

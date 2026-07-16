@@ -2384,11 +2384,9 @@ fn saved_credential_describe_returns_config_file_path() {
     assert_eq!(cf.describe(), "/tmp/x.toml");
 }
 
-/// #593: the dual-write outcome describes both targets so the
-/// onboarding toast (`API key saved to {describe}`) tells the user
-/// the key landed in *both* the keyring and the config file —
-/// which is the whole point of the fix (defeats stale-keyring
-/// shadow while keeping the config file inspectable).
+/// #593: the dual-write outcome describes both targets so the onboarding toast
+/// (`API key saved to {describe}`) tells the user the key landed in both the
+/// selected durable secret store and the inspectable config file.
 #[test]
 fn saved_credential_describe_lists_both_targets_for_keyring_and_config() {
     let dual = SavedCredential::KeyringAndConfigFile {
@@ -2397,7 +2395,7 @@ fn saved_credential_describe_lists_both_targets_for_keyring_and_config() {
     };
     assert_eq!(
         dual.describe(),
-        "OS keyring (system keyring) and /tmp/x.toml"
+        "secret store (system keyring) and /tmp/x.toml"
     );
 }
 
@@ -2550,6 +2548,10 @@ fn config_with_provider_scoped_key(provider: &str, api_key: &str) -> Config {
 
 #[test]
 fn has_api_key_uses_active_provider_scoped_config_key() {
+    // `has_api_key` intentionally consults live endpoint env overrides. Keep
+    // this config-only assertion out of the windows where another test owns a
+    // process-global custom endpoint.
+    let _lock = lock_test_env();
     for provider in [
         "openai",
         "wanjie-ark",
@@ -2603,6 +2605,10 @@ fn has_api_key_uses_active_provider_env_key() -> Result<()> {
 
 #[test]
 fn has_api_key_uses_root_config_key_for_deepseek_variants() {
+    // A concurrent CODEWHALE_BASE_URL override deliberately unbinds the saved
+    // root key from the active endpoint. Serialize this assertion with the
+    // tests that install those process-global overrides.
+    let _lock = lock_test_env();
     for provider in ["deepseek", "deepseek-cn"] {
         let config = Config {
             provider: Some(provider.to_string()),
@@ -2929,6 +2935,131 @@ base_url = "https://openrouter.ai/api/v1"
     Ok(())
 }
 
+#[test]
+fn clear_active_provider_api_key_clears_deepseek_cn_root_scope() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-clear-deepseek-cn-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    fs::write(
+        &config_path,
+        r#"provider = "deepseek-cn"
+api_key = "deepseek-cn-root-key"
+
+[providers.deepseek-cn]
+api_key = "deepseek-cn-table-key"
+
+[providers.openrouter]
+api_key = "unrelated-key"
+"#,
+    )?;
+
+    clear_active_provider_api_key("deepseek-cn")?;
+
+    let after = fs::read_to_string(&config_path)?;
+    assert!(!after.contains("deepseek-cn-root-key"), "{after}");
+    assert!(!after.contains("deepseek-cn-table-key"), "{after}");
+    assert!(after.contains("unrelated-key"), "{after}");
+    Ok(())
+}
+
+#[test]
+fn clear_active_provider_api_key_distinguishes_literal_and_named_custom_routes() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-clear-custom-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    let contents = r#"provider = "custom"
+api_key = "legacy-root-key"
+base_url = "http://127.0.0.1:1234/v1"
+default_text_model = "legacy-model"
+
+[providers.lm-studio]
+kind = "openai-compatible"
+api_key = "named-route-key"
+base_url = "http://127.0.0.1:5678/v1"
+model = "named-model"
+"#;
+    fs::write(&config_path, contents)?;
+
+    clear_active_provider_api_key("custom")?;
+
+    let after_literal = fs::read_to_string(&config_path)?;
+    assert!(
+        !after_literal.contains("legacy-root-key"),
+        "{after_literal}"
+    );
+    assert!(after_literal.contains("named-route-key"), "{after_literal}");
+
+    fs::write(&config_path, contents)?;
+    clear_active_provider_api_key("lm-studio")?;
+
+    let after_named = fs::read_to_string(&config_path)?;
+    assert!(after_named.contains("legacy-root-key"), "{after_named}");
+    assert!(!after_named.contains("named-route-key"), "{after_named}");
+    Ok(())
+}
+
+#[test]
+fn clear_active_provider_api_key_prefers_exact_custom_table_over_legacy_root() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-clear-exact-custom-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    fs::write(
+        &config_path,
+        r#"provider = "custom"
+api_key = "legacy-root-key"
+base_url = "http://127.0.0.1:1234/v1"
+default_text_model = "legacy-model"
+
+[providers.custom]
+kind = "openai-compatible"
+api_key = "exact-table-key"
+base_url = "http://127.0.0.1:5678/v1"
+model = "exact-model"
+"#,
+    )?;
+
+    clear_active_provider_api_key("custom")?;
+
+    let after = fs::read_to_string(&config_path)?;
+    assert!(after.contains("legacy-root-key"), "{after}");
+    assert!(!after.contains("exact-table-key"), "{after}");
+    assert!(after.contains("[providers.custom]"), "{after}");
+    Ok(())
+}
+
 /// Finding #19: workspace-trust saves used to round-trip through
 /// `toml::to_string_pretty`, destroying comments in the whole file.
 #[test]
@@ -3030,6 +3161,494 @@ fn deepseek_api_key_prefers_saved_config_over_stale_env() -> Result<()> {
     unsafe {
         env::remove_var("DEEPSEEK_API_KEY");
     }
+    Ok(())
+}
+
+#[test]
+fn standalone_tui_reads_saved_secret_before_ambient_env() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _ambient_key = EnvVarGuard::set("DEEPSEEK_API_KEY", "stale-env-key");
+
+    let secrets = codewhale_secrets::Secrets::auto_detect();
+    secrets.set("deepseek", "saved-secret-key")?;
+
+    let config = Config::default();
+    assert_eq!(config.deepseek_api_key()?, "saved-secret-key");
+    assert!(has_api_key(&config));
+    assert!(active_provider_has_config_api_key(&config));
+
+    let configured = Config {
+        api_key: Some("fresh-config-key".to_string()),
+        ..Config::default()
+    };
+    assert_eq!(configured.deepseek_api_key()?, "fresh-config-key");
+    Ok(())
+}
+
+#[test]
+fn authenticated_local_provider_reads_saved_secret() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _ambient_key = EnvVarGuard::remove("VLLM_API_KEY");
+
+    codewhale_secrets::Secrets::auto_detect().set("vllm", "saved-local-secret")?;
+
+    let mut providers = ProvidersConfig::default();
+    providers.vllm.base_url = Some("http://127.0.0.1:8000/v1".to_string());
+    providers.vllm.auth_mode = Some("api_key".to_string());
+    let config = Config {
+        provider: Some("vllm".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+
+    assert_eq!(config.deepseek_api_key()?, "saved-local-secret");
+    assert!(has_api_key(&config));
+    assert!(active_provider_has_config_api_key(&config));
+    Ok(())
+}
+
+#[test]
+fn named_custom_provider_never_reuses_generic_custom_secret() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+
+    codewhale_secrets::Secrets::auto_detect().set("custom", "endpoint-a-secret")?;
+
+    let mut providers = ProvidersConfig::default();
+    providers.custom.insert(
+        "endpoint-b".to_string(),
+        ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("https://endpoint-b.example.test/v1".to_string()),
+            model: Some("endpoint-b-model".to_string()),
+            auth_mode: Some("api_key".to_string()),
+            ..ProviderConfig::default()
+        },
+    );
+    let config = Config {
+        provider: Some("endpoint-b".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+
+    assert!(config.should_skip_secret_store_for_provider(ApiProvider::Custom));
+    assert!(provider_secret_store_api_key(&config, ApiProvider::Custom).is_none());
+    assert!(config.deepseek_api_key().is_err());
+    assert!(!has_api_key(&config));
+    assert!(!active_provider_has_config_api_key(&config));
+    Ok(())
+}
+
+#[test]
+fn built_in_provider_custom_endpoint_never_reuses_global_credentials() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _ambient = EnvVarGuard::set("OPENROUTER_API_KEY", "ambient-official-key");
+    codewhale_secrets::Secrets::auto_detect().set("openrouter", "saved-official-key")?;
+
+    let mut providers = ProvidersConfig::default();
+    providers.openrouter.base_url = Some("https://gateway.example.test/v1".to_string());
+    let config = Config {
+        provider: Some("openrouter".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+
+    assert!(config.provider_uses_custom_endpoint(ApiProvider::Openrouter));
+    assert!(config.should_skip_secret_store_for_provider(ApiProvider::Openrouter));
+    assert!(config.deepseek_api_key().is_err());
+    assert!(!has_api_key(&config));
+    assert!(!active_provider_has_config_api_key(&config));
+    assert!(!active_provider_has_env_api_key(&config));
+    Ok(())
+}
+
+#[test]
+fn custom_endpoint_accepts_route_bound_api_key_env_and_reports_ready() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _route_key = EnvVarGuard::set("MY_GATEWAY_ROUTE_KEY", "route-bound-key");
+    let _ambient = EnvVarGuard::set("OPENROUTER_API_KEY", "ambient-official-key");
+
+    let mut providers = ProvidersConfig::default();
+    providers.openrouter.base_url = Some("https://gateway.example.test/v1".to_string());
+    providers.openrouter.api_key_env = Some("MY_GATEWAY_ROUTE_KEY".to_string());
+    let config = Config {
+        provider: Some("openrouter".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+
+    assert_eq!(config.deepseek_api_key()?, "route-bound-key");
+    assert!(has_api_key_for(&config, ApiProvider::Openrouter));
+    assert!(active_provider_has_env_api_key(&config));
+    assert!(active_provider_uses_env_only_api_key(&config));
+    Ok(())
+}
+
+#[test]
+fn env_selected_custom_endpoints_do_not_rebind_file_credentials() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    let _route_key = EnvVarGuard::set("MY_GATEWAY_ROUTE_KEY", "route-bound-file-key");
+    let _source = EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+    let _cli_key = EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+
+    fs::write(
+        &config_path,
+        r#"api_key = "saved-root-deepseek-key"
+default_text_model = "deepseek-chat"
+"#,
+    )?;
+    {
+        let _generic_base = EnvVarGuard::set(
+            "CODEWHALE_BASE_URL",
+            "https://generic-gateway.example.test/v1",
+        );
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert!(config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
+        assert!(config.deepseek_api_key().is_err());
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(!active_provider_has_env_api_key(&config));
+        assert!(!has_api_key_for(&config, ApiProvider::Deepseek));
+    }
+
+    fs::write(
+        &config_path,
+        r#"provider = "openrouter"
+
+[providers.openrouter]
+api_key = "saved-openrouter-route-key"
+api_key_env = "MY_GATEWAY_ROUTE_KEY"
+model = "openai/gpt-5"
+"#,
+    )?;
+    for (env_name, endpoint) in [
+        (
+            "CODEWHALE_BASE_URL",
+            "https://generic-openrouter-gateway.example.test/v1",
+        ),
+        (
+            "OPENROUTER_BASE_URL",
+            "https://provider-openrouter-gateway.example.test/v1",
+        ),
+    ] {
+        let _base = EnvVarGuard::set(env_name, endpoint);
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert_eq!(config.deepseek_base_url(), endpoint);
+        assert!(config.provider_uses_custom_endpoint(ApiProvider::Openrouter));
+        assert!(config.deepseek_api_key().is_err());
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(!active_provider_has_env_api_key(&config));
+        assert!(!has_api_key_for(&config, ApiProvider::Openrouter));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn file_bound_custom_endpoints_keep_route_credentials() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    let _route_key = EnvVarGuard::set("MY_GATEWAY_ROUTE_KEY", "file-env-route-key");
+
+    fs::write(
+        &config_path,
+        r#"api_key = "file-root-key"
+base_url = "https://file-deepseek-gateway.example.test/v1"
+default_text_model = "private-deepseek-model"
+"#,
+    )?;
+    let root = Config::load(Some(config_path.clone()), None)?;
+    assert_eq!(root.deepseek_api_key()?, "file-root-key");
+    assert!(active_provider_has_config_api_key(&root));
+    assert!(has_api_key_for(&root, ApiProvider::Deepseek));
+
+    fs::write(
+        &config_path,
+        r#"provider = "openrouter"
+
+[providers.openrouter]
+api_key = "file-provider-key"
+base_url = "https://file-openrouter-gateway.example.test/v1"
+model = "private-openrouter-model"
+"#,
+    )?;
+    let provider_key = Config::load(Some(config_path.clone()), None)?;
+    assert_eq!(provider_key.deepseek_api_key()?, "file-provider-key");
+    assert!(active_provider_has_config_api_key(&provider_key));
+    assert!(has_api_key_for(&provider_key, ApiProvider::Openrouter));
+
+    fs::write(
+        &config_path,
+        r#"provider = "openrouter"
+
+[providers.openrouter]
+api_key_env = "MY_GATEWAY_ROUTE_KEY"
+base_url = "https://file-openrouter-gateway.example.test/v1"
+model = "private-openrouter-model"
+"#,
+    )?;
+    let route_env = Config::load(Some(config_path), None)?;
+    assert_eq!(route_env.deepseek_api_key()?, "file-env-route-key");
+    assert!(active_provider_has_env_api_key(&route_env));
+    assert!(has_api_key_for(&route_env, ApiProvider::Openrouter));
+    Ok(())
+}
+
+#[test]
+fn source_marked_cli_key_can_follow_cli_forwarded_custom_base_url() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(
+        &config_path,
+        r#"api_key = "saved-root-key"
+base_url = "https://api.deepseek.com/v1"
+default_text_model = "deepseek-chat"
+"#,
+    )?;
+    let _base = EnvVarGuard::set(
+        "DEEPSEEK_BASE_URL",
+        "https://explicit-cli-gateway.example.test/v1",
+    );
+    let _source = EnvVarGuard::set("DEEPSEEK_API_KEY_SOURCE", "cli");
+    let _cli_key = EnvVarGuard::set("CODEWHALE_CLI_API_KEY", "explicit-cli-key");
+
+    let config = Config::load(Some(config_path), None)?;
+    assert_eq!(config.deepseek_api_key()?, "explicit-cli-key");
+    assert!(!active_provider_has_config_api_key(&config));
+    assert!(active_provider_has_env_api_key(&config));
+    assert!(active_provider_uses_env_only_api_key(&config));
+    assert!(has_api_key_for(&config, ApiProvider::Deepseek));
+    Ok(())
+}
+
+#[test]
+fn managed_file_endpoint_replaces_lower_env_provenance() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    let managed_path = temp_root.path().join("managed.toml");
+    fs::write(
+        &managed_path,
+        r#"[providers.openrouter]
+api_key = "managed-route-key"
+base_url = "https://managed-gateway.example.test/v1"
+model = "managed-model"
+"#,
+    )?;
+    fs::write(
+        &config_path,
+        format!(
+            "provider = \"openrouter\"\nmanaged_config_path = {:?}\n",
+            managed_path.display().to_string()
+        ),
+    )?;
+    let _base = EnvVarGuard::set(
+        "CODEWHALE_BASE_URL",
+        "https://lower-env-gateway.example.test/v1",
+    );
+
+    let config = Config::load(Some(config_path), None)?;
+    assert_eq!(
+        config.deepseek_base_url(),
+        "https://managed-gateway.example.test/v1"
+    );
+    assert_eq!(config.deepseek_api_key()?, "managed-route-key");
+    assert!(active_provider_has_config_api_key(&config));
+    assert!(has_api_key_for(&config, ApiProvider::Openrouter));
+    Ok(())
+}
+
+#[test]
+fn env_base_url_provenance_tracks_the_route_across_provider_switches() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(
+        &config_path,
+        r#"provider = "openrouter"
+
+[providers.openrouter]
+api_key = "stale-openrouter-file-key"
+model = "openrouter-model"
+
+[providers.openai]
+api_key = "file-openai-key"
+base_url = "https://file-openai-gateway.example.test/v1"
+model = "private-openai-model"
+
+[providers.anthropic]
+api_key = "stale-anthropic-file-key"
+model = "claude-sonnet-5"
+"#,
+    )?;
+    let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", "https://env-gateway.example.test/v1");
+    let mut config = Config::load(Some(config_path), None)?;
+    assert!(config.deepseek_api_key().is_err());
+
+    config.provider = Some("openai".to_string());
+    assert_eq!(
+        config.deepseek_base_url(),
+        "https://file-openai-gateway.example.test/v1"
+    );
+    assert_eq!(config.deepseek_api_key()?, "file-openai-key");
+
+    config.provider = Some("anthropic".to_string());
+    assert_eq!(
+        config.deepseek_base_url(),
+        "https://env-gateway.example.test/v1"
+    );
+    assert!(config.deepseek_api_key().is_err());
+
+    config.provider = Some("openrouter".to_string());
+    assert!(
+        config.deepseek_api_key().is_err(),
+        "switching away and back must retain the env ownership receipt for that route"
+    );
+    Ok(())
+}
+
+#[test]
+fn named_custom_api_key_env_satisfies_runtime_and_onboarding_readiness() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _route_key = EnvVarGuard::set("NAMED_CUSTOM_ROUTE_KEY", "named-route-key");
+
+    let mut providers = ProvidersConfig::default();
+    providers.custom.insert(
+        "acme".to_string(),
+        ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("https://acme.example.test/v1".to_string()),
+            model: Some("acme-model".to_string()),
+            api_key_env: Some("NAMED_CUSTOM_ROUTE_KEY".to_string()),
+            ..ProviderConfig::default()
+        },
+    );
+    let config = Config {
+        provider: Some("acme".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+
+    assert_eq!(config.deepseek_api_key()?, "named-route-key");
+    assert!(has_api_key_for(&config, ApiProvider::Custom));
+    assert!(has_api_key(&config));
+    Ok(())
+}
+
+#[test]
+fn auth_mode_none_suppresses_config_env_secret_and_oauth_credentials() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _ambient = EnvVarGuard::set("XAI_API_KEY", "ambient-xai-key");
+    let oauth_path = temp_root.path().join("grok-auth.json");
+    fs::write(&oauth_path, r#"{"access_token":"oauth-token"}"#)?;
+    let _oauth_path = EnvVarGuard::set("GROK_AUTH_PATH", oauth_path.as_os_str());
+    codewhale_secrets::Secrets::auto_detect().set("xai", "saved-xai-key")?;
+
+    let mut providers = ProvidersConfig::default();
+    providers.xai.auth_mode = Some("none".to_string());
+    providers.xai.api_key = Some("configured-xai-key".to_string());
+    providers.xai.http_headers = Some(HashMap::from([
+        ("X-API-Key".to_string(), "configured-x-key".to_string()),
+        ("Api-Key".to_string(), "configured-key".to_string()),
+        (
+            "Proxy-Authorization".to_string(),
+            "Basic configured-proxy-secret".to_string(),
+        ),
+        (
+            "X-Auth-Token".to_string(),
+            "configured-auth-token".to_string(),
+        ),
+        (
+            "X-Access-Token".to_string(),
+            "configured-access-token".to_string(),
+        ),
+        (
+            "X-Goog-Api-Key".to_string(),
+            "configured-google-key".to_string(),
+        ),
+        ("Cookie".to_string(), "session=secret".to_string()),
+        ("X-Route-Metadata".to_string(), "safe".to_string()),
+    ]));
+    let config = Config {
+        provider: Some("xai".to_string()),
+        http_headers: Some(HashMap::from([(
+            "aUtHoRiZaTiOn".to_string(),
+            "Bearer configured-secret".to_string(),
+        )])),
+        providers: Some(providers),
+        ..Config::default()
+    };
+
+    assert_eq!(config.deepseek_api_key()?, "");
+    assert!(
+        has_api_key(&config),
+        "no-auth routes are ready without a key"
+    );
+    assert!(!active_provider_has_config_api_key(&config));
+    assert!(!active_provider_has_env_api_key(&config));
+    let headers = config.http_headers();
+    for name in [
+        "authorization",
+        "x-api-key",
+        "api-key",
+        "proxy-authorization",
+        "x-auth-token",
+        "x-access-token",
+        "x-goog-api-key",
+        "cookie",
+    ] {
+        assert!(
+            !headers
+                .keys()
+                .any(|candidate| candidate.eq_ignore_ascii_case(name)),
+            "disabled auth leaked {name}: {headers:?}"
+        );
+    }
+    assert_eq!(
+        headers.get("X-Route-Metadata").map(String::as_str),
+        Some("safe")
+    );
     Ok(())
 }
 
@@ -3511,6 +4130,130 @@ fn normalize_model_name_for_provider_canonicalizes_deepseek_api_variants() {
             .as_deref(),
         Some("deepseek-v4-flash")
     );
+
+    for provider in [
+        ApiProvider::Deepseek,
+        ApiProvider::DeepseekCN,
+        ApiProvider::DeepseekAnthropic,
+    ] {
+        for alias in ["deepseek-chat", "deepseek-reasoner"] {
+            assert_eq!(
+                canonical_model_id_for_provider(provider, alias).as_deref(),
+                Some(DEEPSEEK_ALIAS_REPLACEMENT),
+                "{provider:?} must retire {alias} before the wire boundary"
+            );
+            assert_eq!(
+                normalize_model_name_for_provider(provider, alias).as_deref(),
+                Some(DEEPSEEK_ALIAS_REPLACEMENT),
+                "{provider:?} config normalization must retire {alias}"
+            );
+        }
+    }
+}
+
+#[test]
+fn migrated_deepseek_alias_receipt_is_runtime_only_and_defaults_empty() {
+    assert!(Config::default().migrated_deepseek_model_alias.is_none());
+
+    let config: Config = toml::from_str(
+        r#"
+default_text_model = "deepseek-v4-flash"
+migrated_deepseek_model_alias = "deepseek-chat"
+"#,
+    )
+    .expect("deserialize config");
+    assert!(config.migrated_deepseek_model_alias.is_none());
+}
+
+#[test]
+fn retired_deepseek_aliases_keep_mode_intent_unless_effort_is_explicit() {
+    // Model normalization reads the process-global model override. Without the
+    // shared lock, env-focused config tests can replace these fixture aliases.
+    let _lock = lock_test_env();
+    for (alias, expected_effort) in [("deepseek-chat", "off"), ("deepseek-reasoner", "high")] {
+        for provider in [
+            ApiProvider::Deepseek,
+            ApiProvider::DeepseekCN,
+            ApiProvider::DeepseekAnthropic,
+        ] {
+            let mut config = Config {
+                provider: Some(provider.as_str().to_string()),
+                default_text_model: Some(alias.to_string()),
+                ..Default::default()
+            };
+            normalize_model_config(&mut config);
+
+            assert_eq!(
+                config.default_text_model.as_deref(),
+                Some(DEEPSEEK_ALIAS_REPLACEMENT)
+            );
+            assert_eq!(config.reasoning_effort.as_deref(), Some(expected_effort));
+        }
+    }
+
+    let mut explicit = Config {
+        provider: Some("deepseek".to_string()),
+        default_text_model: Some("deepseek-chat".to_string()),
+        reasoning_effort: Some("max".to_string()),
+        ..Default::default()
+    };
+    normalize_model_config(&mut explicit);
+    assert_eq!(
+        explicit.default_text_model.as_deref(),
+        Some(DEEPSEEK_ALIAS_REPLACEMENT)
+    );
+    assert_eq!(explicit.reasoning_effort.as_deref(), Some("max"));
+
+    let mut provider_scoped = Config {
+        provider: Some("deepseek-anthropic".to_string()),
+        providers: Some(ProvidersConfig {
+            deepseek_anthropic: ProviderConfig {
+                model: Some("deepseek-reasoner".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    normalize_model_config(&mut provider_scoped);
+    assert_eq!(
+        provider_scoped
+            .provider_config_for(ApiProvider::DeepseekAnthropic)
+            .and_then(|entry| entry.model.as_deref()),
+        Some(DEEPSEEK_ALIAS_REPLACEMENT)
+    );
+    assert_eq!(provider_scoped.reasoning_effort.as_deref(), Some("high"));
+
+    let mut custom_endpoint = Config {
+        provider: Some("deepseek".to_string()),
+        base_url: Some("https://gateway.example/v1".to_string()),
+        default_text_model: Some("deepseek-chat".to_string()),
+        ..Default::default()
+    };
+    normalize_model_config(&mut custom_endpoint);
+    assert_eq!(
+        custom_endpoint.default_text_model.as_deref(),
+        Some("deepseek-chat")
+    );
+    assert_eq!(custom_endpoint.reasoning_effort, None);
+}
+
+#[test]
+fn retired_deepseek_aliases_do_not_escape_provider_owned_namespaces() {
+    for provider in [
+        ApiProvider::NvidiaNim,
+        ApiProvider::Openrouter,
+        ApiProvider::WanjieArk,
+        ApiProvider::Custom,
+    ] {
+        for alias in ["deepseek-chat", "deepseek-reasoner"] {
+            assert_eq!(
+                canonical_model_id_for_provider(provider, alias).as_deref(),
+                Some(alias),
+                "{provider:?} owns the meaning of {alias}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3620,6 +4363,18 @@ fn wire_model_for_provider_matches_active_provider_shape() {
         DEFAULT_TOGETHER_FLASH_MODEL
     );
     assert_eq!(
+        wire_model_for_provider(ApiProvider::Together, "thinkingmachines/inkling"),
+        TOGETHER_INKLING_MODEL
+    );
+    assert_eq!(
+        wire_model_for_provider(ApiProvider::Together, "inkling"),
+        TOGETHER_INKLING_MODEL
+    );
+    assert_eq!(
+        wire_model_for_provider(ApiProvider::Together, "together-inkling"),
+        TOGETHER_INKLING_MODEL
+    );
+    assert_eq!(
         wire_model_for_provider(ApiProvider::Openai, DEFAULT_OPENROUTER_MODEL),
         DEFAULT_OPENROUTER_MODEL
     );
@@ -3635,6 +4390,60 @@ fn wire_model_for_provider_matches_active_provider_shape() {
         wire_model_for_provider(ApiProvider::SiliconflowCn, "deepseek-v4-pro"),
         DEFAULT_SILICONFLOW_MODEL
     );
+}
+
+#[test]
+fn wire_model_route_retires_aliases_only_on_official_deepseek_endpoints() {
+    for (provider, base_url) in [
+        (ApiProvider::Deepseek, "https://api.deepseek.com"),
+        (ApiProvider::Deepseek, "https://api.deepseek.com/v1"),
+        (ApiProvider::DeepseekCN, "https://api.deepseek.com/beta"),
+        (
+            ApiProvider::DeepseekAnthropic,
+            "https://api.deepseek.com/anthropic",
+        ),
+        (
+            ApiProvider::DeepseekAnthropic,
+            "https://api.deepseek.com/anthropic/v1/",
+        ),
+    ] {
+        for alias in ["deepseek-chat", "deepseek-reasoner"] {
+            assert_eq!(
+                wire_model_for_provider_route(provider, base_url, alias),
+                DEEPSEEK_ALIAS_REPLACEMENT,
+                "{provider:?} {base_url} must not send {alias}"
+            );
+        }
+    }
+
+    for (provider, base_url, alias) in [
+        (
+            ApiProvider::Deepseek,
+            "https://gateway.example/v1",
+            "deepseek-chat",
+        ),
+        (
+            ApiProvider::DeepseekAnthropic,
+            "https://messages.example/v1",
+            "deepseek-reasoner",
+        ),
+        (
+            ApiProvider::WanjieArk,
+            DEFAULT_WANJIE_ARK_BASE_URL,
+            "deepseek-reasoner",
+        ),
+        (
+            ApiProvider::NvidiaNim,
+            DEFAULT_NVIDIA_NIM_BASE_URL,
+            "deepseek-reasoner",
+        ),
+    ] {
+        assert_eq!(
+            wire_model_for_provider_route(provider, base_url, alias),
+            alias,
+            "{provider:?} owns the meaning of {alias}"
+        );
+    }
 }
 
 #[test]
@@ -3701,6 +4510,8 @@ fn normalize_model_name_for_provider_maps_recent_openrouter_aliases() {
         ("qwen3.6-35b-a3b", OPENROUTER_QWEN_3_6_35B_A3B_MODEL),
         ("qwen3.6-max-preview", OPENROUTER_QWEN_3_6_MAX_PREVIEW_MODEL),
         ("qwen3.6-plus", OPENROUTER_QWEN_3_6_PLUS_MODEL),
+        ("qwen3.7-plus", OPENROUTER_QWEN_3_7_PLUS_MODEL),
+        ("qwen-3.7-plus", OPENROUTER_QWEN_3_7_PLUS_MODEL),
         ("mimo-v2.5-pro", OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL),
         ("kimi-k2.7-code", OPENROUTER_KIMI_K2_7_CODE_MODEL),
         ("kimi", OPENROUTER_KIMI_K2_7_CODE_MODEL),
@@ -4157,6 +4968,55 @@ fn deepseek_model_env_overrides_default_text_model() -> Result<()> {
         config.default_text_model.as_deref(),
         Some("deepseek-v4-flash-20260423")
     );
+    Ok(())
+}
+
+#[test]
+fn retired_deepseek_aliases_from_env_are_migrated_before_runtime() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _managed_config = crate::test_support::EnvVarGuard::set(
+        "DEEPSEEK_MANAGED_CONFIG_PATH",
+        temp_root.path().join("missing-managed.toml"),
+    );
+
+    for (provider, alias, expected_effort) in [
+        ("deepseek", "deepseek-chat", "off"),
+        ("deepseek-cn", "deepseek-reasoner", "high"),
+        ("deepseek-anthropic", "deepseek-chat", "off"),
+    ] {
+        let _guard = EnvGuard::new(temp_root.path());
+        // Safety: test-only environment mutation guarded by a global mutex.
+        unsafe {
+            env::set_var("CODEWHALE_PROVIDER", provider);
+            env::set_var("CODEWHALE_MODEL", alias);
+        }
+
+        // Pass the isolated path explicitly: the process-wide default config
+        // path is cached by earlier tests and can otherwise point back at the
+        // developer's real provider-scoped model.
+        let config = Config::load(
+            Some(temp_root.path().join("isolated-alias-config.toml")),
+            None,
+        )?;
+        assert_eq!(
+            config.default_model(),
+            DEEPSEEK_ALIAS_REPLACEMENT,
+            "provider={provider} resolved={:?} root_model={:?} scoped_model={:?}",
+            config.api_provider(),
+            config.default_text_model,
+            config
+                .provider_config_for(config.api_provider())
+                .and_then(|entry| entry.model.as_deref())
+        );
+        assert_eq!(config.reasoning_effort(), Some(expected_effort));
+        let deprecation = config
+            .active_deepseek_alias_deprecation()
+            .expect("loaded config should retain the alias migration receipt");
+        assert_eq!(deprecation.alias, alias);
+        assert_eq!(deprecation.replacement, DEEPSEEK_ALIAS_REPLACEMENT);
+    }
+
     Ok(())
 }
 
@@ -4640,7 +5500,7 @@ mode = "token-plan-usa"
 }
 
 #[test]
-fn xiaomi_mimo_env_overrides_provider_base_url_model_and_key() -> Result<()> {
+fn xiaomi_mimo_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4664,7 +5524,11 @@ fn xiaomi_mimo_env_overrides_provider_base_url_model_and_key() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
-    assert_eq!(config.deepseek_api_key()?, "mimo-env-key");
+    let error = config
+        .deepseek_api_key()
+        .expect_err("ambient key must not follow a custom endpoint");
+    assert!(error.to_string().contains("must be bound explicitly"));
+    assert!(!has_api_key(&config));
     assert_eq!(
         config.deepseek_base_url(),
         "https://mimo-gateway.example/v1"
@@ -4800,7 +5664,7 @@ fn wanjie_ark_provider_uses_documented_defaults() -> Result<()> {
 }
 
 #[test]
-fn wanjie_ark_env_overrides_provider_base_url_model_and_key() -> Result<()> {
+fn wanjie_ark_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4823,7 +5687,11 @@ fn wanjie_ark_env_overrides_provider_base_url_model_and_key() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::WanjieArk);
-    assert_eq!(config.deepseek_api_key()?, "wanjie-env-key");
+    let error = config
+        .deepseek_api_key()
+        .expect_err("ambient key must not follow a custom endpoint");
+    assert!(error.to_string().contains("must be bound explicitly"));
+    assert!(!has_api_key(&config));
     assert_eq!(config.deepseek_base_url(), "https://wanjie.example/api/v1");
     assert_eq!(config.default_model(), "wanjie-model-id");
     Ok(())
@@ -5084,7 +5952,7 @@ fn deepseek_model_env_passes_custom_model_through_for_non_deepseek_providers() -
 }
 
 #[test]
-fn openai_env_overrides_provider_base_url_and_model() -> Result<()> {
+fn openai_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5108,7 +5976,11 @@ fn openai_env_overrides_provider_base_url_and_model() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openai);
-    assert_eq!(config.deepseek_api_key()?, "openai-env-key");
+    let error = config
+        .deepseek_api_key()
+        .expect_err("ambient key must not follow a custom endpoint");
+    assert!(error.to_string().contains("must be bound explicitly"));
+    assert!(!has_api_key(&config));
     assert_eq!(
         config.deepseek_base_url(),
         "https://openai-compatible.example/v4"
@@ -5118,7 +5990,7 @@ fn openai_env_overrides_provider_base_url_and_model() -> Result<()> {
 }
 
 #[test]
-fn openai_env_accepts_facade_base_url_forwarding() -> Result<()> {
+fn openai_facade_custom_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5142,7 +6014,11 @@ fn openai_env_accepts_facade_base_url_forwarding() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openai);
-    assert_eq!(config.deepseek_api_key()?, "forwarded-openai-key");
+    let error = config
+        .deepseek_api_key()
+        .expect_err("ambient key must not follow a custom endpoint");
+    assert!(error.to_string().contains("must be bound explicitly"));
+    assert!(!has_api_key(&config));
     assert_eq!(
         config.deepseek_base_url(),
         "https://forwarded-openai.example/v4"
@@ -5270,7 +6146,7 @@ fn volcengine_provider_requires_api_key() -> Result<()> {
 }
 
 #[test]
-fn volcengine_env_overrides_base_url_model_and_key() -> Result<()> {
+fn volcengine_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5294,7 +6170,11 @@ fn volcengine_env_overrides_base_url_model_and_key() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Volcengine);
-    assert_eq!(config.deepseek_api_key()?, "volc-env-key");
+    let error = config
+        .deepseek_api_key()
+        .expect_err("ambient key must not follow a custom endpoint");
+    assert!(error.to_string().contains("must be bound explicitly"));
+    assert!(!has_api_key(&config));
     assert_eq!(config.deepseek_base_url(), "https://volc.example/v1");
     assert_eq!(config.default_model(), "DeepSeek-V4-Flash");
     Ok(())
@@ -5607,7 +6487,7 @@ fn fireworks_env_overrides_key_and_model() -> Result<()> {
 }
 
 #[test]
-fn siliconflow_env_overrides_key_base_url_and_model() -> Result<()> {
+fn siliconflow_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5631,7 +6511,11 @@ fn siliconflow_env_overrides_key_base_url_and_model() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Siliconflow);
-    assert_eq!(config.deepseek_api_key()?, "sf-env-key");
+    let error = config
+        .deepseek_api_key()
+        .expect_err("ambient key must not follow a custom endpoint");
+    assert!(error.to_string().contains("must be bound explicitly"));
+    assert!(!has_api_key(&config));
     assert_eq!(config.deepseek_base_url(), "https://sf-mirror.example/v1");
     assert_eq!(config.default_model(), "deepseek-v4-flash");
     Ok(())
@@ -5666,7 +6550,7 @@ fn arcee_provider_uses_direct_defaults() -> Result<()> {
 }
 
 #[test]
-fn arcee_env_overrides_key_base_url_and_model() -> Result<()> {
+fn arcee_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5689,7 +6573,11 @@ fn arcee_env_overrides_key_base_url_and_model() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Arcee);
-    assert_eq!(config.deepseek_api_key()?, "arcee-env-key");
+    let error = config
+        .deepseek_api_key()
+        .expect_err("ambient key must not follow a custom endpoint");
+    assert!(error.to_string().contains("must be bound explicitly"));
+    assert!(!has_api_key(&config));
     assert_eq!(
         config.deepseek_base_url(),
         "https://arcee-mirror.example/api/v1"
@@ -6551,7 +7439,10 @@ fn has_api_key_for_uses_deepseek_cn_provider_table() -> Result<()> {
 }
 
 #[test]
-fn has_api_key_for_accepts_provider_auth_source_metadata() {
+fn provider_auth_source_metadata_is_not_a_runtime_credential() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
     let mut providers = ProvidersConfig::default();
     providers.openai.auth = Some(codewhale_config::ProviderAuthSourceToml {
         source: codewhale_config::AuthSourceKind::Command,
@@ -6560,11 +7451,14 @@ fn has_api_key_for_accepts_provider_auth_source_metadata() {
         secret_id: None,
     });
     let config = Config {
+        provider: Some("openai".to_string()),
         providers: Some(providers),
         ..Config::default()
     };
 
-    assert!(has_api_key_for(&config, ApiProvider::Openai));
+    assert!(!has_api_key_for(&config, ApiProvider::Openai));
+    assert!(config.deepseek_api_key().is_err());
+    Ok(())
 }
 
 #[test]
@@ -6599,6 +7493,7 @@ fn has_api_key_for_accepts_xai_oauth_without_masking_api_keys() -> Result<()> {
 
 #[test]
 fn has_api_key_for_uses_root_config_key_for_deepseek_variants() {
+    let _lock = lock_test_env();
     let config = Config {
         api_key: Some("root-config-key".to_string()),
         ..Config::default()
@@ -7104,28 +7999,40 @@ fn provider_capability_arcee_direct_models_use_api_docs_shape() {
         RequestPayloadMode::ChatCompletions
     );
 
-    for model in [ARCEE_TRINITY_LARGE_PREVIEW_MODEL, ARCEE_TRINITY_MINI_MODEL] {
-        let cap = provider_capability(ApiProvider::Arcee, model);
+    let preview = provider_capability(ApiProvider::Arcee, ARCEE_TRINITY_LARGE_PREVIEW_MODEL);
+    assert_eq!(preview.context_window, 262_144);
+    assert_eq!(preview.max_output, 4096);
+    assert!(!preview.thinking_supported);
 
-        let expected_window = if model == ARCEE_TRINITY_LARGE_PREVIEW_MODEL {
-            262_144
-        } else {
-            128_000
-        };
-        let expected_output = if model == ARCEE_TRINITY_LARGE_PREVIEW_MODEL {
-            4096
-        } else {
-            64_000
-        };
-        assert_eq!(cap.context_window, expected_window);
-        assert_eq!(cap.max_output, expected_output);
-        assert!(!cap.thinking_supported);
-        assert!(!cap.cache_telemetry_supported);
-        assert_eq!(
-            cap.request_payload_mode,
-            RequestPayloadMode::ChatCompletions
-        );
-    }
+    let mini = provider_capability(ApiProvider::Arcee, ARCEE_TRINITY_MINI_MODEL);
+    assert_eq!(mini.context_window, 128_000);
+    // ProviderCapability carries a mandatory request fallback; model metadata
+    // itself deliberately keeps Trinity Mini's upstream output limit unknown.
+    assert_eq!(mini.max_output, 4096);
+    assert_eq!(
+        crate::models::max_output_tokens_for_model(ARCEE_TRINITY_MINI_MODEL),
+        None
+    );
+    assert!(mini.thinking_supported);
+    assert!(!mini.cache_telemetry_supported);
+    assert_eq!(
+        mini.request_payload_mode,
+        RequestPayloadMode::ChatCompletions
+    );
+}
+
+#[test]
+fn provider_capability_marks_exact_inkling_route_as_reasoning() {
+    let cap = provider_capability(ApiProvider::Together, TOGETHER_INKLING_MODEL);
+    assert!(cap.thinking_supported);
+    assert_eq!(
+        crate::models::context_window_for_model(TOGETHER_INKLING_MODEL),
+        None
+    );
+    assert_eq!(
+        crate::models::max_output_tokens_for_model(TOGETHER_INKLING_MODEL),
+        None
+    );
 }
 
 #[test]
@@ -7238,7 +8145,7 @@ fn provider_capability_atlascloud_v4_model_resolves_model_metadata() {
 fn provider_capability_moonshot_default_model_resolves_kimi_metadata() {
     let cap = provider_capability(ApiProvider::Moonshot, DEFAULT_MOONSHOT_MODEL);
     assert_eq!(cap.context_window, 262_144);
-    assert_eq!(cap.max_output, 262_144);
+    assert_eq!(cap.max_output, 32_768);
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -7529,7 +8436,7 @@ fn huggingface_missing_key_error_mentions_env_fallbacks() -> Result<()> {
 }
 
 #[test]
-fn huggingface_env_overrides_key_base_url_and_model() -> Result<()> {
+fn huggingface_custom_env_urls_do_not_inherit_ambient_keys() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7558,7 +8465,11 @@ fn huggingface_env_overrides_key_base_url_and_model() -> Result<()> {
 
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::Huggingface);
-        assert_eq!(config.deepseek_api_key()?, "hf-env-key");
+        let error = config
+            .deepseek_api_key()
+            .expect_err("ambient key must not follow a custom endpoint");
+        assert!(error.to_string().contains("must be bound explicitly"));
+        assert!(!has_api_key(&config));
         assert_eq!(config.deepseek_base_url(), "https://custom-hf.example/v1");
         assert_eq!(config.default_model(), "meta-llama/Llama-3-70B");
     }
@@ -7577,7 +8488,11 @@ fn huggingface_env_overrides_key_base_url_and_model() -> Result<()> {
 
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::Huggingface);
-        assert_eq!(config.deepseek_api_key()?, "hf-env-key");
+        let error = config
+            .deepseek_api_key()
+            .expect_err("ambient key must not follow a custom endpoint");
+        assert!(error.to_string().contains("must be bound explicitly"));
+        assert!(!has_api_key(&config));
         assert_eq!(config.deepseek_base_url(), "https://custom-hf.example/v1");
         assert_eq!(config.default_model(), "meta-llama/Llama-3-70B");
     }
@@ -7604,7 +8519,7 @@ fn notifications_parse_custom_completion_sound_file() {
 }
 
 #[test]
-fn huggingface_short_env_fallbacks_configure_route() -> Result<()> {
+fn huggingface_short_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7627,7 +8542,11 @@ fn huggingface_short_env_fallbacks_configure_route() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Huggingface);
-    assert_eq!(config.deepseek_api_key()?, "hf-token-value");
+    let error = config
+        .deepseek_api_key()
+        .expect_err("ambient key must not follow a custom endpoint");
+    assert!(error.to_string().contains("must be bound explicitly"));
+    assert!(!has_api_key(&config));
     assert_eq!(config.deepseek_base_url(), "https://short-hf.example/v1");
     assert_eq!(config.default_model(), "org/short-model");
     Ok(())
@@ -7763,6 +8682,461 @@ fn custom_provider_base_url_and_model_resolve_from_named_table() {
     assert_eq!(config.api_provider(), ApiProvider::Custom);
     assert_eq!(config.deepseek_base_url(), "https://api.example.com/v1");
     assert_eq!(config.default_model(), "custom-model-v1");
+}
+
+fn session_custom_provider_config(name: &str, kind: &str, base_url: &str) -> Config {
+    let mut custom = HashMap::new();
+    custom.insert(
+        name.to_string(),
+        ProviderConfig {
+            kind: Some(kind.to_string()),
+            base_url: Some(base_url.to_string()),
+            model: Some("local-model".to_string()),
+            ..Default::default()
+        },
+    );
+    Config {
+        provider: Some(name.to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Config::default()
+    }
+}
+
+#[test]
+fn session_provider_identity_preserves_exact_named_custom_key() {
+    let config = session_custom_provider_config(
+        "lm-studio",
+        "openai-compatible",
+        "http://127.0.0.1:1234/v1",
+    );
+
+    assert_eq!(
+        config.provider_identity_for(ApiProvider::Custom),
+        "lm-studio"
+    );
+    assert_eq!(
+        config
+            .resolve_provider_identity("lm-studio")
+            .expect("exact custom identity"),
+        ProviderIdentity {
+            provider: ApiProvider::Custom,
+            key: "lm-studio".to_string(),
+            exact_id: Some("lm-studio".to_string()),
+        }
+    );
+    assert_eq!(
+        config
+            .resolve_provider_identity("openrouter")
+            .expect("built-in identity"),
+        ProviderIdentity {
+            provider: ApiProvider::Openrouter,
+            key: "openrouter".to_string(),
+            exact_id: Some("openrouter".to_string()),
+        }
+    );
+    let migrated = config
+        .resolve_provider_identity("custom")
+        .expect("released generic custom record migrates to sole live named route");
+    assert_eq!(
+        migrated,
+        ProviderIdentity {
+            provider: ApiProvider::Custom,
+            key: "lm-studio".to_string(),
+            exact_id: Some("lm-studio".to_string()),
+        }
+    );
+}
+
+#[test]
+fn literal_custom_table_round_trips_as_exact_historical_route() {
+    let config =
+        session_custom_provider_config("custom", "openai-compatible", "http://127.0.0.1:1234/v1");
+
+    assert_eq!(config.api_provider(), ApiProvider::Custom);
+    assert!(!config.uses_legacy_literal_custom_route());
+    let identity = config
+        .resolve_provider_identity("custom")
+        .expect("exact [providers.custom] identity");
+    assert_eq!(identity.key, "custom");
+    let route = crate::route_runtime::resolve_runtime_route(
+        &config,
+        identity.provider,
+        Some("local-model"),
+    )
+    .expect("resolve exact literal table")
+    .validate()
+    .expect("preflight exact literal table");
+    assert_eq!(route.identity.key, "custom");
+    assert_eq!(route.client.base_url(), "http://127.0.0.1:1234/v1");
+    assert_eq!(
+        route
+            .config
+            .resolve_provider_identity(&route.identity.key)
+            .expect("repeat exact literal table resolution"),
+        identity
+    );
+}
+
+#[test]
+fn persisted_custom_fields_distinguish_legacy_root_from_exact_literal_table() {
+    let table_only =
+        session_custom_provider_config("custom", "openai-compatible", "http://127.0.0.1:1234/v1");
+    let table_only_error = table_only
+        .resolve_persisted_provider_identity(Some("custom"), None)
+        .expect_err("id-less custom records authorize only the legacy root route");
+    assert!(
+        table_only_error.contains("root-level"),
+        "{table_only_error}"
+    );
+    assert!(table_only_error.contains("fall back"), "{table_only_error}");
+
+    let mut coexist = table_only.clone();
+    coexist.base_url = Some("http://127.0.0.1:18180/v1".to_string());
+    coexist.default_text_model = Some("legacy-root-model".to_string());
+    let root = coexist
+        .resolve_persisted_provider_identity(Some("custom"), None)
+        .expect("id-less record remains bound to the root route");
+    assert_eq!(root.provider, ApiProvider::Custom);
+    assert_eq!(root.key, "custom");
+    assert_eq!(root.exact_id, None);
+    let root_route = crate::route_runtime::resolve_runtime_route_for_identity(
+        &coexist,
+        &root,
+        Some("legacy-root-model"),
+    )
+    .expect("scope root identity")
+    .validate()
+    .expect("validate root identity");
+    assert_eq!(root_route.client.base_url(), "http://127.0.0.1:18180/v1");
+    assert_eq!(root_route.identity.exact_id, None);
+
+    let exact_table = coexist
+        .resolve_persisted_provider_identity(Some("custom"), Some("custom"))
+        .expect("additive exact id intentionally selects the table");
+    assert_eq!(exact_table.provider, ApiProvider::Custom);
+    assert_eq!(exact_table.key, "custom");
+    assert_eq!(exact_table.exact_id.as_deref(), Some("custom"));
+
+    let root_only = Config {
+        provider: Some("custom".to_string()),
+        base_url: Some("http://127.0.0.1:18180/v1".to_string()),
+        default_text_model: Some("legacy-root-model".to_string()),
+        ..Config::default()
+    };
+    let exact_error = root_only
+        .resolve_persisted_provider_identity(Some("custom"), Some("custom"))
+        .expect_err("exact table record cannot fall back to a legacy root route");
+    assert!(exact_error.contains("[providers.custom]"), "{exact_error}");
+    assert!(exact_error.contains("will not fall back"), "{exact_error}");
+    let exact_route_error = crate::route_runtime::resolve_runtime_route_for_identity(
+        &root_only,
+        &exact_table,
+        Some("table-model"),
+    )
+    .expect_err("runtime route must revalidate exact table provenance");
+    assert!(
+        exact_route_error.contains("[providers.custom]"),
+        "{exact_route_error}"
+    );
+}
+
+#[test]
+fn persisted_empty_custom_id_never_falls_back_to_legacy_root() {
+    let mut config =
+        session_custom_provider_config("custom", "openai-compatible", "http://127.0.0.1:18181/v1");
+    config.base_url = Some("http://127.0.0.1:18180/v1".to_string());
+    config.default_text_model = Some("legacy-root-model".to_string());
+
+    for malformed_id in ["", "   "] {
+        let error = config
+            .resolve_persisted_provider_identity(Some("custom"), Some(malformed_id))
+            .expect_err("an explicit empty exact id must never authorize the root route");
+        assert!(error.contains("empty exact provider id"), "{error}");
+        assert!(error.contains("will not guess or fall back"), "{error}");
+    }
+
+    let root = config
+        .resolve_persisted_provider_identity(Some("custom"), None)
+        .expect("a genuinely missing id retains legacy root compatibility");
+    assert_eq!(root.exact_id, None);
+    let exact = config
+        .resolve_persisted_provider_identity(Some("custom"), Some("custom"))
+        .expect("a non-empty exact id selects the literal table");
+    assert_eq!(exact.exact_id.as_deref(), Some("custom"));
+}
+
+#[test]
+fn persisted_provider_pair_never_collapses_builtin_into_same_key_custom_route() {
+    let config =
+        session_custom_provider_config("openai", "openai-compatible", "http://127.0.0.1:1234/v1");
+    assert_eq!(
+        config
+            .resolve_provider_identity("openai")
+            .expect("raw exact identity intentionally prefers custom"),
+        ProviderIdentity {
+            provider: ApiProvider::Custom,
+            key: "openai".to_string(),
+            exact_id: Some("openai".to_string()),
+        }
+    );
+
+    for provider_id in [None, Some("openai")] {
+        let error = config
+            .resolve_persisted_provider_identity(Some("openai"), provider_id)
+            .expect_err("built-in record must not be captured by the custom table");
+        assert!(error.contains("requires built-in 'openai'"), "{error}");
+        assert!(error.contains("shadows"), "{error}");
+        assert!(error.contains("will not guess or fall back"), "{error}");
+    }
+
+    let exact_custom = config
+        .resolve_persisted_provider_identity(Some("custom"), Some("openai"))
+        .expect("custom kind plus exact id intentionally selects the table");
+    assert_eq!(exact_custom.provider, ApiProvider::Custom);
+    assert_eq!(exact_custom.key, "openai");
+
+    let mismatch = config
+        .resolve_persisted_provider_identity(Some("openrouter"), Some("openai"))
+        .expect_err("mismatched built-in kind/id pair must fail closed");
+    assert!(mismatch.contains("mismatched fields"), "{mismatch}");
+}
+
+#[test]
+fn case_colliding_custom_table_preserves_exact_spelling_across_receipts() {
+    let config =
+        session_custom_provider_config("CUSTOM", "openai-compatible", "http://127.0.0.1:5678/v1");
+
+    assert_eq!(config.api_provider(), ApiProvider::Custom);
+    assert_eq!(config.provider_identity_for(ApiProvider::Custom), "CUSTOM");
+    let identity = config
+        .resolve_provider_identity("CUSTOM")
+        .expect("exact case-colliding custom identity");
+    assert_eq!(identity.key, "CUSTOM");
+    let route = crate::route_runtime::resolve_runtime_route(
+        &config,
+        identity.provider,
+        Some("local-model"),
+    )
+    .expect("resolve case-colliding custom table")
+    .validate()
+    .expect("preflight case-colliding custom table");
+    assert_eq!(route.identity.key, "CUSTOM");
+    assert_eq!(route.client.base_url(), "http://127.0.0.1:5678/v1");
+}
+
+#[test]
+fn legacy_literal_custom_identity_requires_one_valid_root_route() {
+    let _lock = lock_test_env();
+    let _source = EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+    let _cli_key = EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let legacy = Config {
+        provider: Some("custom".to_string()),
+        api_key: Some("legacy-root-key".to_string()),
+        base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+        default_text_model: Some("local-legacy-model".to_string()),
+        ..Config::default()
+    };
+
+    assert_eq!(
+        legacy
+            .resolve_provider_identity("custom")
+            .expect("unchanged legacy root route"),
+        ProviderIdentity {
+            provider: ApiProvider::Custom,
+            key: "custom".to_string(),
+            exact_id: None,
+        }
+    );
+    assert_eq!(legacy.deepseek_base_url(), "http://127.0.0.1:1234/v1");
+    assert_eq!(legacy.default_model(), "local-legacy-model");
+    assert_eq!(legacy.deepseek_api_key().unwrap(), "legacy-root-key");
+
+    let mut named = session_custom_provider_config(
+        "lm-studio",
+        "openai-compatible",
+        "https://api.example.com/v1",
+    );
+    named.api_key = Some("must-not-leak-to-named-route".to_string());
+    let named_key_error = named
+        .deepseek_api_key()
+        .expect_err("root legacy key must never authorize a named custom route")
+        .to_string();
+    assert!(named_key_error.contains("lm-studio"), "{named_key_error}");
+    assert!(!named_key_error.contains("must-not-leak"));
+
+    let mut ambiguous_named = named.clone();
+    ambiguous_named
+        .providers
+        .as_mut()
+        .expect("providers")
+        .custom
+        .insert(
+            "vllm-local".to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("http://127.0.0.1:8000/v1".to_string()),
+                model: Some("other-local-model".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+    let ambiguous_named_error = ambiguous_named
+        .resolve_provider_identity("custom")
+        .expect_err("generic released record cannot choose between named routes");
+    assert!(
+        ambiguous_named_error.contains("valid named routes: 2"),
+        "{ambiguous_named_error}"
+    );
+    assert!(ambiguous_named_error.contains("will not guess or fall back"));
+
+    let mut missing_model = legacy.clone();
+    missing_model.default_text_model = None;
+    let model_error = missing_model
+        .resolve_provider_identity("custom")
+        .expect_err("legacy root route needs an explicit model");
+    assert!(model_error.contains("default_text_model"), "{model_error}");
+
+    let mut auto_model = legacy.clone();
+    auto_model.default_text_model = Some("auto".to_string());
+    let auto_error = auto_model
+        .resolve_provider_identity("custom")
+        .expect_err("legacy root route cannot guess an auto model");
+    assert!(auto_error.contains("not `auto`"), "{auto_error}");
+
+    let mut invalid_url = legacy.clone();
+    invalid_url.base_url = Some("not a provider URL".to_string());
+    let url_error = invalid_url
+        .resolve_provider_identity("custom")
+        .expect_err("legacy root route needs a valid endpoint");
+    assert!(url_error.contains("base_url"), "{url_error}");
+    assert!(url_error.contains("will not fall back"), "{url_error}");
+
+    let mut ambiguous = legacy.clone();
+    ambiguous.providers = Some(ProvidersConfig {
+        custom: HashMap::from([(
+            "CUSTOM".to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("http://127.0.0.1:5678/v1".to_string()),
+                model: Some("table-model".to_string()),
+                ..ProviderConfig::default()
+            },
+        )]),
+        ..ProvidersConfig::default()
+    });
+    let ambiguous_error = ambiguous
+        .resolve_provider_identity("custom")
+        .expect_err("root and table routes cannot share the generic identity");
+    assert!(
+        ambiguous_error.contains("[providers.custom]") && ambiguous_error.contains("ambiguous"),
+        "{ambiguous_error}"
+    );
+
+    let removed_named = legacy
+        .resolve_provider_identity("lm-studio")
+        .expect_err("a removed named route must not fall back to legacy custom");
+    assert!(removed_named.contains("[providers.lm-studio]"));
+    assert!(removed_named.contains("will not fall back"));
+}
+
+#[test]
+fn legacy_literal_custom_env_overrides_preserve_root_route_shape() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-legacy-custom-env-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    let _source = EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+    let _cli_key = EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    ensure_parent_dir(&config_path)?;
+    fs::write(
+        &config_path,
+        r#"provider = "custom"
+api_key = "legacy-root-key"
+base_url = "http://127.0.0.1:18184/v1"
+default_text_model = "legacy-model"
+"#,
+    )?;
+    // Safety: test-only env mutation guarded by lock_test_env().
+    unsafe {
+        env::set_var("CODEWHALE_BASE_URL", "http://127.0.0.1:18185/v1");
+        env::set_var("CODEWHALE_MODEL", "env-legacy-model");
+        env::set_var("DEEPSEEK_HTTP_HEADERS", "X-Legacy-Route=kept");
+    }
+
+    let config = Config::load(None, None)?;
+
+    assert!(config.uses_legacy_literal_custom_route());
+    assert!(
+        config
+            .providers
+            .as_ref()
+            .is_none_or(|providers| !providers.custom.contains_key("custom"))
+    );
+    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18185/v1");
+    assert_eq!(config.default_model(), "env-legacy-model");
+    assert_eq!(
+        config.deepseek_api_key()?,
+        "",
+        "an env-selected keyless loopback route must not inherit the file-owned root key"
+    );
+    assert!(!active_provider_has_config_api_key(&config));
+    assert_eq!(
+        config
+            .http_headers()
+            .get("X-Legacy-Route")
+            .map(String::as_str),
+        Some("kept")
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            config
+                .resolve_provider_identity("custom")
+                .expect("legacy route remains repeatedly resolvable")
+                .key,
+            "custom"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn session_provider_identity_fails_closed_for_removed_or_invalid_custom_table() {
+    let removed = Config::default();
+    let missing = removed
+        .resolve_provider_identity("lm-studio")
+        .expect_err("removed provider must fail closed");
+    assert!(missing.contains("[providers.lm-studio]"));
+    assert!(missing.contains("will not fall back"));
+
+    let invalid_kind = session_custom_provider_config(
+        "lm-studio",
+        "anthropic-messages",
+        "http://127.0.0.1:1234/v1",
+    );
+    let kind_error = invalid_kind
+        .resolve_provider_identity("lm-studio")
+        .expect_err("unsupported custom wire kind must fail closed");
+    assert!(kind_error.contains("kind = \"openai-compatible\""));
+
+    let invalid_url =
+        session_custom_provider_config("lm-studio", "openai-compatible", "not a provider URL");
+    let url_error = invalid_url
+        .resolve_provider_identity("lm-studio")
+        .expect_err("invalid custom URL must fail closed");
+    assert!(url_error.contains("base_url"));
+    assert!(url_error.contains("will not fall back"));
 }
 
 #[test]

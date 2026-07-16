@@ -26,8 +26,8 @@ use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::text::Span;
-use std::collections::{HashSet, VecDeque};
+use ratatui::{Terminal, backend::TestBackend, text::Span};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
@@ -60,6 +60,214 @@ fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
         UI_UNDERWATER_ANIMATION_MS,
         "the slower status spinner must not throttle ambient fish"
     );
+}
+
+#[test]
+fn underwater_motion_ticks_only_for_visible_unobscured_owners() {
+    assert!(!underwater_motion_surface_visible(None, true, true, false));
+    assert!(!underwater_motion_surface_visible(
+        Some(Rect::new(0, 0, 0, 24)),
+        true,
+        true,
+        false,
+    ));
+    assert!(underwater_motion_surface_visible(
+        Some(Rect::new(0, 0, 40, 12)),
+        true,
+        false,
+        false,
+    ));
+    assert!(underwater_motion_surface_visible(
+        Some(Rect::new(0, 0, 60, 16)),
+        false,
+        true,
+        false,
+    ));
+    assert!(!underwater_motion_surface_visible(
+        Some(Rect::new(0, 0, 60, 16)),
+        false,
+        false,
+        false,
+    ));
+    assert!(underwater_motion_surface_visible(
+        Some(Rect::new(0, 0, 80, 24)),
+        false,
+        false,
+        false,
+    ));
+    assert!(!underwater_motion_surface_visible(
+        Some(Rect::new(0, 0, 100, 32)),
+        true,
+        true,
+        true,
+    ));
+}
+
+#[test]
+fn live_transcript_command_open_path_is_idempotent() {
+    let mut app = create_test_app();
+
+    open_live_transcript_overlay(&mut app);
+    open_live_transcript_overlay(&mut app);
+
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::LiveTranscript));
+    app.view_stack.pop();
+    assert_eq!(
+        app.view_stack.top_kind(),
+        None,
+        "opening twice must not stack duplicate transcript overlays"
+    );
+}
+
+#[test]
+fn approval_prompt_keeps_transcript_page_navigation_live() {
+    let mut app = create_test_app();
+    app.viewport.last_transcript_visible = 12;
+    app.view_stack.push(ApprovalView::new(ApprovalRequest::new(
+        "approval-scroll",
+        "exec_shell",
+        "Review command",
+        &serde_json::json!({"command": "git status"}),
+        "approval-scroll-key",
+    )));
+
+    assert!(handle_approval_transcript_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+    ));
+    assert_eq!(app.viewport.pending_scroll_delta, -12);
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
+
+    assert!(handle_approval_transcript_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+    ));
+    assert_eq!(app.viewport.pending_scroll_delta, 0);
+
+    assert!(handle_approval_transcript_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
+    ));
+    assert_eq!(app.viewport.pending_scroll_delta, -3);
+
+    assert!(handle_approval_transcript_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+    ));
+    assert!(app.viewport.pending_scroll_delta < -1_000_000);
+    assert!(app.user_scrolled_during_stream);
+
+    assert!(handle_approval_transcript_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+    ));
+    assert_eq!(app.viewport.pending_scroll_delta, 0);
+    assert!(!app.user_scrolled_during_stream);
+
+    assert!(handle_approval_transcript_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+    ));
+    assert_eq!(app.viewport.pending_scroll_delta, 3);
+    assert!(app.user_scrolled_during_stream);
+
+    assert!(
+        !handle_approval_transcript_key(
+            &mut app,
+            &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        ),
+        "ordinary approval selection keys must stay with the decision card"
+    );
+}
+
+#[test]
+fn transcript_navigation_does_not_capture_keys_for_other_modals() {
+    let mut app = create_test_app();
+    app.view_stack.push(HelpView::new_for_locale(app.ui_locale));
+
+    assert!(!handle_approval_transcript_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+    ));
+    assert_eq!(app.viewport.pending_scroll_delta, 0);
+}
+
+#[test]
+fn approval_mouse_wheel_reviews_transcript_without_closing_card() {
+    let mut app = create_test_app();
+    app.view_stack.push(ApprovalView::new(ApprovalRequest::new(
+        "approval-scroll",
+        "exec_shell",
+        "Review command",
+        &serde_json::json!({"command": "git status"}),
+        "approval-scroll-key",
+    )));
+
+    let events = handle_mouse_event(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 4,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    assert!(events.is_empty());
+    assert!(app.viewport.pending_scroll_delta < 0);
+    assert!(app.user_scrolled_during_stream);
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
+}
+
+#[test]
+fn approval_wheel_preserves_sidebar_and_work_surface_ownership() {
+    let mut app = create_test_app();
+    app.view_stack.push(ApprovalView::new(ApprovalRequest::new(
+        "approval-scroll",
+        "exec_shell",
+        "Review command",
+        &serde_json::json!({"command": "git status"}),
+        "approval-scroll-key",
+    )));
+    app.viewport.last_sidebar_area = Some(Rect::new(60, 0, 20, 20));
+    app.work_surface.last_area = Some(Rect::new(0, 0, 30, 20));
+    app.viewport.last_approval_area = Some(Rect::new(0, 12, 80, 8));
+
+    for (column, row) in [(65, 4), (10, 4)] {
+        let events = handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(events.is_empty());
+        assert_eq!(
+            app.viewport.pending_scroll_delta, 0,
+            "approval wheel leaked from side surface at ({column}, {row})"
+        );
+    }
+
+    for (column, row) in [(65, 15), (10, 15)] {
+        let before = app.viewport.pending_scroll_delta;
+        let events = handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(events.is_empty());
+        assert!(
+            app.viewport.pending_scroll_delta < before,
+            "visible approval did not outrank underlying side surface at ({column}, {row})"
+        );
+    }
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
 }
 
 #[test]
@@ -1980,13 +2188,18 @@ fn create_test_app() -> App {
     // saved settings (provider/model maps, auto-model, route limits), so on
     // a machine with customized settings the context-window tests computed
     // against a different model than the requested deepseek-v4-pro.
-    app.api_provider = crate::config::ApiProvider::Deepseek;
+    app.set_provider_identity(crate::config::ApiProvider::Deepseek, "deepseek");
     app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
     app.model = "deepseek-v4-pro".to_string();
     app.auto_model = false;
     app.last_effective_model = None;
     app.active_route_limits = None;
     app.active_context_window_override = None;
+    // UI fixtures replace `app.workspace` freely. Do not retain App::new's
+    // real process cwd as a second discovery root: parallel tests and a large
+    // developer checkout can otherwise consume the bounded mention index
+    // before the fixture workspace is scanned.
+    app.composer.mention_cwd = None;
     app
 }
 
@@ -2117,6 +2330,429 @@ fn session_denied_cache_matches_only_approval_key() {
     app.approval_session_denied
         .insert("file:edit_file:retry".to_string());
     assert!(is_session_denied_for_key(&app, "file:edit_file:retry"));
+}
+
+fn render_underwater_test_app(app: &mut App, width: u16, height: u16) -> String {
+    app.onboarding_workspace_trust_gate = false;
+    app.onboarding = OnboardingState::None;
+    let config = Config::default();
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("underwater test terminal");
+    terminal
+        .draw(|frame| render(frame, app, &config))
+        .expect("render underwater shell");
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>()
+}
+
+#[tokio::test]
+async fn session_denied_cache_auto_deny_explains_the_cached_rejection() {
+    let home = SettingsHomeGuard::new();
+    let audit_path = home._tmp.path().join(".codewhale").join("audit.log");
+    let mut app = create_test_app();
+    let mut engine = mock_engine_handle();
+    let approval_key = "shell:exec_shell:git push secret-token";
+
+    auto_deny_session_approval(
+        &mut app,
+        &engine.handle,
+        "tool-retry",
+        "exec_shell",
+        approval_key,
+    )
+    .await;
+
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: "tool-retry".to_string(),
+        })
+    );
+    let toast = app.status_toasts.back().expect("auto-deny warning toast");
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    assert_eq!(toast.ttl_ms, Some(12_000));
+    assert!(toast.text.contains("matching request was denied earlier"));
+    assert!(toast.text.contains("during this CodeWhale run"));
+    assert!(toast.text.contains("Restart CodeWhale"));
+    assert!(toast.text.contains("exec_shell"));
+    let history_notice = app
+        .history
+        .iter()
+        .rev()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("persistent auto-deny explanation");
+    assert_eq!(history_notice, toast.text);
+    for visible_text in [&toast.text, history_notice] {
+        assert!(
+            !visible_text.contains(approval_key)
+                && !visible_text.contains("git push")
+                && !visible_text.contains("secret-token"),
+            "the user-facing notice must not expose the approval key, command, or arguments"
+        );
+    }
+    let audit = std::fs::read_to_string(&audit_path).expect("isolated approval audit log");
+    assert!(audit.contains(approval_key));
+
+    let rendered = render_underwater_test_app(&mut app, 40, 12);
+    assert!(rendered.contains("Auto-denied"), "{rendered:?}");
+    assert!(
+        rendered.contains("Restart") && rendered.contains("CodeWhale"),
+        "{rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_denied_cache_notice_preserves_active_tool_index() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    let mut engine = mock_engine_handle();
+    let tool_id = "tool-retry";
+    let tool_name = "exec_shell";
+
+    handle_tool_call_started(
+        &mut app,
+        tool_id,
+        tool_name,
+        &serde_json::json!({"command": "git push secret-token"}),
+    );
+    let history_len = app.history.len();
+    let tool_index = app.tool_cells[tool_id];
+    assert_eq!(tool_index, history_len);
+
+    auto_deny_session_approval(
+        &mut app,
+        &engine.handle,
+        tool_id,
+        tool_name,
+        "shell:exec_shell:git push secret-token",
+    )
+    .await;
+
+    assert_eq!(
+        app.history.len(),
+        history_len,
+        "the notice must not shift virtual indices while a tool is active"
+    );
+    assert_eq!(app.tool_cells.get(tool_id), Some(&tool_index));
+    let active = app.active_cell.as_ref().expect("active tool and notice");
+    assert!(matches!(
+        active.entries().first(),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec))) if exec.status == ToolStatus::Running
+    ));
+    assert!(matches!(
+        active.entries().get(1),
+        Some(HistoryCell::System { content }) if content.contains("Auto-denied")
+    ));
+
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: tool_id.to_string(),
+        })
+    );
+    let denied_result = Ok(crate::tools::spec::ToolResult::error(
+        "request denied by cached approval",
+    ));
+    handle_tool_call_complete(&mut app, tool_id, tool_name, &denied_result);
+
+    let active = app.active_cell.as_ref().expect("completed tool and notice");
+    assert!(matches!(
+        active.entries().first(),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec))) if exec.status == ToolStatus::Failed
+    ));
+    assert!(matches!(
+        active.entries().get(1),
+        Some(HistoryCell::System { .. })
+    ));
+
+    app.flush_active_cell();
+    assert!(matches!(
+        app.history.get(history_len),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec))) if exec.status == ToolStatus::Failed
+    ));
+    assert!(matches!(
+        app.history.get(history_len + 1),
+        Some(HistoryCell::System { content }) if content.contains("Auto-denied")
+    ));
+    let detail = app
+        .tool_detail_record_for_cell(history_len)
+        .expect("tool detail remains bound to the completed tool cell");
+    assert_eq!(detail.tool_id, tool_id);
+    assert!(
+        detail
+            .output
+            .as_deref()
+            .is_some_and(|output| output.contains("cached approval"))
+    );
+}
+
+#[tokio::test]
+async fn session_denied_cache_notice_preserves_parallel_tool_indices() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    let mut engine = mock_engine_handle();
+
+    handle_tool_call_started(
+        &mut app,
+        "tool-first",
+        "exec_shell",
+        &serde_json::json!({"command": "echo first"}),
+    );
+    handle_tool_call_started(
+        &mut app,
+        "tool-denied",
+        "exec_shell",
+        &serde_json::json!({"command": "git push secret-token"}),
+    );
+    let history_len = app.history.len();
+    let first_index = app.tool_cells["tool-first"];
+    let denied_index = app.tool_cells["tool-denied"];
+    assert_eq!(first_index, history_len);
+    assert_eq!(denied_index, history_len + 1);
+
+    auto_deny_session_approval(
+        &mut app,
+        &engine.handle,
+        "tool-denied",
+        "exec_shell",
+        "shell:exec_shell:git push secret-token",
+    )
+    .await;
+
+    assert_eq!(app.history.len(), history_len);
+    assert_eq!(app.tool_cells.get("tool-first"), Some(&first_index));
+    assert_eq!(app.tool_cells.get("tool-denied"), Some(&denied_index));
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: "tool-denied".to_string(),
+        })
+    );
+
+    let denied_result = Ok(crate::tools::spec::ToolResult::error(
+        "request denied by cached approval",
+    ));
+    handle_tool_call_complete(&mut app, "tool-denied", "exec_shell", &denied_result);
+    let active = app.active_cell.as_ref().expect("parallel tools and notice");
+    assert!(matches!(
+        active.entries().first(),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec)))
+            if exec.status == ToolStatus::Running && exec.command == "echo first"
+    ));
+    assert!(matches!(
+        active.entries().get(1),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec)))
+            if exec.status == ToolStatus::Failed
+                && exec.command == "git push secret-token"
+                && exec.output.as_deref().is_some_and(|output| output.contains("cached approval"))
+    ));
+    assert!(matches!(
+        active.entries().get(2),
+        Some(HistoryCell::System { content }) if content.contains("Auto-denied")
+    ));
+
+    handle_tool_call_complete(
+        &mut app,
+        "tool-first",
+        "exec_shell",
+        &ok_result("first output"),
+    );
+    app.flush_active_cell();
+
+    assert!(matches!(
+        app.history.get(history_len),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec)))
+            if exec.status == ToolStatus::Success
+                && exec.command == "echo first"
+                && exec.output.as_deref() == Some("first output")
+    ));
+    assert!(matches!(
+        app.history.get(history_len + 1),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec)))
+            if exec.status == ToolStatus::Failed && exec.command == "git push secret-token"
+    ));
+    assert!(matches!(
+        app.history.get(history_len + 2),
+        Some(HistoryCell::System { content }) if content.contains("Auto-denied")
+    ));
+}
+
+#[tokio::test]
+async fn session_denied_cache_notice_renders_host_scope_in_zh_hans() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::ZhHans;
+    let mut engine = mock_engine_handle();
+
+    auto_deny_session_approval(
+        &mut app,
+        &engine.handle,
+        "fetch-retry",
+        "fetch_url",
+        "net:example.com",
+    )
+    .await;
+
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: "fetch-retry".to_string(),
+        })
+    );
+    let notice = app
+        .history
+        .iter()
+        .rev()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("localized persistent auto-deny explanation");
+    assert!(notice.contains("本次 CodeWhale 运行期间"));
+    assert!(notice.contains("匹配请求"));
+    assert!(!notice.contains("example.com"));
+
+    let rendered = render_underwater_test_app(&mut app, 60, 16);
+    let rendered_compact = rendered
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(rendered_compact.contains("已自动拒绝"), "{rendered:?}");
+    assert!(rendered_compact.contains("匹配请求"), "{rendered:?}");
+    assert!(
+        rendered_compact.contains("重启") && rendered_compact.contains("CodeWhale"),
+        "{rendered:?}"
+    );
+}
+
+#[test]
+fn session_denied_notice_explains_cached_decision_and_recovery() {
+    let app = create_test_app();
+    let notice = session_denied_notice(&app, "exec_shell");
+
+    assert!(notice.contains("exec_shell"));
+    assert!(notice.contains("matching request was denied earlier"));
+    assert!(notice.contains("during this CodeWhale run"));
+    assert!(notice.contains("Restart CodeWhale"));
+}
+
+#[tokio::test]
+async fn cached_denial_explanation_survives_tool_completion_and_done_render() {
+    use crate::core::engine::MockApprovalEvent;
+    use crate::tools::spec::ToolError;
+    use crate::tui::ocean::OceanTreatment;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    app.launch.visible = false;
+    app.ocean_treatment = OceanTreatment::Ombre;
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+
+    let tool_id = "cached-shell-denial";
+    let tool_name = "exec_shell";
+    handle_tool_call_started(
+        &mut app,
+        tool_id,
+        tool_name,
+        &serde_json::json!({"command": "printf cached-denial"}),
+    );
+
+    // Mirror the cached ApprovalRequired branch: send the denial back to the
+    // blocked engine, then project the explanation into the UI.
+    let mut engine = mock_engine_handle();
+    engine
+        .handle
+        .deny_tool_call(tool_id)
+        .await
+        .expect("send cached denial");
+    surface_session_denied_notice(&mut app, tool_name);
+    assert!(matches!(
+        engine.recv_approval_event().await,
+        Some(MockApprovalEvent::Denied { id }) if id == tool_id
+    ));
+
+    // These are the events that immediately follow the auto-deny in a real
+    // turn. A later generic status is deliberately applied too: the detailed
+    // recovery receipt must not depend on winning the one-line status race.
+    let result = Err(ToolError::permission_denied(
+        "Tool 'exec_shell' denied by user".to_string(),
+    ));
+    handle_tool_call_complete(&mut app, tool_id, tool_name, &result);
+    app.flush_active_cell();
+
+    let denied_tool_index = app
+        .history
+        .iter()
+        .position(|cell| {
+            matches!(
+                cell,
+                HistoryCell::Tool(ToolCell::Exec(exec))
+                    if exec.command == "printf cached-denial"
+                        && exec.status == ToolStatus::Failed
+            )
+        })
+        .expect("cached denial must settle the pending tool as failed");
+    let recovery_receipt_index = app
+        .history
+        .iter()
+        .position(|cell| {
+            matches!(
+                cell,
+                HistoryCell::System { content }
+                    if content.contains("Auto-denied exec_shell")
+                        && content.contains("Restart CodeWhale")
+            )
+        })
+        .expect("cached denial must leave a durable recovery receipt");
+    assert!(
+        denied_tool_index < recovery_receipt_index,
+        "recovery receipt must follow the tool it explains"
+    );
+
+    app.is_loading = false;
+    app.runtime_turn_status = Some("completed".to_string());
+    app.status_message = Some("Tool 'exec_shell' denied by user".to_string());
+    app.sync_status_message_to_toasts();
+
+    let config = Config::default();
+    let backend = TestBackend::new(89, 24);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app, &config))
+        .expect("render completed denial sequence");
+    let buffer = terminal.backend().buffer();
+    let rendered = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        rendered.contains("Auto-denied exec_shell"),
+        "cached-decision explanation disappeared after completion:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Restart CodeWhale"),
+        "cached-denial recovery path disappeared after completion:\n{rendered}"
+    );
+    assert_eq!(
+        app.view_stack.top_kind(),
+        None,
+        "cache hit must not re-prompt"
+    );
 }
 
 #[test]
@@ -2810,6 +3446,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
             total_tokens: 0,
             model: "deepseek-v4-pro".to_string(),
             model_provider: "deepseek".to_string(),
+            model_provider_id: None,
             workspace: PathBuf::from("/tmp/resume-recovery"),
             mode: Some("yolo".to_string()),
             cost: crate::session_manager::SessionCostSnapshot::default(),
@@ -2822,6 +3459,27 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
         context_references: Vec::new(),
         artifacts: Vec::new(),
         work_state: None,
+    }
+}
+
+fn named_custom_session_config(name: &str, base_url: &str, model: &str) -> Config {
+    let mut custom = HashMap::new();
+    custom.insert(
+        name.to_string(),
+        ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some(base_url.to_string()),
+            model: Some(model.to_string()),
+            ..ProviderConfig::default()
+        },
+    );
+    Config {
+        provider: Some(name.to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
     }
 }
 
@@ -2895,6 +3553,7 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     app.session.last_reasoning_replay_tokens = Some(12);
     app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 120,
@@ -3516,15 +4175,19 @@ fn saved_default_provider_syncs_back_to_runtime_config() {
 #[test]
 fn provider_picker_reselecting_active_provider_preserves_current_model() {
     let mut app = create_test_app();
-    app.api_provider = ApiProvider::Ollama;
+    app.set_provider_identity(ApiProvider::Ollama, "ollama");
     app.model = "deepseek-coder-v2:16b".to_string();
+    let config = Config {
+        provider: Some("ollama".to_string()),
+        ..Config::default()
+    };
 
     assert_eq!(
-        provider_picker_model_override(&app, ApiProvider::Ollama).as_deref(),
+        provider_picker_model_override(&app, &config, ApiProvider::Ollama).as_deref(),
         Some("deepseek-coder-v2:16b")
     );
     assert_eq!(
-        provider_picker_model_override(&app, ApiProvider::Deepseek),
+        provider_picker_model_override(&app, &config, ApiProvider::Deepseek),
         None
     );
 }
@@ -3540,6 +4203,7 @@ async fn provider_switch_clears_turn_cache_history() {
     let mut app = create_test_app();
     app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 100,
@@ -4065,6 +4729,499 @@ async fn dispatch_user_message_failed_send_clears_loading_state() {
     );
 }
 
+#[tokio::test]
+async fn failed_paused_dispatch_preserves_app_checkpoint_state_and_engine_gate() {
+    let mut app = create_test_app();
+    app.pausable = true;
+    app.paused = true;
+    app.paused_quarry = Some("finish the paused audit".to_string());
+    app.hunt.quarry = None;
+    app.hunt.tokens_used = 7;
+    app.hunt.time_used_seconds = 11;
+    app.hunt.continuation_count = 2;
+    app.api_messages
+        .push(text_message("assistant", "existing conversation"));
+    app.add_message(HistoryCell::System {
+        content: "existing transcript".to_string(),
+    });
+    let before_messages = app.api_messages.clone();
+    let before_history = format!("{:?}", app.history);
+    let before_context_references = app.session_context_references.clone();
+    let before_system_prompt = app.system_prompt.clone();
+    let before_last_prompt = app.last_submitted_prompt.clone();
+    let engine = mock_engine_handle();
+    engine.handle.set_paused(true);
+    drop(engine.rx_op);
+
+    dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("please continue".to_string(), None),
+    )
+    .await
+    .expect_err("closed engine mailbox must reject the paused dispatch");
+
+    assert!(app.paused);
+    assert!(app.pausable);
+    assert_eq!(
+        app.paused_quarry.as_deref(),
+        Some("finish the paused audit")
+    );
+    assert!(app.hunt.quarry.is_none());
+    assert_eq!(app.hunt.tokens_used, 7);
+    assert_eq!(app.hunt.time_used_seconds, 11);
+    assert_eq!(app.hunt.continuation_count, 2);
+    assert!(engine.handle.is_paused());
+    assert_eq!(app.api_messages, before_messages);
+    assert_eq!(format!("{:?}", app.history), before_history);
+    assert_eq!(app.session_context_references, before_context_references);
+    assert_eq!(app.system_prompt, before_system_prompt);
+    assert_eq!(app.last_submitted_prompt, before_last_prompt);
+    assert!(!app.is_loading);
+    assert!(app.dispatch_started_at.is_none());
+    assert!(app.last_send_at.is_none());
+    assert!(app.pending_turn_route.is_none());
+}
+
+#[tokio::test]
+async fn paused_dispatch_at_compaction_threshold_enqueues_one_atomic_send() {
+    let mut app = create_test_app();
+    app.pausable = true;
+    app.paused = true;
+    app.paused_quarry = Some("finish the paused audit".to_string());
+    app.hunt.quarry = None;
+    app.auto_compact_user_configured = true;
+    app.auto_compact = true;
+    app.auto_compact_threshold_percent = 10.0;
+    app.api_messages = vec![text_message("assistant", &"context ".repeat(240_000))];
+    let planned_compaction =
+        app.compaction_config_for_route(app.api_provider, &app.model, app.active_route_limits);
+    assert!(
+        should_auto_compact_before_send_with_config(&app, &planned_compaction),
+        "fixture must already require compaction"
+    );
+
+    let mut engine = mock_engine_handle();
+    engine.handle.set_paused(true);
+    dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("please continue".to_string(), None),
+    )
+    .await
+    .expect("atomic paused dispatch");
+
+    match engine.rx_op.recv().await.expect("single send operation") {
+        Op::SendMessage {
+            compaction,
+            goal_objective,
+            ..
+        } => {
+            assert!(compaction.enabled);
+            assert_eq!(goal_objective.as_deref(), Some("finish the paused audit"));
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+    assert!(
+        engine.rx_op.try_recv().is_err(),
+        "route-bound compaction must travel inside the one SendMessage op"
+    );
+    assert!(!app.paused);
+    assert!(!engine.handle.is_paused());
+}
+
+#[tokio::test]
+async fn real_engine_client_preflight_failure_leaves_dispatch_state_atomic() {
+    let mut config =
+        named_custom_session_config("lm-studio", "http://127.0.0.1:1234/v1", "local-model");
+    config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .custom
+        .get_mut("lm-studio")
+        .expect("lm-studio")
+        .insecure_skip_tls_verify = Some(true);
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+    app.set_model_selection("local-model".to_string());
+    let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
+
+    let err = dispatch_user_message(
+        &mut app,
+        &config,
+        &handle,
+        QueuedMessage::new("keep this retryable".to_string(), None),
+    )
+    .await
+    .expect_err("real engine routes must preflight their concrete client");
+
+    assert!(
+        err.to_string()
+            .contains("Failed to configure provider route")
+    );
+    assert!(!app.is_loading);
+    assert!(app.dispatch_started_at.is_none());
+    assert!(app.last_send_at.is_none());
+    assert!(app.last_submitted_prompt.is_none());
+    assert!(app.api_messages.is_empty());
+    assert!(app.history.is_empty());
+    assert!(app.pending_turn_route.is_none());
+}
+
+#[tokio::test]
+async fn immediate_submit_closed_mailbox_restores_composer_and_skill() {
+    let mut app = create_test_app();
+    app.input = "retry this exactly".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.active_skill = Some("keep the selected skill".to_string());
+    let input = app
+        .handle_composer_enter()
+        .expect("non-empty composer should submit");
+    let queued = build_queued_message(&mut app, input);
+    assert!(app.input.is_empty());
+    assert!(app.active_skill.is_none());
+
+    let engine = mock_engine_handle();
+    drop(engine.rx_op);
+
+    submit_or_steer_message(&mut app, &Config::default(), &engine.handle, queued)
+        .await
+        .expect("UI submit failures must remain inside the TUI");
+
+    assert_eq!(app.input, "retry this exactly");
+    assert_eq!(app.cursor_position, app.input.chars().count());
+    assert_eq!(app.active_skill.as_deref(), Some("keep the selected skill"));
+    assert!(!app.is_loading);
+    assert!(app.status_message.as_deref().is_some_and(|status| {
+        status.contains("Message not sent") && status.contains("restored to composer")
+    }));
+    let sticky = app
+        .sticky_status
+        .as_ref()
+        .expect("dispatch failure should stay visible");
+    assert_eq!(sticky.level, StatusToastLevel::Error);
+    assert!(sticky.ttl_ms.is_none());
+}
+
+#[tokio::test]
+async fn immediate_submit_custom_provider_preflight_restores_exact_message() {
+    let mut config =
+        named_custom_session_config("lm-studio", "http://127.0.0.1:1234/v1", "local-model");
+    config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .custom
+        .get_mut("lm-studio")
+        .expect("lm-studio")
+        .insecure_skip_tls_verify = Some(true);
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+    app.set_model_selection("local-model".to_string());
+    app.input = "preserve 用户 input".to_string();
+    app.cursor_position = app.input.chars().count();
+    let input = app
+        .handle_composer_enter()
+        .expect("non-empty composer should submit");
+    let queued = build_queued_message(&mut app, input);
+    let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
+
+    submit_or_steer_message(&mut app, &config, &handle, queued)
+        .await
+        .expect("provider preflight failures must remain inside the TUI");
+
+    assert_eq!(app.input, "preserve 用户 input");
+    assert_eq!(app.cursor_position, app.input.chars().count());
+    assert!(app.api_messages.is_empty());
+    assert!(app.history.is_empty());
+    assert!(app.last_submitted_prompt.is_none());
+    assert!(app.status_message.as_deref().is_some_and(|status| {
+        status.contains("Failed to configure provider route")
+            && status.contains("restored to composer")
+    }));
+}
+
+#[tokio::test]
+async fn dispatch_uses_app_owned_exact_custom_identity_when_config_selector_drifts() {
+    let mut custom = HashMap::new();
+    for (name, base_url, model) in [
+        ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+        ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+    ] {
+        custom.insert(
+            name.to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                api_key: Some(format!("{name}-test-key")),
+                ..Default::default()
+            },
+        );
+    }
+    let config = Config {
+        // Simulate a picker/config overlay that has moved ahead to B while
+        // App and the active engine still own A.
+        provider: Some("custom-b".to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "custom-a");
+    app.set_model_selection("model-a".to_string());
+    let mut engine = mock_engine_handle();
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("stay on A".to_string(), None),
+    )
+    .await
+    .expect("dispatch exact App-owned route");
+
+    match engine.rx_op.recv().await.expect("send message op") {
+        Op::SendMessage { route, .. } => {
+            assert_eq!(route.identity.provider, ApiProvider::Custom);
+            assert_eq!(route.identity.key, "custom-a");
+            assert_eq!(route.identity.exact_id.as_deref(), Some("custom-a"));
+            assert_eq!(route.model, "model-a");
+            assert_eq!(
+                route.config.deepseek_base_url(),
+                "http://127.0.0.1:18181/v1"
+            );
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+    assert_eq!(config.provider.as_deref(), Some("custom-b"));
+}
+
+#[tokio::test]
+async fn dispatch_idless_custom_identity_keeps_legacy_root_over_literal_table() {
+    let config = Config {
+        provider: Some("custom".to_string()),
+        api_key: Some("legacy-root-test-key".to_string()),
+        base_url: Some("http://127.0.0.1:18180/v1".to_string()),
+        default_text_model: Some("legacy-root-model".to_string()),
+        providers: Some(ProvidersConfig {
+            custom: HashMap::from([(
+                "custom".to_string(),
+                ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    api_key: Some("literal-table-test-key".to_string()),
+                    base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+                    model: Some("literal-table-model".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "custom");
+    app.set_model_selection("legacy-root-model".to_string());
+    let mut engine = mock_engine_handle();
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("keep the released root route".to_string(), None),
+    )
+    .await
+    .expect("dispatch idless legacy root route");
+
+    match engine.rx_op.recv().await.expect("send message op") {
+        Op::SendMessage { route, .. } => {
+            assert_eq!(route.identity.provider, ApiProvider::Custom);
+            assert_eq!(route.identity.key, "custom");
+            assert_eq!(route.identity.exact_id, None);
+            assert_eq!(route.model, "legacy-root-model");
+            assert_eq!(
+                route.config.deepseek_base_url(),
+                "http://127.0.0.1:18180/v1"
+            );
+            assert!(
+                route
+                    .config
+                    .providers
+                    .as_ref()
+                    .is_none_or(|providers| !providers.custom.contains_key("custom"))
+            );
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn failed_real_preflight_preserves_paused_command_state_and_engine_gate() {
+    let mut config =
+        named_custom_session_config("lm-studio", "http://127.0.0.1:1234/v1", "local-model");
+    config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .custom
+        .get_mut("lm-studio")
+        .expect("lm-studio")
+        .insecure_skip_tls_verify = Some(true);
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+    app.set_model_selection("local-model".to_string());
+    app.paused = true;
+    app.pausable = true;
+    app.paused_quarry = Some("finish the paused audit".to_string());
+    app.hunt.quarry = None;
+    app.hunt.tokens_used = 7;
+    app.hunt.time_used_seconds = 11;
+    app.hunt.continuation_count = 2;
+    let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
+    handle.set_paused(true);
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &handle,
+        QueuedMessage::new("please continue".to_string(), None),
+    )
+    .await
+    .expect_err("invalid client must fail before changing pause state");
+
+    assert!(app.paused);
+    assert!(app.pausable);
+    assert_eq!(
+        app.paused_quarry.as_deref(),
+        Some("finish the paused audit")
+    );
+    assert!(app.hunt.quarry.is_none());
+    assert_eq!(app.hunt.tokens_used, 7);
+    assert_eq!(app.hunt.time_used_seconds, 11);
+    assert_eq!(app.hunt.continuation_count, 2);
+    assert!(handle.is_paused());
+    assert!(app.api_messages.is_empty());
+    assert!(app.history.is_empty());
+}
+
+#[test]
+fn logout_memory_clear_respects_named_and_legacy_custom_scopes() {
+    let mut named_app = create_test_app();
+    named_app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+    let mut named_config = Config {
+        provider: Some("lm-studio".to_string()),
+        api_key: Some("deepseek-root-key".to_string()),
+        providers: Some(ProvidersConfig {
+            custom: HashMap::from([(
+                "lm-studio".to_string(),
+                ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    api_key: Some("named-key".to_string()),
+                    base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+                    model: Some("local-model".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    clear_active_provider_api_key_from_memory(&named_app, &mut named_config);
+
+    assert_eq!(named_config.api_key.as_deref(), Some("deepseek-root-key"));
+    assert_eq!(
+        named_config
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.custom.get("lm-studio"))
+            .and_then(|provider| provider.api_key.as_deref()),
+        None
+    );
+
+    let mut legacy_app = create_test_app();
+    legacy_app.set_provider_identity(ApiProvider::Custom, "custom");
+    let mut legacy_config = Config {
+        provider: Some("custom".to_string()),
+        api_key: Some("legacy-key".to_string()),
+        base_url: Some("http://127.0.0.1:18180/v1".to_string()),
+        default_text_model: Some("legacy-model".to_string()),
+        ..Default::default()
+    };
+
+    clear_active_provider_api_key_from_memory(&legacy_app, &mut legacy_config);
+
+    assert_eq!(legacy_config.api_key, None);
+    assert!(legacy_config.providers.is_none());
+}
+
+#[test]
+fn auto_routed_turn_compaction_uses_selected_route_not_stale_app_route() {
+    let mut app = create_test_app();
+    app.auto_model = true;
+    app.model = "auto".to_string();
+    app.api_provider = ApiProvider::Deepseek;
+    app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+        context_tokens: Some(32_000),
+        ..Default::default()
+    });
+    app.auto_compact_threshold_percent = 75.0;
+
+    let config = Config {
+        provider: Some("openrouter".to_string()),
+        providers: Some(ProvidersConfig {
+            openrouter: ProviderConfig {
+                api_key: Some("test-openrouter-key".to_string()),
+                model: Some("vendor/model-b".to_string()),
+                context_window: Some(196_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let route = resolve_runtime_route(&config, ApiProvider::Openrouter, Some("vendor/model-b"))
+        .expect("resolve auto-selected route")
+        .validate()
+        .expect("preflight auto-selected route");
+    let route_limits = crate::route_budget::known_route_limits(route.candidate.limits);
+
+    let compaction =
+        app.compaction_config_for_route(route.identity.provider, &route.model, route_limits);
+
+    assert_eq!(compaction.model, "vendor/model-b");
+    assert_eq!(compaction.effective_context_window, Some(196_000));
+    assert_eq!(
+        compaction.token_threshold,
+        crate::route_budget::compaction_threshold_for_route_at_percent(
+            ApiProvider::Openrouter,
+            "vendor/model-b",
+            route_limits,
+            75.0,
+        )
+    );
+    assert_ne!(compaction, app.compaction_config());
+
+    let pre_send_compact = crate::core::ops::Op::CompactContext {
+        route: Box::new(route.into_resolved()),
+        compaction: Box::new(compaction.clone()),
+    };
+    match pre_send_compact {
+        crate::core::ops::Op::CompactContext { route, compaction } => {
+            assert_eq!(route.identity.provider, ApiProvider::Openrouter);
+            assert_eq!(route.model, "vendor/model-b");
+            assert_eq!(compaction.model, "vendor/model-b");
+            assert_eq!(compaction.effective_context_window, Some(196_000));
+        }
+        other => panic!("expected route-bound compact op, got {other:?}"),
+    }
+}
+
 #[cfg(not(windows))]
 fn write_message_submit_hook(dir: &TempDir, name: &str, body: &str) -> String {
     let path = dir.path().join(name);
@@ -4191,6 +5348,59 @@ printf '%s\n' '{"text":"after soft failure"}'
         }
         other => panic!("expected SendMessage, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn dispatch_route_failure_leaves_loading_and_transcript_unchanged() {
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+    app.set_model_selection("local-model".to_string());
+    app.api_messages
+        .push(text_message("assistant", "existing conversation"));
+    app.add_message(HistoryCell::System {
+        content: "existing receipt".to_string(),
+    });
+    let mut custom = HashMap::new();
+    custom.insert(
+        "lm-studio".to_string(),
+        ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("ftp://invalid.example/v1".to_string()),
+            model: Some("local-model".to_string()),
+            api_key: Some("local-test-key".to_string()),
+            ..ProviderConfig::default()
+        },
+    );
+    let config = Config {
+        provider: Some("lm-studio".to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let mut engine = mock_engine_handle();
+
+    let err = dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("do not duplicate me".to_string(), None),
+    )
+    .await
+    .expect_err("malformed named custom route must fail closed");
+
+    assert!(err.to_string().contains("http"), "{err}");
+    assert!(!app.is_loading);
+    assert!(app.dispatch_started_at.is_none());
+    assert!(app.last_send_at.is_none());
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(app.history.len(), 1);
+    assert!(matches!(
+        &app.history[0],
+        HistoryCell::System { content } if content == "existing receipt"
+    ));
+    assert!(engine.rx_op.try_recv().is_err());
 }
 
 #[cfg(not(windows))]
@@ -4847,6 +6057,7 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
         created_at: chrono::Utc::now(),
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Openai,
+            provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
@@ -4886,6 +6097,7 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
         created_at: chrono::Utc::now(),
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Openai,
+            provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
@@ -4949,6 +6161,7 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
         created_at: chrono::Utc::now(),
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Openai,
+            provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
         }),
@@ -6939,53 +8152,28 @@ fn context_usage_snapshot_prefers_live_estimate_while_loading() {
 }
 
 #[test]
-fn should_auto_compact_before_send_respects_threshold_and_setting() {
+fn should_auto_compact_before_send_uses_shared_token_threshold() {
     let mut app = create_test_app();
-    let messages_for_repeats = |repeats: usize| {
-        vec![Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: "context ".repeat(repeats),
-                cache_control: None,
-            }],
-        }]
-    };
+    app.api_messages = vec![Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "context ".repeat(240_000),
+            cache_control: None,
+        }],
+    }];
+    let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
+    let used = usize::try_from(used).expect("non-negative context estimate");
 
-    // High estimated context + auto_compact ON → auto-compact triggers.
-    app.api_messages = messages_for_repeats(240_000);
     app.auto_compact = true;
-    app.auto_compact_threshold_percent = 70.0;
+    app.compact_threshold = used;
     assert!(should_auto_compact_before_send(&app));
 
-    let (_, _, high_percent) =
-        context_usage_snapshot(&app).expect("high context snapshot should be available");
-    assert!(
-        (70.0..90.0).contains(&high_percent),
-        "test fixture should sit between default and high custom thresholds; got {high_percent:.2}%"
-    );
-    app.auto_compact_threshold_percent = 90.0;
+    app.compact_threshold = used.saturating_add(1);
     assert!(!should_auto_compact_before_send(&app));
 
-    // Same high context but auto_compact OFF → never triggers.
     app.auto_compact = false;
+    app.compact_threshold = 0;
     assert!(!should_auto_compact_before_send(&app));
-
-    // Small estimated context + auto_compact ON can trigger once the
-    // configured percent threshold is crossed. This still matches the
-    // #115 fix: the estimate is the primary signal, not the engine's
-    // turn-cumulative reported value (which used to rule the displayed
-    // % and could spuriously trigger / suppress auto-compact).
-    app.api_messages = messages_for_repeats(80_000);
-    app.auto_compact = true;
-    app.auto_compact_threshold_percent = 10.0;
-    app.session.last_prompt_tokens = Some(10_000);
-    let (used, _, percent) =
-        context_usage_snapshot(&app).expect("context snapshot should be available");
-    assert!(
-        used > 0 && percent >= 10.0,
-        "test fixture should cross percent threshold; used={used} percent={percent:.2}"
-    );
-    assert!(should_auto_compact_before_send(&app));
 }
 
 #[test]
@@ -6999,7 +8187,13 @@ fn context_pressure_warning_reflects_auto_compact_threshold_state() {
         }],
     }];
     app.auto_compact = true;
-    app.auto_compact_threshold_percent = 70.0;
+    app.auto_compact_threshold_percent = 100.0;
+    let (used, _, percent) = context_usage_snapshot(&app).expect("context snapshot");
+    assert!(
+        percent < app.auto_compact_threshold_percent,
+        "fixture must remain below the raw window-relative setting"
+    );
+    app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");
 
     maybe_warn_context_pressure(&mut app);
 
@@ -7211,6 +8405,7 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
         created_at,
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Openai,
+            provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: true,
         }),
@@ -7244,6 +8439,7 @@ fn engine_error_health_accounting_uses_active_turn_route() {
         created_at: chrono::Utc::now(),
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Openai,
+            provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: true,
         }),
@@ -8193,7 +9389,7 @@ async fn steer_user_message_records_prompt_for_cancel_restore() {
 }
 
 #[tokio::test]
-async fn ctrl_s_sends_next_queued_message_into_running_turn() {
+async fn composer_send_shortcut_sends_next_queued_message_into_running_turn() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.queue_message(crate::tui::app::QueuedMessage::new(
@@ -8204,9 +9400,9 @@ async fn ctrl_s_sends_next_queued_message_into_running_turn() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        send_ctrl_s_queued_message_now(&mut app, &config, &engine.handle)
+        send_shortcut_queued_message_now(&mut app, &config, &engine.handle)
             .await
-            .expect("ctrl+s send succeeds")
+            .expect("composer send shortcut succeeds")
     );
 
     assert_eq!(app.queued_message_count(), 0);
@@ -8217,7 +9413,7 @@ async fn ctrl_s_sends_next_queued_message_into_running_turn() {
 }
 
 #[tokio::test]
-async fn ctrl_s_sends_edited_queued_draft_into_running_turn() {
+async fn composer_send_shortcut_sends_edited_queued_draft_into_running_turn() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.queued_draft = Some(crate::tui::app::QueuedMessage::new(
@@ -8230,9 +9426,9 @@ async fn ctrl_s_sends_edited_queued_draft_into_running_turn() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        send_ctrl_s_queued_message_now(&mut app, &config, &engine.handle)
+        send_shortcut_queued_message_now(&mut app, &config, &engine.handle)
             .await
-            .expect("ctrl+s draft send succeeds")
+            .expect("composer send shortcut succeeds")
     );
 
     assert!(app.queued_draft.is_none());
@@ -8388,6 +9584,30 @@ async fn streaming_enter_queue_pushes_visible_toast() {
     let toast = app.status_toasts.back().expect("queue toast");
     assert_eq!(toast.level, StatusToastLevel::Info);
     assert!(toast.text.contains("Queued follow-up"));
+}
+
+#[tokio::test]
+async fn operate_streaming_enter_queues_another_parallel_task() {
+    let mut app = create_test_app();
+    app.mode = AppMode::Operate;
+    app.is_loading = true;
+    app.streaming_message_index = Some(0);
+    let config = Config::default();
+    let engine = crate::core::engine::mock_engine_handle();
+    let queued = build_queued_message(&mut app, "check the docs too".to_string());
+
+    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
+        .await
+        .expect("Operate streaming submit queues another task");
+
+    assert_eq!(app.queued_message_count(), 1);
+    assert!(app.status_message.as_deref().is_some_and(
+        |status| status.contains("queued task(s)") && status.contains("workers continue")
+    ));
+    let toast = app.status_toasts.back().expect("Operate queue toast");
+    assert_eq!(toast.level, StatusToastLevel::Info);
+    assert!(toast.text.contains("Queued task"));
+    assert!(toast.text.contains("dispatches next"));
 }
 
 #[tokio::test]
@@ -9158,6 +10378,29 @@ fn file_mention_completion_ranks_prefix_before_substring() {
     assert_eq!(matches.first().map(String::as_str), Some("README.md"));
 }
 
+fn await_visible_mention_entries(app: &mut App, limit: usize) -> Vec<String> {
+    let partial = partial_file_mention_at_cursor(&app.input, app.cursor_position)
+        .expect("test input should contain a mention")
+        .1;
+    let started = Instant::now();
+    loop {
+        let entries = visible_mention_menu_entries(app, limit);
+        let ready = app
+            .composer
+            .mention_completion_cache
+            .as_ref()
+            .is_some_and(|cache| cache.partial == partial && cache.limit == limit);
+        if ready {
+            return entries;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timed out waiting for background mention discovery"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 #[test]
 fn try_autocomplete_file_mention_unique_replaces_partial() {
     let tmpdir = TempDir::new().expect("tempdir");
@@ -9169,6 +10412,7 @@ fn try_autocomplete_file_mention_unique_replaces_partial() {
     app.input = "summarize @docs/de".to_string();
     app.cursor_position = app.input.chars().count();
 
+    let _ = await_visible_mention_entries(&mut app, 64);
     assert!(try_autocomplete_file_mention(&mut app));
     assert_eq!(app.input, "summarize @docs/deepseek_v4.pdf");
     assert_eq!(app.cursor_position, app.input.chars().count());
@@ -9186,6 +10430,7 @@ fn try_autocomplete_file_mention_extends_to_common_prefix() {
     app.input = "@crates/tui/".to_string();
     app.cursor_position = app.input.chars().count();
 
+    let _ = await_visible_mention_entries(&mut app, 64);
     assert!(try_autocomplete_file_mention(&mut app));
     // Both files share the `crates/tui/` prefix and one more letter is
     // not unique (`l` vs `m`), so the partial extends to the common prefix
@@ -9209,6 +10454,7 @@ fn try_autocomplete_file_mention_no_match_reports_status() {
     app.input = "@nonexistent_xyz".to_string();
     app.cursor_position = app.input.chars().count();
 
+    let _ = await_visible_mention_entries(&mut app, 64);
     assert!(try_autocomplete_file_mention(&mut app));
     assert_eq!(app.input, "@nonexistent_xyz");
     assert_eq!(
@@ -9227,6 +10473,7 @@ fn try_autocomplete_file_mention_no_match_mentions_depth_cap_for_path_like_parti
     app.input = "@a/b/c/d/e/f/g/target".to_string();
     app.cursor_position = app.input.chars().count();
 
+    let _ = await_visible_mention_entries(&mut app, 64);
     assert!(try_autocomplete_file_mention(&mut app));
     assert_eq!(
         app.status_message.as_deref(),
@@ -9246,6 +10493,7 @@ fn try_autocomplete_file_mention_no_match_skips_depth_hint_for_shallow_path() {
     app.input = "@shallow_missing/main.rs".to_string();
     app.cursor_position = app.input.chars().count();
 
+    let _ = await_visible_mention_entries(&mut app, 64);
     assert!(try_autocomplete_file_mention(&mut app));
     assert_eq!(
         app.status_message.as_deref(),
@@ -9263,6 +10511,7 @@ fn try_autocomplete_file_mention_no_match_skips_depth_hint_when_unlimited() {
     app.input = "@a/b/c/d/e/f/g/target".to_string();
     app.cursor_position = app.input.chars().count();
 
+    let _ = await_visible_mention_entries(&mut app, 64);
     assert!(try_autocomplete_file_mention(&mut app));
     assert_eq!(
         app.status_message.as_deref(),
@@ -9294,6 +10543,40 @@ fn mention_popup_is_empty_when_cursor_is_not_in_a_mention() {
 }
 
 #[test]
+fn plain_at_returns_immediately_while_discovery_is_stalled() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+
+    let mut app = create_test_app();
+    app.input = "@".to_string();
+    app.cursor_position = 1;
+    app.composer.mention_discovery =
+        crate::tui::mention_completion::MentionDiscovery::with_scanner(move |_, _| {
+            let _ = started_tx.send(());
+            let _ = release_rx.lock().expect("release lock").recv();
+            vec!["README.md".to_string()]
+        });
+
+    let started = Instant::now();
+    let initial = visible_mention_menu_entries(&mut app, 6);
+    assert!(initial.is_empty());
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "plain @ waited for discovery instead of returning immediately"
+    );
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("plain @ should start discovery in the background");
+
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        await_visible_mention_entries(&mut app, 6),
+        vec!["README.md"]
+    );
+}
+
+#[test]
 fn mention_popup_lists_workspace_matches_for_cursor_partial() {
     let tmpdir = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(tmpdir.path().join("docs")).unwrap();
@@ -9306,7 +10589,7 @@ fn mention_popup_lists_workspace_matches_for_cursor_partial() {
     app.input = "look at @docs/".to_string();
     app.cursor_position = app.input.chars().count();
 
-    let entries = visible_mention_menu_entries(&mut app, 6);
+    let entries = await_visible_mention_entries(&mut app, 6);
     assert!(!entries.is_empty(), "popup should surface docs/ entries");
     assert!(entries.iter().any(|e| e.starts_with("docs/")));
     // README.md doesn't match `docs/` — confirm we didn't dump every file.
@@ -9327,7 +10610,7 @@ fn mention_popup_browser_mode_lists_immediate_directory_children() {
     app.input = "look at @src/".to_string();
     app.cursor_position = app.input.chars().count();
 
-    let entries = visible_mention_menu_entries(&mut app, 8);
+    let entries = await_visible_mention_entries(&mut app, 8);
     assert_eq!(entries, vec!["src/lib.rs", "src/nested/"]);
 }
 
@@ -9342,7 +10625,7 @@ fn mention_popup_reuses_cache_when_cursor_moves_inside_same_token() {
     app.input = "look at @docs/".to_string();
     app.cursor_position = app.input.chars().count();
 
-    let entries = visible_mention_menu_entries(&mut app, 6);
+    let entries = await_visible_mention_entries(&mut app, 6);
     assert!(entries.iter().any(|e| e == "docs/alpha.md"));
 
     std::fs::write(tmpdir.path().join("docs/beta.md"), "x").unwrap();
@@ -9357,7 +10640,11 @@ fn mention_popup_reuses_cache_when_cursor_moves_inside_same_token() {
     app.input = "look at @docs/b".to_string();
     app.cursor_position = app.input.chars().count();
 
-    let entries_after_partial_change = visible_mention_menu_entries(&mut app, 6);
+    // The bounded background index is intentionally reused for the same
+    // workspace generation; filesystem mutations become visible on refresh.
+    app.composer.mention_discovery.invalidate();
+    app.composer.mention_completion_cache = None;
+    let entries_after_partial_change = await_visible_mention_entries(&mut app, 6);
     assert!(
         entries_after_partial_change
             .iter()
@@ -9395,7 +10682,7 @@ fn apply_mention_menu_selection_splices_selected_entry() {
     app.input = "open @crates/tui/m".to_string();
     app.cursor_position = app.input.chars().count();
 
-    let entries = visible_mention_menu_entries(&mut app, 6);
+    let entries = await_visible_mention_entries(&mut app, 6);
     assert!(!entries.is_empty(), "expected entries for @crates/tui/m");
     // Pick whichever entry appears at index 0; it's deterministic given the
     // workspace setup. Apply it.
@@ -9863,6 +11150,58 @@ fn existing_session_snapshot_updates_model_selection() {
 }
 
 #[test]
+fn automatic_session_snapshot_keeps_named_custom_identity_secret_free() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let mut config =
+        named_custom_session_config("lm-studio", "http://127.0.0.1:1234/v1", "local-code-model");
+    config
+        .providers
+        .as_mut()
+        .and_then(|providers| providers.custom.get_mut("lm-studio"))
+        .expect("custom provider")
+        .api_key = Some("super-secret-local-key".to_string());
+    let mut app = App::new(create_test_options(), &config);
+    app.api_messages.push(text_message("user", "persist me"));
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
+    let serialized = serde_json::to_string(&snapshot).expect("serialize session");
+
+    assert_eq!(snapshot.metadata.model_provider, "custom");
+    assert_eq!(
+        snapshot.metadata.model_provider_id.as_deref(),
+        Some("lm-studio")
+    );
+    assert!(serialized.contains("\"model_provider\":\"custom\""));
+    assert!(serialized.contains("\"model_provider_id\":\"lm-studio\""));
+    assert!(!serialized.contains("super-secret-local-key"));
+    assert!(!serialized.contains("127.0.0.1:1234"));
+}
+
+#[test]
+fn automatic_session_snapshot_omits_id_for_legacy_root_custom_route() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let config = Config {
+        provider: Some("custom".to_string()),
+        base_url: Some("http://127.0.0.1:18180/v1".to_string()),
+        default_text_model: Some("legacy-root-model".to_string()),
+        ..Config::default()
+    };
+    let mut app = App::new(create_test_options(), &config);
+    app.api_messages.push(text_message("user", "persist root"));
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
+    let serialized = serde_json::to_string(&snapshot).expect("serialize session");
+
+    assert_eq!(snapshot.metadata.model_provider, "custom");
+    assert_eq!(snapshot.metadata.model_provider_id, None);
+    assert!(!serialized.contains("model_provider_id"));
+}
+
+#[test]
 fn session_snapshot_and_resume_round_trip_work_state() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let manager =
@@ -10099,6 +11438,444 @@ fn contended_work_restore_leaves_current_session_wholly_unchanged() {
 }
 
 #[test]
+fn missing_named_custom_provider_resume_leaves_current_session_wholly_unchanged() {
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "keep the current conversation"));
+    app.current_session_id = Some("current-session".to_string());
+    app.workspace = PathBuf::from("/tmp/current-workspace");
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.set_provider_identity(ApiProvider::Deepseek, "deepseek");
+    app.add_message(HistoryCell::System {
+        content: "existing receipt".to_string(),
+    });
+    app.status_message = Some("existing status".to_string());
+    let mut config = Config {
+        provider: Some("deepseek".to_string()),
+        ..Config::default()
+    };
+    let mut session = saved_session_with_messages(vec![text_message("user", "replacement")]);
+    session.metadata.model_provider = "lm-studio".to_string();
+    session.metadata.model = "local-code-model".to_string();
+    session.metadata.workspace = PathBuf::from("/tmp/other-workspace");
+
+    let err = apply_loaded_session_config_snapshot(
+        &mut app,
+        &mut config,
+        &session,
+        Config::default(),
+        true,
+    )
+    .expect_err("removed custom provider must fail closed");
+
+    assert!(err.contains("[providers.lm-studio]"), "{err}");
+    assert!(err.contains("will not fall back"), "{err}");
+    assert_eq!(app.current_session_id.as_deref(), Some("current-session"));
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(app.workspace, PathBuf::from("/tmp/current-workspace"));
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(app.provider_identity_for_persistence(), "deepseek");
+    assert_eq!(app.model_selection_for_persistence(), "deepseek-v4-pro");
+    assert_eq!(config.provider.as_deref(), Some("deepseek"));
+    assert_eq!(app.history.len(), 1);
+    assert!(matches!(
+        &app.history[0],
+        HistoryCell::System { content } if content == "existing receipt"
+    ));
+    assert_eq!(app.status_message.as_deref(), Some("existing status"));
+}
+
+#[test]
+fn custom_session_resume_requires_structural_route_not_client_construction() {
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "keep the current conversation"));
+    app.current_session_id = Some("current-session".to_string());
+    app.workspace = PathBuf::from("/tmp/current-workspace");
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.set_provider_identity(ApiProvider::Deepseek, "deepseek");
+    app.add_message(HistoryCell::System {
+        content: "existing receipt".to_string(),
+    });
+    app.status_message = Some("existing status".to_string());
+    let mut config =
+        named_custom_session_config("lm-studio", "http://127.0.0.1:1234/v1", "local-code-model");
+    config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .custom
+        .get_mut("lm-studio")
+        .expect("lm-studio")
+        .insecure_skip_tls_verify = Some(true);
+    let mut session = saved_session_with_messages(vec![text_message("user", "replacement")]);
+    session.metadata.model_provider = "lm-studio".to_string();
+    session.metadata.model = "local-code-model".to_string();
+    session.metadata.workspace = PathBuf::from("/tmp/other-workspace");
+
+    let recovered = apply_loaded_session(&mut app, &mut config, &session)
+        .expect("session restore should not require provider credentials or TLS client setup");
+
+    assert!(recovered);
+    assert_eq!(
+        app.current_session_id.as_deref(),
+        Some("resume-recovery-session")
+    );
+    assert!(app.api_messages.is_empty());
+    assert_eq!(app.input, "replacement");
+    assert_eq!(app.workspace, PathBuf::from("/tmp/other-workspace"));
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_eq!(app.provider_identity_for_persistence(), "lm-studio");
+    assert_eq!(app.model_selection_for_persistence(), "local-code-model");
+    assert!(app.history.is_empty());
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Recovered interrupted prompt"))
+    );
+    assert_eq!(config.provider.as_deref(), Some("lm-studio"));
+}
+
+#[test]
+fn named_custom_provider_resume_uses_exact_live_endpoint_model_and_workspace() {
+    let resumed_workspace = tempfile::tempdir().expect("resume workspace");
+    let mut config = named_custom_session_config(
+        "lm-studio",
+        "http://127.0.0.1:1234/v1",
+        "configured-default",
+    );
+    let mut app = create_test_app();
+    let mut session = saved_session_with_messages(vec![
+        text_message("user", "resume local work"),
+        text_message("assistant", "ready"),
+    ]);
+    session.metadata.model_provider = "lm-studio".to_string();
+    session.metadata.model = "local-code-model".to_string();
+    session.metadata.workspace = resumed_workspace.path().to_path_buf();
+
+    apply_loaded_session(&mut app, &mut config, &session).expect("restore exact custom route");
+
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_eq!(app.provider_identity_for_persistence(), "lm-studio");
+    assert_eq!(app.model_selection_for_persistence(), "local-code-model");
+    assert_eq!(app.workspace, resumed_workspace.path());
+    assert_eq!(config.provider.as_deref(), Some("lm-studio"));
+    let route = resolve_runtime_route(&config, app.api_provider, Some(&app.model))
+        .expect("runtime route remains exact");
+    assert_eq!(
+        route.candidate.endpoint.base_url,
+        "http://127.0.0.1:1234/v1"
+    );
+    assert_eq!(route.model, "local-code-model");
+}
+
+#[test]
+fn same_workspace_named_custom_switch_requires_engine_respawn() {
+    let mut config =
+        named_custom_session_config("custom-a", "http://127.0.0.1:18181/v1", "model-a");
+    config.providers.as_mut().expect("providers").custom.insert(
+        "custom-b".to_string(),
+        crate::config::ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("http://127.0.0.1:18182/v1".to_string()),
+            model: Some("model-b".to_string()),
+            ..Default::default()
+        },
+    );
+    let workspace = PathBuf::from("/tmp/same-workspace-custom-switch");
+    let mut app = create_test_app();
+    app.workspace.clone_from(&workspace);
+    app.set_provider_identity(ApiProvider::Custom, "custom-a");
+    app.set_model_selection("model-a".to_string());
+    let previous_provider = app.api_provider;
+    let previous_identity = app.provider_identity_for_persistence().to_string();
+    let previous_workspace = app.workspace.clone();
+
+    let mut session = saved_session_with_messages(vec![text_message("user", "switch route")]);
+    session.metadata.model_provider = "custom-b".to_string();
+    session.metadata.model = "model-b".to_string();
+    session.metadata.workspace = workspace;
+    apply_loaded_session(&mut app, &mut config, &session).expect("restore custom B");
+
+    assert_eq!(previous_provider, ApiProvider::Custom);
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_eq!(app.provider_identity_for_persistence(), "custom-b");
+    assert!(loaded_session_requires_engine_respawn(
+        &app,
+        previous_provider,
+        &previous_identity,
+        &previous_workspace,
+    ));
+}
+
+#[test]
+fn file_load_uses_one_fresh_config_snapshot_for_custom_route_and_app_state() {
+    let workspace = PathBuf::from("/tmp/atomic-file-load");
+    let mut stale_config =
+        named_custom_session_config("custom-a", "http://127.0.0.1:18181/v1", "model-a");
+    let fresh_config =
+        named_custom_session_config("custom-b", "http://127.0.0.1:18182/v1", "model-b");
+    let mut app = create_test_app();
+    app.workspace.clone_from(&workspace);
+    app.set_provider_identity(ApiProvider::Custom, "custom-a");
+    app.set_model_selection("model-a".to_string());
+    app.api_messages
+        .push(text_message("user", "old conversation"));
+    let mut session = saved_session_with_messages(vec![
+        text_message("user", "new conversation"),
+        text_message("assistant", "loaded reply"),
+    ]);
+    session.metadata.model_provider = "custom-b".to_string();
+    session.metadata.model = "model-b".to_string();
+    session.metadata.workspace = workspace;
+
+    let (recovered, respawn) = apply_loaded_session_config_snapshot(
+        &mut app,
+        &mut stale_config,
+        &session,
+        fresh_config,
+        true,
+    )
+    .expect("fresh disk config should atomically restore custom B");
+
+    assert!(!recovered);
+    assert!(respawn);
+    assert_eq!(app.provider_identity_for_persistence(), "custom-b");
+    assert_eq!(app.model_selection_for_persistence(), "model-b");
+    assert_eq!(app.api_messages, session.messages);
+    assert_eq!(stale_config.provider.as_deref(), Some("custom-b"));
+    assert_eq!(
+        stale_config.deepseek_base_url(),
+        "http://127.0.0.1:18182/v1"
+    );
+}
+
+#[test]
+fn session_load_keeps_idless_custom_record_on_root_when_table_coexists() {
+    let mut config =
+        named_custom_session_config("custom", "http://127.0.0.1:18182/v1", "table-model");
+    config.base_url = Some("http://127.0.0.1:18181/v1".to_string());
+    config.default_text_model = Some("legacy-root-model".to_string());
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "current conversation"));
+    let mut session = saved_session_with_messages(vec![
+        text_message("user", "legacy custom conversation"),
+        text_message("assistant", "legacy reply"),
+    ]);
+    session.metadata.model_provider = "custom".to_string();
+    session.metadata.model_provider_id = None;
+    session.metadata.model = "legacy-saved-model".to_string();
+
+    let recovered = apply_loaded_session(&mut app, &mut config, &session)
+        .expect("id-less custom record must retain root provenance");
+    assert!(!recovered);
+    assert_eq!(app.api_messages, session.messages);
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_eq!(app.provider_identity_for_persistence(), "custom");
+    assert_eq!(app.provider_id_for_persistence(), None);
+    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18181/v1");
+    assert!(
+        config
+            .providers
+            .as_ref()
+            .is_none_or(|providers| !providers.custom.contains_key("custom"))
+    );
+}
+
+#[test]
+fn session_load_rejects_exact_custom_table_record_when_only_root_remains() {
+    let mut config = Config {
+        provider: Some("custom".to_string()),
+        base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+        default_text_model: Some("legacy-root-model".to_string()),
+        ..Config::default()
+    };
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "current conversation"));
+    let previous_messages = app.api_messages.clone();
+    let previous_identity = app.provider_identity_for_persistence().to_string();
+
+    let mut session = saved_session_with_messages(vec![
+        text_message("user", "exact table conversation"),
+        text_message("assistant", "exact table reply"),
+    ]);
+    session.metadata.model_provider = "custom".to_string();
+    session.metadata.model_provider_id = Some("custom".to_string());
+    session.metadata.model = "table-model".to_string();
+
+    let error = apply_loaded_session(&mut app, &mut config, &session)
+        .expect_err("exact table record must not fall back to root");
+    assert!(error.contains("[providers.custom]"), "{error}");
+    assert!(error.contains("will not fall back"), "{error}");
+    assert_eq!(app.api_messages, previous_messages);
+    assert_eq!(app.provider_identity_for_persistence(), previous_identity);
+}
+
+#[test]
+fn session_load_rejects_empty_custom_id_when_root_and_table_coexist() {
+    let mut config =
+        named_custom_session_config("custom", "http://127.0.0.1:18182/v1", "table-model");
+    config.base_url = Some("http://127.0.0.1:18181/v1".to_string());
+    config.default_text_model = Some("legacy-root-model".to_string());
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "current conversation"));
+    app.set_provider_identity(ApiProvider::Deepseek, "deepseek");
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    let previous_messages = app.api_messages.clone();
+    let previous_provider = app.api_provider;
+    let previous_identity = app.provider_identity_for_persistence().to_string();
+    let previous_provider_id = app.provider_id_for_persistence().map(str::to_string);
+    let previous_model = app.model.clone();
+    let previous_config_provider = config.provider.clone();
+
+    let mut session = saved_session_with_messages(vec![
+        text_message("user", "malformed custom conversation"),
+        text_message("assistant", "must never load"),
+    ]);
+    session.metadata.model_provider = "custom".to_string();
+    session.metadata.model_provider_id = Some("   ".to_string());
+    session.metadata.model = "legacy-root-model".to_string();
+
+    let error = apply_loaded_session(&mut app, &mut config, &session)
+        .expect_err("an explicit empty id must not load either custom route");
+    assert!(error.contains("empty exact provider id"), "{error}");
+    assert_eq!(app.api_messages, previous_messages);
+    assert_eq!(app.api_provider, previous_provider);
+    assert_eq!(app.provider_identity_for_persistence(), previous_identity);
+    assert_eq!(
+        app.provider_id_for_persistence().map(str::to_string),
+        previous_provider_id
+    );
+    assert_eq!(app.model, previous_model);
+    assert_eq!(config.provider, previous_config_provider);
+    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18182/v1");
+}
+
+#[test]
+fn file_load_respawns_engine_when_same_custom_identity_changes_endpoint() {
+    let workspace = PathBuf::from("/tmp/atomic-file-load-same-custom");
+    let mut stale_config =
+        named_custom_session_config("custom-a", "http://127.0.0.1:18181/v1", "model-a");
+    let mut fresh_config =
+        named_custom_session_config("custom-a", "http://127.0.0.1:18199/v1", "model-a");
+    let fresh_entry = fresh_config
+        .providers
+        .as_mut()
+        .expect("providers")
+        .custom
+        .get_mut("custom-a")
+        .expect("custom A");
+    fresh_entry.api_key = Some("rotated-key".to_string());
+    fresh_entry.http_headers = Some(std::collections::HashMap::from([(
+        "X-Route-Version".to_string(),
+        "fresh".to_string(),
+    )]));
+
+    let mut app = create_test_app();
+    app.workspace.clone_from(&workspace);
+    app.set_provider_identity(ApiProvider::Custom, "custom-a");
+    app.set_model_selection("model-a".to_string());
+    let mut session = saved_session_with_messages(vec![text_message("user", "new endpoint")]);
+    session.metadata.model_provider = "custom-a".to_string();
+    session.metadata.model = "model-a".to_string();
+    session.metadata.workspace = workspace;
+
+    let (_, respawn) = apply_loaded_session_config_snapshot(
+        &mut app,
+        &mut stale_config,
+        &session,
+        fresh_config,
+        true,
+    )
+    .expect("same-key fresh config should load atomically");
+
+    assert!(respawn, "file loads must install the fresh engine config");
+    assert_eq!(app.provider_identity_for_persistence(), "custom-a");
+    assert_eq!(
+        stale_config.deepseek_base_url(),
+        "http://127.0.0.1:18199/v1"
+    );
+    let entry = stale_config
+        .provider_config_for(ApiProvider::Custom)
+        .expect("fresh custom route");
+    assert_eq!(entry.api_key.as_deref(), Some("rotated-key"));
+    assert_eq!(
+        entry
+            .http_headers
+            .as_ref()
+            .and_then(|headers| headers.get("X-Route-Version"))
+            .map(String::as_str),
+        Some("fresh")
+    );
+}
+
+#[test]
+fn file_load_route_refresh_preserves_effective_permission_and_feature_overlays() {
+    let workspace = PathBuf::from("/tmp/atomic-file-load-policy");
+    let mut effective_config =
+        named_custom_session_config("custom-a", "http://127.0.0.1:18181/v1", "model-a");
+    effective_config.approval_policy = Some("never".to_string());
+    effective_config.sandbox_mode = Some("read-only".to_string());
+    effective_config.allow_shell = Some(false);
+    effective_config.max_subagents = Some(1);
+    effective_config.features = Some(crate::features::FeaturesToml {
+        entries: std::collections::BTreeMap::from([
+            ("shell_tool".to_string(), false),
+            ("subagents".to_string(), false),
+        ]),
+    });
+
+    let mut raw_disk_config =
+        named_custom_session_config("custom-a", "http://127.0.0.1:18199/v1", "model-a");
+    raw_disk_config.approval_policy = Some("always".to_string());
+    raw_disk_config.sandbox_mode = Some("danger-full-access".to_string());
+    raw_disk_config.allow_shell = Some(true);
+    raw_disk_config.max_subagents = Some(64);
+    raw_disk_config.features = Some(crate::features::FeaturesToml {
+        entries: std::collections::BTreeMap::from([
+            ("shell_tool".to_string(), true),
+            ("subagents".to_string(), true),
+        ]),
+    });
+
+    let mut app = create_test_app();
+    app.workspace.clone_from(&workspace);
+    app.set_provider_identity(ApiProvider::Custom, "custom-a");
+    app.set_model_selection("model-a".to_string());
+    let mut session = saved_session_with_messages(vec![text_message("user", "keep policy")]);
+    session.metadata.model_provider = "custom-a".to_string();
+    session.metadata.model = "model-a".to_string();
+    session.metadata.workspace = workspace;
+
+    let (_, respawn) = apply_loaded_session_config_snapshot(
+        &mut app,
+        &mut effective_config,
+        &session,
+        raw_disk_config,
+        true,
+    )
+    .expect("fresh route plus effective policy should load");
+
+    assert!(respawn);
+    assert_eq!(
+        effective_config.deepseek_base_url(),
+        "http://127.0.0.1:18199/v1"
+    );
+    assert_eq!(effective_config.approval_policy.as_deref(), Some("never"));
+    assert_eq!(effective_config.sandbox_mode.as_deref(), Some("read-only"));
+    assert_eq!(effective_config.allow_shell, Some(false));
+    assert_eq!(effective_config.max_subagents, Some(1));
+    let features = effective_config
+        .features
+        .expect("effective feature overlay");
+    assert_eq!(features.entries.get("shell_tool"), Some(&false));
+    assert_eq!(features.entries.get("subagents"), Some(&false));
+}
+
+#[test]
 fn session_picker_restore_rejects_active_turn_before_mutating() {
     let mut app = create_test_app();
     app.api_messages
@@ -10283,6 +12060,7 @@ async fn model_picker_persists_model_and_reasoning_effort() {
         &mut config,
         "deepseek-v4-pro".to_string(),
         None,
+        None,
         ReasoningEffort::High,
         "auto".to_string(),
         ReasoningEffort::Auto,
@@ -10323,6 +12101,137 @@ async fn model_picker_persists_model_and_reasoning_effort() {
 }
 
 #[tokio::test]
+async fn model_picker_switches_between_exact_named_custom_routes() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "custom-a");
+    app.set_model_selection("model-a".to_string());
+    let previous_effort = app.reasoning_effort;
+    let mut custom = HashMap::new();
+    for (name, base_url, model) in [
+        ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+        ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+    ] {
+        custom.insert(
+            name.to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                api_key: Some("local-test-key".to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    // Opening custom B's model picker retargets only Config; App/engine still
+    // own A until the operator applies a model.
+    let mut config = Config {
+        provider: Some("custom-b".to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut engine = mock_engine_handle();
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "model-b".to_string(),
+        None,
+        Some("custom-b".to_string()),
+        ReasoningEffort::High,
+        "model-a".to_string(),
+        previous_effort,
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_eq!(app.provider_identity_for_persistence(), "custom-b");
+    assert_eq!(app.model_selection_for_persistence(), "model-b");
+    assert_eq!(config.provider.as_deref(), Some("custom-b"));
+    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18182/v1");
+}
+
+#[tokio::test]
+async fn model_picker_auto_switches_exact_named_custom_route_transactionally() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "custom-a");
+    app.set_model_selection("model-a".to_string());
+    let previous_effort = app.reasoning_effort;
+    let mut custom = HashMap::new();
+    for (name, base_url, model) in [
+        ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+        ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+    ] {
+        custom.insert(
+            name.to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                api_key: Some("local-test-key".to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    let mut config = Config {
+        provider: Some("custom-b".to_string()),
+        providers: Some(ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut engine = mock_engine_handle();
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "auto".to_string(),
+        None,
+        Some("custom-b".to_string()),
+        ReasoningEffort::Auto,
+        "model-a".to_string(),
+        previous_effort,
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_eq!(app.provider_identity_for_persistence(), "custom-b");
+    assert!(app.auto_model);
+    assert_eq!(app.model_selection_for_persistence(), "auto");
+    assert_eq!(config.provider.as_deref(), Some("custom-b"));
+    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18182/v1");
+}
+
+#[test]
+fn dismissing_named_custom_model_picker_restores_app_owned_config_route() {
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Custom, "custom-a");
+    let mut config =
+        named_custom_session_config("custom-a", "http://127.0.0.1:18181/v1", "model-a");
+    config.providers.as_mut().expect("providers").custom.insert(
+        "custom-b".to_string(),
+        ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("http://127.0.0.1:18182/v1".to_string()),
+            model: Some("model-b".to_string()),
+            ..Default::default()
+        },
+    );
+    config.provider = Some("custom-b".to_string());
+
+    sync_config_provider_from_app(&mut config, &app);
+
+    assert_eq!(config.provider.as_deref(), Some("custom-a"));
+}
+
+#[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn model_picker_skips_setup_receipt_when_settings_persistence_fails() {
     let _lock = crate::test_support::lock_test_env();
@@ -10352,6 +12261,7 @@ async fn model_picker_skips_setup_receipt_when_settings_persistence_fails() {
         &mut engine.handle,
         &mut config,
         "deepseek-v4-pro".to_string(),
+        None,
         None,
         ReasoningEffort::High,
         "auto".to_string(),
@@ -12059,6 +13969,75 @@ fn fallback_switch_status_shows_one_based_position_and_reason() {
 }
 
 #[tokio::test]
+async fn failed_fallback_restores_exact_literal_custom_identity_without_root_crossover() {
+    let mut config = Config {
+        provider: Some("custom".to_string()),
+        api_key: Some("legacy-root-key".to_string()),
+        base_url: Some("http://127.0.0.1:18180/v1".to_string()),
+        default_text_model: Some("legacy-root-model".to_string()),
+        providers: Some(ProvidersConfig {
+            custom: HashMap::from([(
+                "custom".to_string(),
+                ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    api_key: Some("literal-table-key".to_string()),
+                    base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+                    model: Some("literal-table-model".to_string()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let previous_identity = ProviderIdentity {
+        provider: ApiProvider::Custom,
+        key: "custom".to_string(),
+        exact_id: Some("custom".to_string()),
+    };
+    let mut app = create_test_app();
+    app.set_provider_identity_record(previous_identity.clone());
+    app.set_model_selection("literal-table-model".to_string());
+    // Mirror `apply_engine_error_to_app`: the fallback chain has advanced the
+    // enum while the previous exact route remains the rollback authority.
+    app.api_provider = ApiProvider::Openrouter;
+    let mut engine = mock_engine_handle();
+    let previous_chain = app.provider_chain.clone();
+
+    apply_provider_fallback_switch(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ProviderFallbackRollback {
+            identity: previous_identity.clone(),
+            chain: previous_chain,
+        },
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_eq!(app.provider_identity_for_persistence(), "custom");
+    assert_eq!(app.provider_id_for_persistence(), Some("custom"));
+    let (restored_identity, restored_config) = app_scoped_runtime_config(&app, &config);
+    assert_eq!(restored_identity, previous_identity);
+    let route = resolve_runtime_route_for_identity(
+        &restored_config,
+        &restored_identity,
+        Some("literal-table-model"),
+    )
+    .expect("restored identity must still resolve the exact literal table");
+    assert_eq!(route.identity.exact_id.as_deref(), Some("custom"));
+    assert_eq!(
+        route.candidate.endpoint.base_url,
+        "http://127.0.0.1:18181/v1"
+    );
+    assert_ne!(
+        route.candidate.endpoint.base_url,
+        "http://127.0.0.1:18180/v1"
+    );
+}
+
+#[tokio::test]
 async fn provider_switch_auth_error_restores_previous_provider_and_model() {
     use crate::error_taxonomy::ErrorEnvelope;
 
@@ -12545,10 +14524,7 @@ fn accidental_queue_edit_while_loading_is_labeled_and_recoverable() {
 
 #[test]
 fn build_pending_input_preview_includes_current_context_chips() {
-    let tmpdir = TempDir::new().expect("tempdir");
-    std::fs::write(tmpdir.path().join("guide.md"), "hello").expect("write");
     let mut app = create_test_app();
-    app.workspace = tmpdir.path().to_path_buf();
     app.input = "Read @guide.md and @missing.md".to_string();
     app.cursor_position = app.input.chars().count();
 
@@ -12558,16 +14534,22 @@ fn build_pending_input_preview_includes_current_context_chips() {
         preview
             .context_items
             .iter()
-            .any(|item| item.kind == "file" && item.label == "guide.md" && item.included),
-        "file mention preview missing: {:?}",
+            .any(|item| item.kind == "mention"
+                && item.label == "guide.md"
+                && !item.included
+                && item.detail.as_deref() == Some("resolved on send")),
+        "neutral mention preview missing: {:?}",
         preview.context_items
     );
     assert!(
         preview
             .context_items
             .iter()
-            .any(|item| item.kind == "missing" && item.label == "missing.md" && !item.included),
-        "missing mention preview missing: {:?}",
+            .any(|item| item.kind == "mention"
+                && item.label == "missing.md"
+                && !item.included
+                && item.detail.as_deref() == Some("resolved on send")),
+        "unresolved mention preview missing: {:?}",
         preview.context_items
     );
 }

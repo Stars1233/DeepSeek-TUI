@@ -2,8 +2,8 @@
 //!
 //! Replaces the old six-column config matrix (#3791). Fleet is presented as an
 //! agent team: the shortest valid path is role → provider/model → save/apply.
-//! The review step shows resolved provider, model, auth/readiness, scope, and
-//! overwrite consequences once before anything is written. Thinking defaults to
+//! The review step shows resolved provider, model, auth/readiness, profile
+//! availability, and overwrite consequences once before anything is written. Thinking defaults to
 //! inherit and can be adjusted on the review step without an extra wizard
 //! screen. "Save profile" persists the exact rendered TOML bytes.
 //!
@@ -26,12 +26,13 @@ use ratatui::{
 };
 
 use crate::config::Config;
+use crate::fleet::profile::FleetProfileScope;
 use crate::localization::{MessageId, tr};
 use crate::palette;
 use crate::tui::app::App;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
-    render_modal_footer, render_modal_surface, truncate_view_text,
+    render_modal_footer_with_gutter, render_modal_surface, truncate_view_text,
 };
 
 const PROFILE_DIR: &str = ".codewhale/agents";
@@ -160,7 +161,7 @@ const THINKING_CHOICES: &[Choice] = &[
     },
     Choice {
         label: Cow::Borrowed("auto"),
-        summary: Cow::Borrowed("Let CodeWhale choose"),
+        summary: Cow::Borrowed("Let Codewhale choose"),
         description: Cow::Borrowed("Choose a thinking tier from the worker prompt at runtime."),
     },
 ];
@@ -187,20 +188,19 @@ pub struct FleetSetupSnapshot {
     /// config / project), so the wizard can say when a chosen role would
     /// override an existing roster member.
     roster_members: Vec<(String, String)>,
-    /// `(canonical provider id, model id, readiness label, selectable)` routes for a worker,
+    /// `(exact provider id, model id, readiness label, selectable)` routes for a worker,
     /// drawn from ALL configured providers — not only the active one (#4093).
     /// Shown after `inherit` in the Model step so a Fleet worker can be pinned
     /// to a route independent of the parent/current provider. The provider id
-    /// is the canonical [`crate::config::ApiProvider::as_str`] identifier
-    /// (e.g. `"deepseek"`), not a display label — see
-    /// [`cross_provider_model_routes`].
+    /// is a canonical built-in id or the exact named custom table key, not a
+    /// display label — see [`cross_provider_model_routes`].
     available_models: Vec<(String, String, String, bool)>,
 }
 
 impl FleetSetupSnapshot {
     #[must_use]
     pub fn from_app(app: &App, config: &Config) -> Self {
-        let provider = app.api_provider.display_name().to_string();
+        let provider = app.effective_route_identity_display().0;
         let model = if app.auto_model {
             app.last_effective_model
                 .as_deref()
@@ -260,10 +260,9 @@ impl FleetSetupSnapshot {
 /// so the Model step must offer the same cross-provider catalog the model
 /// picker does, instead of the active provider's models alone.
 ///
-/// The provider id here is the canonical [`crate::config::ApiProvider::as_str`]
-/// identifier (e.g. `"deepseek"`), not a display label — this is the exact
-/// value persisted into the saved profile's `provider` field and read back by
-/// the loader (#4093), so it must round-trip through `ApiProvider::parse`.
+/// The provider id here is the exact non-secret configured route key. Built-ins
+/// use their canonical id; named custom routes keep their table key so saved
+/// Fleet profiles can rebuild the same child client.
 /// Callers derive a human-readable label from it for UI text.
 fn cross_provider_model_routes(
     config: &Config,
@@ -271,40 +270,93 @@ fn cross_provider_model_routes(
     health: &crate::provider_readiness::ProviderReadinessSnapshot,
 ) -> Vec<(String, String, String, bool)> {
     let mut routes = Vec::new();
-    for provider in crate::provider_lake::configured_providers(config, active) {
-        // The bundled lake is only the baseline. A user may pin a valid
-        // provider-specific preview or private deployment outside that
-        // catalog, and Fleet must offer the same saved route that `/model`
-        // preserves. Keep saved/active models first, then append the lake.
-        let mut models = Vec::new();
-        if let Some(model) = config
-            .provider_config_for(provider)
-            .and_then(|entry| entry.model.as_deref())
-        {
-            push_unique_model(&mut models, model);
-        }
-        if provider == active {
-            let active_model = config.default_model();
-            if !active_model.trim().eq_ignore_ascii_case("auto") {
-                push_unique_model(&mut models, &active_model);
-            }
-        }
-        for model in crate::provider_lake::models_for_provider(config, active, provider) {
-            push_unique_model(&mut models, &model);
-        }
+    let configured = crate::provider_lake::configured_providers(config, active);
+    let legacy_custom_configured = configured.contains(&crate::config::ApiProvider::Custom);
+    for provider in configured
+        .into_iter()
+        .filter(|provider| *provider != crate::config::ApiProvider::Custom)
+    {
+        append_provider_model_routes(
+            &mut routes,
+            config,
+            active,
+            provider,
+            provider.as_str(),
+            health,
+        );
+    }
 
-        for model in models {
-            let readiness =
-                crate::provider_readiness::resolve_for_model(config, provider, &model, health);
-            routes.push((
-                provider.as_str().to_string(),
-                model,
-                readiness.label().into_owned(),
-                readiness.can_attempt(),
-            ));
-        }
+    // `ApiProvider::Custom` is an enum class, not a route identity. Enumerate
+    // every named custom table so a Fleet on custom A can still pin a worker
+    // to custom B and persist B's exact client route.
+    let mut custom_names = config
+        .providers
+        .as_ref()
+        .map(|providers| providers.custom.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    custom_names.sort();
+    if custom_names.is_empty() && legacy_custom_configured {
+        append_provider_model_routes(
+            &mut routes,
+            config,
+            active,
+            crate::config::ApiProvider::Custom,
+            crate::config::ApiProvider::Custom.as_str(),
+            health,
+        );
+    }
+    for name in custom_names {
+        let mut named_config = config.clone();
+        named_config.provider = Some(name.clone());
+        append_provider_model_routes(
+            &mut routes,
+            &named_config,
+            active,
+            crate::config::ApiProvider::Custom,
+            &name,
+            health,
+        );
     }
     routes
+}
+
+fn append_provider_model_routes(
+    routes: &mut Vec<(String, String, String, bool)>,
+    config: &Config,
+    active: crate::config::ApiProvider,
+    provider: crate::config::ApiProvider,
+    provider_id: &str,
+    health: &crate::provider_readiness::ProviderReadinessSnapshot,
+) {
+    // The bundled lake is only the baseline. A user may pin a valid
+    // provider-specific preview or private deployment outside that catalog.
+    let mut models = Vec::new();
+    if let Some(model) = config
+        .provider_config_for(provider)
+        .and_then(|entry| entry.model.as_deref())
+    {
+        push_unique_model(&mut models, model);
+    }
+    if provider == active {
+        let active_model = config.default_model();
+        if !active_model.trim().eq_ignore_ascii_case("auto") {
+            push_unique_model(&mut models, &active_model);
+        }
+    }
+    for model in crate::provider_lake::models_for_provider(config, active, provider) {
+        push_unique_model(&mut models, &model);
+    }
+
+    for model in models {
+        let readiness =
+            crate::provider_readiness::resolve_for_model(config, provider, &model, health);
+        routes.push((
+            provider_id.to_string(),
+            model,
+            readiness.label().into_owned(),
+            readiness.can_attempt(),
+        ));
+    }
 }
 
 fn push_unique_model(models: &mut Vec<String>, model: &str) {
@@ -318,12 +370,11 @@ fn push_unique_model(models: &mut Vec<String>, model: &str) {
     }
 }
 
-/// Human-readable label for a canonical provider id, falling back to the raw
-/// id verbatim when it doesn't parse (defensive — every id this module hands
-/// out itself comes from [`crate::config::ApiProvider::as_str`], so this only
-/// matters for a foreign/stale id read back from an old snapshot).
+/// Human-readable label for a built-in provider id, falling back to an exact
+/// named custom id verbatim.
 fn provider_display_label(provider_id: &str) -> String {
     crate::config::ApiProvider::parse(provider_id)
+        .filter(|provider| provider.as_str() == provider_id)
         .map(|provider| provider.display_name().to_string())
         .unwrap_or_else(|| provider_id.to_string())
 }
@@ -345,6 +396,7 @@ pub struct FleetSetupView {
     role_idx: usize,
     model_idx: usize,
     thinking_idx: usize,
+    profile_scope: FleetProfileScope,
     review_scroll: usize,
     /// A model-drafted profile awaiting save (already sanitized and
     /// bounded by the untrusted gate). Cleared when the selection changes so
@@ -410,6 +462,7 @@ impl FleetSetupView {
             role_idx: 0,
             model_idx: 0,
             thinking_idx: 0,
+            profile_scope: FleetProfileScope::Project,
             review_scroll: 0,
             model_draft: None,
             model_draft_label: None,
@@ -454,7 +507,11 @@ impl FleetSetupView {
                 .replace("{name}", &draft.file_name())
                 .replace("{model_label}", &model_label),
         );
-        let content = format!("{header}{}", draft.render_toml());
+        let content = format!(
+            "{}{}",
+            self.scope_preview_header(header),
+            draft.render_toml()
+        );
         self.model_draft = Some(draft);
         self.model_draft_label = Some(model_label);
         self.model_draft_preview = Some(content.clone());
@@ -476,7 +533,17 @@ impl FleetSetupView {
             .roster_members
             .iter()
             .find(|(id, _)| *id == role)
-            .map(|(id, origin)| format!("Overrides the {origin} '{id}' roster member."))
+            .map(|(id, origin)| {
+                if self.profile_scope == FleetProfileScope::Personal && origin == "project" {
+                    format!(
+                        "The project '{id}' profile remains higher precedence; this personal profile applies elsewhere."
+                    )
+                } else if self.profile_scope == FleetProfileScope::Personal {
+                    format!("Overrides the {origin} '{id}' roster member outside projects with a project-specific override.")
+                } else {
+                    format!("Overrides the {origin} '{id}' roster member.")
+                }
+            })
     }
 
     /// The concrete model chosen for this worker, written to the profile
@@ -507,6 +574,10 @@ impl FleetSetupView {
     fn selected_thinking_label(&self) -> String {
         self.selected_reasoning_effort()
             .unwrap_or_else(|| format!("inherit ({})", self.snapshot.reasoning))
+    }
+
+    fn scope_preview_header(&self, header: String) -> String {
+        header.replacen(PROFILE_DIR, self.profile_scope.display_dir(), 1)
     }
 
     /// Number of selectable rows on the current step (0 on the review step).
@@ -604,9 +675,13 @@ impl FleetSetupView {
         let draft = self.starter_profile_draft();
         let header = tr(self.snapshot.locale, MessageId::FleetPreviewHeader)
             .replace("{name}", &draft.file_name());
-        self.model_draft_preview = Some(format!("{header}{}", draft.render_toml()));
+        self.model_draft_preview = Some(format!(
+            "{}{}",
+            self.scope_preview_header(header),
+            draft.render_toml()
+        ));
         self.model_draft = Some(draft);
-        self.model_draft_label = Some("CodeWhale starter".to_string());
+        self.model_draft_label = Some("Codewhale starter".to_string());
         self.review_scroll = 0;
         ViewAction::None
     }
@@ -655,6 +730,7 @@ impl FleetSetupView {
             }
             Step::Review => {
                 hints.push(ActionHint::new("↑/↓", "scroll"));
+                hints.push(ActionHint::new("s", "save location"));
                 hints.push(ActionHint::new("t", "thinking"));
                 if self.model_draft.is_some() {
                     hints.push(ActionHint::new("Enter", "Save profile"));
@@ -719,6 +795,12 @@ impl ModalView for FleetSetupView {
                 self.move_down();
                 ViewAction::None
             }
+            KeyCode::Char('s') if self.step == Step::Review => {
+                self.profile_scope = self.profile_scope.toggled();
+                self.discard_model_draft();
+                self.review_scroll = 0;
+                ViewAction::None
+            }
             KeyCode::Char('t') if self.step == Step::Review => {
                 self.thinking_idx = (self.thinking_idx + 1) % THINKING_CHOICES.len();
                 self.discard_model_draft();
@@ -743,7 +825,10 @@ impl ModalView for FleetSetupView {
             }
             KeyCode::Char('g') if self.step == Step::Review => match self.model_draft.clone() {
                 Some(draft) => {
-                    ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft })
+                    ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested {
+                        draft,
+                        scope: self.profile_scope,
+                    })
                 }
                 None => ViewAction::None,
             },
@@ -757,6 +842,7 @@ impl ModalView for FleetSetupView {
                     Some(draft) => {
                         ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested {
                             draft,
+                            scope: self.profile_scope,
                         })
                     }
                     None => ViewAction::None,
@@ -782,7 +868,15 @@ impl ModalView for FleetSetupView {
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
         self.row_hitboxes.borrow_mut().clear();
-        let popup_area = centered_modal_area(area, 96, 30, 60, 16);
+        // Choice steps have a bounded list/detail body and should not expand
+        // into a tall empty card on roomy terminals. Review is proof-dense and
+        // scrollable, so it keeps the extra row budgeted for the footer gutter.
+        let preferred_height = match self.step {
+            Step::Role => 21,
+            Step::Model => 22,
+            Step::Review => 31,
+        };
+        let popup_area = centered_modal_area(area, 96, preferred_height, 60, 16);
         render_modal_surface(area, popup_area, buf);
 
         let step_no = match self.step {
@@ -813,7 +907,7 @@ impl ModalView for FleetSetupView {
         block.render(popup_area, buf);
 
         let hints = self.footer_hints();
-        let content = render_modal_footer(inner, buf, &hints);
+        let content = render_modal_footer_with_gutter(inner, buf, &hints);
 
         // Header (intro + breadcrumb) above the step body.
         let chunks = Layout::default()
@@ -880,7 +974,7 @@ impl FleetSetupView {
             ),
             Step::Review => (
                 "Review & save",
-                "Confirm provider, model, readiness, scope, and overwrite, then save the profile.",
+                "Confirm provider, model, readiness, profile availability, and overwrite, then save the profile.",
             ),
         };
         let lines = vec![
@@ -909,7 +1003,7 @@ impl FleetSetupView {
         }
 
         let role = &ROLES[self.role_idx.min(ROLES.len() - 1)];
-        let (profile_value, _) = profile_file_status(&self.snapshot.workspace);
+        let (profile_value, _) = profile_file_status(self.profile_scope, &self.snapshot.workspace);
         let file_stem = profile_file_stem(&role.label);
         let mut lines: Vec<Line> = Vec::new();
         let section = |lines: &mut Vec<Line>, label: &str, body: String| {
@@ -973,6 +1067,19 @@ impl FleetSetupView {
         section(&mut lines, "Thinking", self.selected_thinking_label());
         section(
             &mut lines,
+            "Profile availability",
+            match self.profile_scope {
+                FleetProfileScope::Project => format!(
+                    "Project — saved with this repository at {PROFILE_DIR}. Press s for a personal profile reusable across repositories. This choice only controls where the profile is available; active workspace, trusted-path, and permission policy still govern execution."
+                ),
+                FleetProfileScope::Personal => format!(
+                    "Personal — reusable across repositories at {}. Project profiles still override it by id. This choice grants no filesystem authority; active workspace, trusted-path, and permission policy still govern execution. Press s for project availability.",
+                    self.profile_scope.display_dir()
+                ),
+            },
+        );
+        section(
+            &mut lines,
             "Auth & readiness",
             if self.snapshot.provider_ready {
                 "Active route can be attempted with the current credentials.".to_string()
@@ -1021,7 +1128,8 @@ impl FleetSetupView {
             &mut lines,
             "Profile",
             format!(
-                "{PROFILE_DIR}/{file_stem}.toml  ·  {profile_value} present. Preview shows the exact starter profile; nothing is written until you save.",
+                "{}/{file_stem}.toml  ·  {profile_value} present. Preview shows the exact starter profile; nothing is written until you save.",
+                self.profile_scope.display_dir(),
             ),
         );
 
@@ -1200,12 +1308,21 @@ fn choice_window_start(total: usize, selected: usize, visible: usize) -> usize {
         .min(total.saturating_sub(visible))
 }
 
-fn profile_file_status(workspace: &Path) -> (String, String) {
-    let dir = workspace.join(PROFILE_DIR);
+fn profile_file_status(scope: FleetProfileScope, workspace: &Path) -> (String, String) {
+    let dir = match crate::fleet::profile::agent_profile_dir_for_scope(scope, workspace) {
+        Ok(dir) => dir,
+        Err(err) => {
+            return (
+                "blocked".to_string(),
+                format!("profile save location unavailable: {err:#}"),
+            );
+        }
+    };
+    let display_dir = scope.display_dir();
     if !dir.exists() {
         return (
             "0 files".to_string(),
-            format!("create {PROFILE_DIR}/*.toml"),
+            format!("create {display_dir}/*.toml"),
         );
     }
     if !dir.is_dir() {
@@ -1223,9 +1340,9 @@ fn profile_file_status(workspace: &Path) -> (String, String) {
         .count();
 
     if count == 1 {
-        ("1 file".to_string(), PROFILE_DIR.to_string())
+        ("1 file".to_string(), display_dir.to_string())
     } else {
-        (format!("{count} files"), PROFILE_DIR.to_string())
+        (format!("{count} files"), display_dir.to_string())
     }
 }
 
@@ -1250,7 +1367,7 @@ mod tests {
     use crossterm::event::KeyModifiers;
     use unicode_width::UnicodeWidthStr;
 
-    const BLOCKER_SIZES: [(u16, u16); 4] = [(80, 24), (100, 30), (120, 32), (160, 40)];
+    const BLOCKER_SIZES: [(u16, u16); 5] = [(80, 24), (89, 50), (100, 30), (120, 32), (160, 40)];
 
     fn snapshot() -> FleetSetupSnapshot {
         FleetSetupSnapshot {
@@ -1303,6 +1420,13 @@ mod tests {
             panic!("sample draft should parse");
         };
         draft
+    }
+
+    #[test]
+    fn provider_display_label_preserves_case_colliding_custom_ids() {
+        assert_eq!(provider_display_label("deepseek"), "DeepSeek");
+        assert_eq!(provider_display_label("CUSTOM"), "CUSTOM");
+        assert_eq!(provider_display_label("OPENAI"), "OPENAI");
     }
 
     fn to_review(view: &mut FleetSetupView) {
@@ -1418,11 +1542,12 @@ mod tests {
 
         // And ratifying commits exactly that route.
         let action = view.handle_key(key(KeyCode::Char('g')));
-        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
             action
         else {
             panic!("expected ratify commit event");
         };
+        assert_eq!(scope, FleetProfileScope::Project);
         assert_eq!(draft.provider.as_deref(), Some("zai"));
         assert_eq!(draft.model.as_deref(), Some("glm-5.2"));
         assert_eq!(draft.reasoning_effort.as_deref(), Some("max"));
@@ -1446,11 +1571,12 @@ mod tests {
         assert!(content.contains("Nothing is saved until"), "{content}");
 
         let action = view.handle_key(key(KeyCode::Char('g')));
-        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
             action
         else {
             panic!("expected ratify commit event");
         };
+        assert_eq!(scope, FleetProfileScope::Project);
         assert_eq!(draft.id, "reviewer");
     }
 
@@ -1576,7 +1702,7 @@ mod tests {
     fn profile_status_distinguishes_fresh_and_existing_workspaces() {
         let temp = tempfile::tempdir().expect("temp workspace");
         assert_eq!(
-            profile_file_status(temp.path()),
+            profile_file_status(FleetProfileScope::Project, temp.path()),
             (
                 "0 files".to_string(),
                 "create .codewhale/agents/*.toml".to_string()
@@ -1588,7 +1714,7 @@ mod tests {
         std::fs::write(profile_dir.join("reviewer.toml"), "id = \"reviewer\"\n")
             .expect("existing profile");
         assert_eq!(
-            profile_file_status(temp.path()),
+            profile_file_status(FleetProfileScope::Project, temp.path()),
             ("1 file".to_string(), PROFILE_DIR.to_string())
         );
     }
@@ -1637,16 +1763,45 @@ mod tests {
         // `g` ratifies directly from this same view — no Esc-then-g round
         // trip through a separate pager required.
         let action = view.handle_key(key(KeyCode::Char('g')));
-        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
             action
         else {
             panic!("expected ratified starter draft");
         };
+        assert_eq!(scope, FleetProfileScope::Project);
         assert_eq!(draft.id, "builder");
         assert_eq!(draft.role_hint, "builder");
         assert_eq!(draft.model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(draft.provider.as_deref(), Some("deepseek"));
         assert_eq!(draft.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn review_can_target_a_personal_cross_repository_profile() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        to_review(&mut view);
+
+        assert_eq!(view.profile_scope, FleetProfileScope::Project);
+        view.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(view.profile_scope, FleetProfileScope::Personal);
+
+        view.handle_key(key(KeyCode::Enter));
+        let preview = view
+            .model_draft_preview
+            .as_deref()
+            .expect("personal preview");
+        assert!(
+            preview.contains("# $CODEWHALE_HOME/agents/manager.toml"),
+            "{preview}"
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { scope, .. }) =
+            action
+        else {
+            panic!("expected personal profile save event");
+        };
+        assert_eq!(scope, FleetProfileScope::Personal);
     }
 
     #[test]
@@ -1820,6 +1975,100 @@ mod tests {
     }
 
     #[test]
+    fn fleet_routes_and_saved_draft_keep_exact_named_custom_provider() {
+        let mut custom = std::collections::HashMap::new();
+        for (name, base_url, model) in [
+            ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+            ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+        ] {
+            custom.insert(
+                name.to_string(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    base_url: Some(base_url.to_string()),
+                    model: Some(model.to_string()),
+                    api_key: Some("local-test-key".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        let config = Config {
+            provider: Some("custom-a".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let routes = cross_provider_model_routes(
+            &config,
+            crate::config::ApiProvider::Custom,
+            &crate::provider_readiness::ProviderReadinessSnapshot::default(),
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|(provider, model, _, _)| { provider == "custom-a" && model == "model-a" })
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|(provider, model, _, _)| { provider == "custom-b" && model == "model-b" })
+        );
+        assert!(
+            !routes
+                .iter()
+                .any(|(provider, _, _, _)| provider == "custom")
+        );
+
+        let mut view = FleetSetupView::from_snapshot(FleetSetupSnapshot {
+            available_models: routes,
+            provider: "custom-a".to_string(),
+            model: "model-a".to_string(),
+            ..snapshot()
+        });
+        let route = view
+            .model_routes
+            .iter()
+            .find(|(provider, model)| provider == "custom-b" && model == "model-b")
+            .cloned()
+            .expect("custom B route selectable while A is active");
+        let draft = sample_draft();
+        let (_, rendered) =
+            view.install_model_draft(draft, "model-b".to_string(), Some(route), None);
+        assert!(rendered.contains("provider = \"custom-b\""), "{rendered}");
+    }
+
+    #[test]
+    fn fleet_routes_keep_legacy_literal_custom_without_named_tables() {
+        let config = Config {
+            provider: Some("custom".to_string()),
+            base_url: Some("http://127.0.0.1:18080/v1".to_string()),
+            api_key: Some("local-test-key".to_string()),
+            default_text_model: Some("legacy-custom-model".to_string()),
+            ..Default::default()
+        };
+
+        let routes = cross_provider_model_routes(
+            &config,
+            crate::config::ApiProvider::Custom,
+            &crate::provider_readiness::ProviderReadinessSnapshot::default(),
+        );
+
+        assert!(
+            routes
+                .iter()
+                .any(|(provider, model, readiness, selectable)| {
+                    provider == "custom"
+                        && model == "legacy-custom-model"
+                        && readiness == "local · not checked"
+                        && *selectable
+                }),
+            "{routes:?}"
+        );
+    }
+
+    #[test]
     fn role_step_keeps_list_and_detail_separate_at_80_columns() {
         let rows = render_through_stack(|| FleetSetupView::from_snapshot(snapshot()), 80, 24);
         let text = rows.join("\n");
@@ -1930,7 +2179,81 @@ mod tests {
     }
 
     #[test]
-    fn review_lists_model_permissions_tools_and_scope() {
+    fn review_at_cursor_size_keeps_content_and_actions_apart() {
+        let rows = render_through_stack(
+            || {
+                let mut view = FleetSetupView::from_snapshot(snapshot());
+                view.step = Step::Review;
+                view
+            },
+            89,
+            50,
+        );
+        let popup = centered_modal_area(Rect::new(0, 0, 89, 50), 96, 31, 60, 16);
+        let review_row = rows
+            .iter()
+            .position(|row| row.contains("Review & save"))
+            .expect("review heading");
+        let review_col = rows[review_row]
+            .chars()
+            .position(|ch| ch == 'R')
+            .expect("review heading column") as u16;
+        assert!(
+            review_col >= popup.x.saturating_add(2),
+            "body copy must not touch the popup border: {:?}",
+            rows[review_row]
+        );
+
+        let action_row = rows
+            .iter()
+            .rposition(|row| row.contains("cancel"))
+            .expect("footer cancel action");
+        let footer_row = rows[..action_row]
+            .iter()
+            .rposition(|row| row.contains("scroll"))
+            .expect("footer shortcut row");
+        assert!(footer_row > 0);
+        let gutter = rows[footer_row - 1]
+            .chars()
+            .skip(usize::from(popup.x.saturating_add(1)))
+            .take(usize::from(popup.width.saturating_sub(2)))
+            .collect::<String>();
+        assert!(
+            gutter.trim().is_empty(),
+            "review body needs a quiet row before the action rail: {gutter:?}"
+        );
+    }
+
+    #[test]
+    fn choice_steps_at_cursor_size_stay_content_sized() {
+        for (step, expected_height) in [(Step::Role, 21usize), (Step::Model, 22usize)] {
+            let rows = render_through_stack(
+                || {
+                    let mut view = FleetSetupView::from_snapshot(snapshot());
+                    view.step = step;
+                    view
+                },
+                89,
+                50,
+            );
+            let top = rows
+                .iter()
+                .position(|row| row.contains("Fleet setup — your agent team"))
+                .expect("fleet setup title");
+            let bottom = rows
+                .iter()
+                .rposition(|row| row.contains("Step "))
+                .expect("fleet setup step receipt");
+            assert_eq!(
+                bottom - top + 1,
+                expected_height,
+                "choice card should follow its content instead of filling the 89x50 frame"
+            );
+        }
+    }
+
+    #[test]
+    fn review_lists_model_permissions_tools_and_profile_availability() {
         // Top of the review: the leading sections are visible without scrolling.
         let top = render_through_stack(
             || {
@@ -1942,12 +2265,23 @@ mod tests {
             40,
         )
         .join("\n");
-        for section in ["Role", "Model", "Auth & readiness", "Permissions", "Tools"] {
+        for section in [
+            "Role",
+            "Model",
+            "Profile availability",
+            "Auth & readiness",
+            "Permissions",
+            "Tools",
+        ] {
             assert!(top.contains(section), "review missing section: {section}");
         }
+        assert!(
+            top.contains("trusted-path, and permission policy still govern execution"),
+            "profile availability must not imply execution authority: {top}"
+        );
 
         // The review is intentionally scrollable; scrolling to the bottom reveals
-        // the workspace/org scope, review policy, and the honest save note.
+        // the workspace/org execution policy, review policy, and honest save note.
         let bottom = render_through_stack(
             || {
                 let mut v = FleetSetupView::from_snapshot(snapshot());

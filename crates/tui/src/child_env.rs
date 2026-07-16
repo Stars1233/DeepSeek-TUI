@@ -218,6 +218,13 @@ fn is_allowed_parent_env_key(key: &OsStr) -> bool {
             // piped instead of attached to a Windows console (#4202).
             | "PYTHONIOENCODING"
             | "PYTHONUTF8"
+            // Rustup installs `cargo`/`rustc` as shims and resolves the real
+            // toolchain through these non-secret bootstrap paths. Dropping
+            // them makes an otherwise working Rust toolchain unusable in
+            // official Rust containers and other non-default installations.
+            | "CARGO_HOME"
+            | "RUSTUP_HOME"
+            | "RUSTUP_TOOLCHAIN"
     ) || normalized.starts_with("LC_")
         // .NET CLI / SDK configuration (DOTNET_ROOT, DOTNET_CLI_*,
         // DOTNET_NOLOGO, DOTNET_CLI_TELEMETRY_OPTOUT, …). Paths and flags
@@ -660,6 +667,21 @@ mod tests {
             assert!(
                 is_allowed_parent_env_key(OsStr::new(key)),
                 "child env allowlist should include Python stdio encoding key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_env_allowlist_includes_rust_toolchain_bootstrap_keys() {
+        for key in [
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "RUSTUP_TOOLCHAIN",
+            "cargo_home",
+        ] {
+            assert!(
+                is_allowed_parent_env_key(OsStr::new(key)),
+                "child env allowlist should include Rust bootstrap key {key}"
             );
         }
     }

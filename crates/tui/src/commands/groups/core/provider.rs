@@ -82,9 +82,13 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
             // canonical map (DeepSeek, GLM via Z.ai/Zhipu, Kimi, MiniMax, …) and
             // an id matching none passes through unchanged — the upstream API is
             // the authority. Wire-id translation is deferred to the route
-            // resolver at request time, so `/provider` stores canonical names.
+            // resolver at request time. DeepSeek's two retiring aliases are
+            // also deferred because this command does not own the target base
+            // URL: a custom endpoint may still use either id natively.
             let expanded = expand_model_alias_for_provider(target, raw);
-            if provider_passes_model_through(target) {
+            if provider_passes_model_through(target)
+                || is_route_ambiguous_deepseek_alias(target, &expanded)
+            {
                 Some(expanded)
             } else {
                 match canonical_model_id_for_provider(target, &expanded) {
@@ -107,6 +111,14 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
         provider: target,
         model,
     })
+}
+
+fn is_route_ambiguous_deepseek_alias(provider: ApiProvider, model: &str) -> bool {
+    matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+    ) && (model.eq_ignore_ascii_case("deepseek-chat")
+        || model.eq_ignore_ascii_case("deepseek-reasoner"))
 }
 
 fn provider_fallback(app: &mut App, subcommand: Option<&str>) -> CommandResult {
@@ -140,7 +152,10 @@ fn provider_fallback(app: &mut App, subcommand: Option<&str>) -> CommandResult {
             }
 
             let mut lines = vec![
-                format!("Current provider: {}", app.api_provider.as_str()),
+                format!(
+                    "Current provider: {}",
+                    app.provider_identity_for_persistence()
+                ),
                 "Fallback chain:".to_string(),
             ];
             for (index, provider, is_current) in entries {
@@ -619,6 +634,118 @@ mod tests {
             }
             other => panic!("expected SwitchProvider action, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn direct_deepseek_provider_commands_retire_aliases_at_official_wire_boundary() {
+        let mut app = create_test_app();
+        app.api_provider = ApiProvider::Openrouter;
+
+        for provider_name in ["deepseek", "deepseek-cn", "deepseek-anthropic"] {
+            for alias in ["deepseek-chat", "deepseek-reasoner"] {
+                let result = provider(&mut app, Some(&format!("{provider_name} {alias}")));
+                match result.action {
+                    Some(AppAction::SwitchProvider { provider, model }) => {
+                        assert!(matches!(
+                            provider,
+                            ApiProvider::Deepseek
+                                | ApiProvider::DeepseekCN
+                                | ApiProvider::DeepseekAnthropic
+                        ));
+                        assert_eq!(model.as_deref(), Some(alias));
+                        let official_base_url = match provider {
+                            ApiProvider::Deepseek => crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+                            ApiProvider::DeepseekCN => crate::config::DEFAULT_DEEPSEEKCN_BASE_URL,
+                            ApiProvider::DeepseekAnthropic => {
+                                crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
+                            }
+                            _ => unreachable!("asserted direct DeepSeek provider"),
+                        };
+                        assert_eq!(
+                            crate::config::wire_model_for_provider_route(
+                                provider,
+                                official_base_url,
+                                model.as_deref().expect("command model"),
+                            ),
+                            crate::config::DEEPSEEK_ALIAS_REPLACEMENT
+                        );
+                        app.reasoning_effort = crate::tui::app::ReasoningEffort::Max;
+                        app.reasoning_effort_explicit = false;
+                        app.apply_provider_switch_reasoning_effort(
+                            provider,
+                            official_base_url,
+                            model.as_deref(),
+                        );
+                        assert_eq!(
+                            app.reasoning_effort,
+                            if alias == "deepseek-chat" {
+                                crate::tui::app::ReasoningEffort::Off
+                            } else {
+                                crate::tui::app::ReasoningEffort::High
+                            },
+                            "{provider:?} {alias}"
+                        );
+                    }
+                    other => panic!("expected SwitchProvider action, got {other:?}"),
+                }
+            }
+        }
+
+        let wanjie = provider(&mut app, Some("wanjie-ark deepseek-reasoner"));
+        assert!(matches!(
+            wanjie.action,
+            Some(AppAction::SwitchProvider {
+                provider: ApiProvider::WanjieArk,
+                model: Some(ref model),
+            }) if model == "deepseek-reasoner"
+        ));
+    }
+
+    #[test]
+    fn provider_command_preserves_alias_owned_by_custom_deepseek_endpoint() {
+        let mut app = create_test_app();
+        app.model_ids_passthrough = true;
+
+        let result = provider(&mut app, Some("deepseek deepseek-reasoner"));
+        let Some(AppAction::SwitchProvider { provider, model }) = result.action else {
+            panic!("expected SwitchProvider action");
+        };
+        let model = model.expect("command model");
+
+        assert_eq!(provider, ApiProvider::Deepseek);
+        assert_eq!(model, "deepseek-reasoner");
+        assert_eq!(
+            crate::config::wire_model_for_provider_route(
+                provider,
+                "https://models.example/v1",
+                &model,
+            ),
+            "deepseek-reasoner"
+        );
+        app.reasoning_effort = crate::tui::app::ReasoningEffort::Max;
+        app.reasoning_effort_explicit = false;
+        app.apply_provider_switch_reasoning_effort(
+            provider,
+            "https://models.example/v1",
+            Some(&model),
+        );
+        assert_eq!(
+            app.reasoning_effort,
+            crate::tui::app::ReasoningEffort::Max,
+            "custom endpoint owns alias semantics"
+        );
+
+        app.reasoning_effort_explicit = true;
+        app.apply_provider_switch_reasoning_effort(
+            provider,
+            crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            Some(&model),
+        );
+        assert_eq!(
+            app.reasoning_effort,
+            crate::tui::app::ReasoningEffort::Max,
+            "explicit effort must beat compatibility inference"
+        );
     }
 
     #[test]

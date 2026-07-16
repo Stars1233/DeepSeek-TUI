@@ -283,7 +283,6 @@ fn live_row(row: &super::live_projection::LiveWorkRow, attention_hold: bool) -> 
                     .then_some(SidebarRowAction::CancelAgent { agent_id }),
             )
         }
-        super::live_projection::LiveWorkKind::Workflow => (None, None),
         _ => (
             Some(SidebarRowAction::Command(open)),
             stoppable

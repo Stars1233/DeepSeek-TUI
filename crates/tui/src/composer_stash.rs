@@ -1,7 +1,7 @@
 //! Parked-draft stash for the composer (#440).
 //!
 //! A stash is a side-channel from history: it holds drafts the user
-//! parked deliberately (Ctrl+S) instead of submissions made in the
+//! parked deliberately (Ctrl+G or Ctrl+S) instead of submissions made in the
 //! past (which live in `composer_history.rs`). Pop semantics make it
 //! a LIFO — the most recent stash comes back first.
 //!
@@ -88,7 +88,7 @@ fn load_stash_from(path: &Path) -> Vec<StashedDraft> {
 }
 
 /// Push a new draft onto the stash. Empty / whitespace-only text
-/// is silently dropped so a stray Ctrl+S on an empty composer
+/// is silently dropped so a stray stash shortcut on an empty composer
 /// doesn't pollute the file. Failures are logged but never
 /// propagated — stash is a UX nicety, not a correctness concern.
 pub fn push_stash(text: &str) {

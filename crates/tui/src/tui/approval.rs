@@ -3192,7 +3192,7 @@ diff --git a/src/b.rs b/src/b.rs
         // The selection prose moved into the per-option key badges; the footer
         // keeps only the escape-hatch hints.
         assert!(
-            joined.contains("full params"),
+            joined.contains("Pg↑/↓ review"),
             "footer controls hint missing:\n{joined}"
         );
         assert!(joined.contains("read_file"));
@@ -3200,7 +3200,7 @@ diff --git a/src/b.rs b/src/b.rs
 
     #[test]
     fn approval_footer_hints_use_muted_contrast_tier() {
-        // #3380: the footer key hints ("v: full params · Esc: abort") must
+        // #3380: the footer key hints ("Pg↑/↓ review · v details · Esc abort") must
         // render one contrast tier above TEXT_HINT — TEXT_MUTED, the same
         // color the app-wide ActionHint modal footers use for labels.
         use crate::palette;
@@ -3212,7 +3212,7 @@ diff --git a/src/b.rs b/src/b.rs
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
         ModalView::render(&view, Rect::new(0, 0, w, h), &mut buf);
 
-        let target: Vec<String> = "full params".chars().map(|c| c.to_string()).collect();
+        let target: Vec<String> = "Pg↑/↓ review".chars().map(|c| c.to_string()).collect();
         let mut found = None;
         for y in 0..h {
             let symbols: Vec<String> = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
@@ -3245,7 +3245,7 @@ diff --git a/src/b.rs b/src/b.rs
         );
         assert_approval_key_badges_visible(&joined);
         assert!(
-            joined.contains("full params"),
+            joined.contains("Pg↑/↓ review"),
             "footer controls hint missing:\n{joined}"
         );
         assert!(
@@ -3300,7 +3300,7 @@ diff --git a/src/b.rs b/src/b.rs
             "routine write must not use the destructive zh badge:\n{joined}"
         );
         assert!(
-            joined.contains("v：完整参数"),
+            joined.contains("Pg↑/↓回看"),
             "missing zh footer controls hint:\n{joined}"
         );
         assert!(
@@ -3311,6 +3311,31 @@ diff --git a/src/b.rs b/src/b.rs
             joined.contains("仅本次批准"),
             "missing zh approve option:\n{joined}"
         );
+    }
+
+    #[test]
+    fn approval_review_and_save_hints_stay_on_one_row_at_80_columns() {
+        for &locale in Locale::shipped() {
+            let view = ApprovalView::new_for_locale(destructive_request(), locale);
+            let lines = render_lines(&view, 80, 40);
+            let review_rows = lines
+                .iter()
+                .filter(|line| line.contains("Pg↑/↓"))
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                review_rows.len(),
+                1,
+                "expected one approval review-hint row for {locale:?}:\n{}",
+                lines.join("\n")
+            );
+            let controls = review_rows[0];
+            assert!(
+                controls.contains("Esc") && controls.contains(" s "),
+                "review, abort, and save-rule hints wrapped for {locale:?}:\n{}",
+                lines.join("\n")
+            );
+        }
     }
 
     #[test]

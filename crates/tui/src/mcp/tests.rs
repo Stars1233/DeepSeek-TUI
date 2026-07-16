@@ -1096,6 +1096,29 @@ impl McpTransport for HangingValueTransport {
     }
 }
 
+struct ScriptedThenHangingTransport {
+    sent: Arc<Mutex<Vec<serde_json::Value>>>,
+    responses: VecDeque<Vec<u8>>,
+}
+
+#[async_trait::async_trait]
+impl McpTransport for ScriptedThenHangingTransport {
+    async fn send(&mut self, msg: Vec<u8>) -> Result<()> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&msg)?);
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>> {
+        match self.responses.pop_front() {
+            Some(response) => Ok(response),
+            None => std::future::pending().await,
+        }
+    }
+}
+
 struct DropCountingTransport {
     drops: Arc<AtomicUsize>,
 }
@@ -1153,6 +1176,8 @@ fn test_connection(transport: Box<dyn McpTransport>) -> McpConnection {
         request_id: AtomicU64::new(1),
         state: ConnectionState::Ready,
         config: test_server_config(),
+        server_capabilities: None,
+        discovery_timeout: Duration::from_secs(default_connect_timeout()),
         read_timeout_secs: default_read_timeout(),
         cancel_token: tokio_util::sync::CancellationToken::new(),
     }
@@ -1451,6 +1476,178 @@ async fn discover_tools_sorts_by_name_for_cache_stability() {
     );
 }
 
+#[test]
+fn mcp_tool_description_formatter_is_one_line_and_unicode_safe() {
+    let long_cjk = format!("{}\n这行不应显示", "鲸".repeat(81));
+    assert_eq!(
+        format_mcp_tool_description(Some(&long_cjk)),
+        format!(": {}...", "鲸".repeat(80))
+    );
+    assert_eq!(
+        format_mcp_tool_description(Some("第一行\r\n第二行")),
+        ": 第一行"
+    );
+    assert_eq!(format_mcp_tool_description(Some("  \nignored")), "");
+    assert_eq!(format_mcp_tool_description(None), "");
+}
+
+#[tokio::test]
+async fn discover_all_honors_tools_only_server_capabilities() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedValueTransport {
+        sent: Arc::clone(&sent),
+        responses: VecDeque::from([
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {"name": "tools-only", "version": "1.0.0"},
+                    "capabilities": {"tools": {}}
+                }
+            })),
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "tools": [{"name": "idea_search", "inputSchema": {}}]
+                }
+            })),
+        ]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+
+    conn.initialize().await.expect("initialize");
+    conn.discover_all().await.expect("discover tools");
+
+    assert_eq!(conn.tools.len(), 1);
+    assert!(conn.resources.is_empty());
+    assert!(conn.resource_templates.is_empty());
+    assert!(conn.prompts.is_empty());
+    let methods: Vec<_> = sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message.get("method").and_then(|method| method.as_str()))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        methods,
+        ["initialize", "notifications/initialized", "tools/list"]
+    );
+}
+
+#[tokio::test]
+async fn discover_all_populates_every_advertised_capability() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedValueTransport {
+        sent: Arc::clone(&sent),
+        responses: VecDeque::from([
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {"name": "full", "version": "1.0.0"},
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}}
+                }
+            })),
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"tools": [{"name": "search", "inputSchema": {}}]}
+            })),
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": {"resources": [{"uri": "file:///readme", "name": "readme"}]}
+            })),
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "result": {
+                    "resourceTemplates": [{"uriTemplate": "file:///{path}", "name": "file"}]
+                }
+            })),
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "result": {"prompts": [{"name": "review"}]}
+            })),
+        ]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+
+    conn.initialize().await.expect("initialize");
+    conn.discover_all().await.expect("discover all");
+
+    assert_eq!(conn.tools.len(), 1);
+    assert_eq!(conn.resources.len(), 1);
+    assert_eq!(conn.resource_templates.len(), 1);
+    assert_eq!(conn.prompts.len(), 1);
+    let methods: Vec<_> = sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message.get("method").and_then(|method| method.as_str()))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "notifications/initialized",
+            "tools/list",
+            "resources/list",
+            "resources/templates/list",
+            "prompts/list",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn legacy_optional_discovery_hangs_are_bounded_and_fail_soft() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedThenHangingTransport {
+        sent: Arc::clone(&sent),
+        responses: VecDeque::from([json_frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": [{"name": "search", "inputSchema": {}}]}
+        }))]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+    conn.discovery_timeout = Duration::from_millis(60);
+
+    let started = tokio::time::Instant::now();
+    conn.discover_all()
+        .await
+        .expect("hung optional methods must not fail discovery");
+
+    assert_eq!(conn.tools.len(), 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "optional discovery exceeded its bounded budget: {:?}",
+        started.elapsed()
+    );
+    let methods: Vec<_> = sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message.get("method").and_then(|method| method.as_str()))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "tools/list",
+            "resources/list",
+            "resources/templates/list",
+            "prompts/list",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn mcp_pool_call_tool_preserves_tool_names_with_dashes() {
     let sent = Arc::new(Mutex::new(Vec::new()));
@@ -1707,6 +1904,11 @@ async fn discover_all_ignores_unsupported_optional_capabilities() {
         ]),
     };
     let mut conn = test_connection(Box::new(transport));
+    conn.server_capabilities = Some(McpServerCapabilities {
+        tools: true,
+        resources: true,
+        prompts: true,
+    });
 
     conn.discover_all().await.expect("discover");
 
@@ -1715,6 +1917,51 @@ async fn discover_all_ignores_unsupported_optional_capabilities() {
     assert!(conn.resources.is_empty());
     assert!(conn.resource_templates.is_empty());
     assert!(conn.prompts.is_empty());
+    let methods: Vec<_> = sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message.get("method").and_then(|method| method.as_str()))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "tools/list",
+            "resources/list",
+            "resources/templates/list",
+            "prompts/list",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn discover_all_keeps_advertised_tool_discovery_required() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedValueTransport {
+        sent,
+        responses: VecDeque::from([json_frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32601, "message": "tools not supported"}
+        }))]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+    conn.server_capabilities = Some(McpServerCapabilities {
+        tools: true,
+        resources: false,
+        prompts: false,
+    });
+
+    let error = conn
+        .discover_all()
+        .await
+        .expect_err("advertised tools/list failure must fail discovery");
+
+    assert!(
+        error.to_string().contains("MCP error in 'tools/list'"),
+        "unexpected error: {error:#}"
+    );
 }
 
 /// #1244: when an MCP stdio server fails to spawn, the underlying OS
@@ -2744,7 +2991,7 @@ async fn streamable_http_stale_session_reconnects_and_retries_tool_call() {
                 let result = match method {
                     "initialize" => serde_json::json!({
                         "protocolVersion": "2024-11-05",
-                        "capabilities": {}
+                        "capabilities": {"tools": {}, "resources": {}, "prompts": {}}
                     }),
                     "tools/list" => serde_json::json!({
                         "tools": [
@@ -3015,7 +3262,7 @@ async fn legacy_sse_closed_stream_reconnects_and_retries_tool_call() {
                 let result = match method {
                     "initialize" => serde_json::json!({
                         "protocolVersion": "2024-11-05",
-                        "capabilities": {}
+                        "capabilities": {"tools": {}, "resources": {}, "prompts": {}}
                     }),
                     "tools/list" => serde_json::json!({
                         "tools": [

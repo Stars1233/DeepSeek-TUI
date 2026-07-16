@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::io::{self, Stdout, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{
     Arc, LazyLock,
@@ -52,8 +52,8 @@ use crate::client::{
 use crate::commands;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::config::{
-    ApiProvider, Config, ProviderConfig, ProvidersConfig, StatusItem, UpdateConfig,
-    save_provider_auth_mode_for_at,
+    ApiProvider, Config, ProviderConfig, ProviderIdentity, ProvidersConfig, StatusItem,
+    UpdateConfig, save_provider_auth_mode_for_at,
 };
 use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
@@ -65,7 +65,9 @@ use crate::localization::{MessageId, tr};
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
 use crate::palette;
 use crate::prompts;
-use crate::route_runtime::{resolve_route_candidate, resolve_runtime_route};
+use crate::route_runtime::{
+    resolve_route_candidate, resolve_runtime_route, resolve_runtime_route_for_identity,
+};
 use crate::session_manager::{
     OfflineQueueState, QueuedSessionMessage, SavedSession, SessionManager,
     create_saved_session_with_id_and_mode, create_saved_session_with_mode,
@@ -207,10 +209,10 @@ const TOOL_HANG_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(600);
 // the per-tool spinner pulse — keep this fast enough that the whale-spout
 // braille pattern reads as continuous motion instead of teleport-frames.
 const UI_STATUS_ANIMATION_MS: u64 = crate::tui::spinner::BRAILLE_SPINNER_FRAME_MS;
-/// Ambient fish and the completion wake need a smoother cadence than the
-/// deliberately legible status spinner. This remains modest enough for a
-/// terminal renderer while avoiding the five-frame-per-second "jump" seen
-/// whenever live status motion and ocean motion overlap.
+/// Ambient fish, the idle-mark caustic, and the completion wake use a modest
+/// ~12.5fps clock. Active markers run at 8fps; keeping the atmosphere on the
+/// faster clock makes diagonal color travel continuous without forcing the
+/// whole TUI onto a 30fps repaint loop.
 pub(crate) const UI_UNDERWATER_ANIMATION_MS: u64 = 80;
 // At an 80-column terminal the file tree owns 20 columns, leaving a 60-column
 // chat host. Keep a compact 20-column sidebar plus a 40-column transcript.
@@ -251,6 +253,62 @@ fn is_session_approved_for_tool(app: &App, tool_name: &str, grouping_key: &str) 
 
 fn is_session_denied_for_key(app: &App, approval_key: &str) -> bool {
     app.approval_session_denied.contains(approval_key)
+}
+
+fn session_denied_notice(app: &App, tool_name: &str) -> String {
+    app.tr(MessageId::ApprovalAutoDeniedSession)
+        .replace("{tool}", tool_name)
+}
+
+fn surface_session_denied_notice(app: &mut App, tool_name: &str) {
+    let notice = session_denied_notice(app, tool_name);
+    app.status_message = Some(notice.clone());
+    app.push_status_toast(notice.clone(), StatusToastLevel::Warning, Some(12_000));
+
+    // Tool completion and turn completion can replace the one-line status
+    // before the next frame is painted. Keep the recovery path in the
+    // transcript as a settled receipt as well, where it survives that event
+    // ordering and remains available to screen readers and scrollback.
+    let latest_transcript_cell = app
+        .active_cell
+        .as_ref()
+        .and_then(|cell| cell.entries().last())
+        .or_else(|| app.history.last());
+    let already_latest_receipt = matches!(
+        latest_transcript_cell,
+        Some(HistoryCell::System { content }) if content == &notice
+    );
+    if !already_latest_receipt {
+        let receipt = HistoryCell::System { content: notice };
+        if let Some(active_cell) = app.active_cell.as_mut() {
+            // Never grow committed history underneath an active cell: tool
+            // lookup indices address `history ++ active_cell`, so changing
+            // history.len() mid-turn would retarget the pending completion.
+            active_cell.push_untracked(receipt);
+            app.bump_active_cell_revision();
+        } else {
+            app.add_message(receipt);
+        }
+    }
+}
+
+async fn auto_deny_session_approval(
+    app: &mut App,
+    engine_handle: &EngineHandle,
+    id: &str,
+    tool_name: &str,
+    approval_key: &str,
+) {
+    log_sensitive_event(
+        "tool.approval.auto_deny_session",
+        serde_json::json!({
+            "tool_name": tool_name,
+            "approval_key": approval_key,
+            "session_id": app.current_session_id,
+        }),
+    );
+    let _ = engine_handle.deny_tool_call(id.to_string()).await;
+    surface_session_denied_notice(app, tool_name);
 }
 
 fn should_auto_approve_approval_request(
@@ -822,7 +880,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
     };
     if use_alt_screen {
         execute!(stdout, EnterAlternateScreen)?;
-        // Windows also suppresses CodeWhale's own verbose CLI logger while
+        // Windows also suppresses Codewhale's own verbose CLI logger while
         // the alt-screen is active. The stderr redirect above catches raw
         // writes; this prevents the known verbose source at the origin.
         #[cfg(windows)]
@@ -1243,7 +1301,7 @@ fn execute_turn_end_observer_hook(
         context: &context,
         created_at: metadata.created_at,
         model_backed: metadata.route.is_some(),
-        provider: metadata.route.map(|route| route.provider.as_str()),
+        provider: metadata.route.map(|route| route.provider_identity.as_str()),
         billing_surface: metadata.route.and(billing_surface),
         model: metadata.route.map(|route| route.model.as_str()),
         turn_id: metadata.turn_id.as_ref(),
@@ -1614,7 +1672,16 @@ fn configured_instruction_sources(config: &Config) -> Vec<prompts::InstructionSo
         .collect()
 }
 
+#[cfg(test)]
 fn build_app_system_prompt(app: &App, config: &Config) -> SystemPrompt {
+    build_app_system_prompt_with_goal(app, config, app.hunt.quarry.as_deref())
+}
+
+fn build_app_system_prompt_with_goal(
+    app: &App,
+    config: &Config,
+    goal_objective: Option<&str>,
+) -> SystemPrompt {
     let instructions = configured_instruction_sources(config);
     prompts::system_prompt_for_mode_with_context_skills_and_session(
         &app.workspace,
@@ -1623,7 +1690,7 @@ fn build_app_system_prompt(app: &App, config: &Config) -> SystemPrompt {
         Some(&instructions),
         prompts::PromptSessionContext {
             user_memory_block: None,
-            goal_objective: app.hunt.quarry.as_deref(),
+            goal_objective,
             project_context_pack_enabled: config.project_context_pack_enabled(),
             locale_tag: app.ui_locale.tag(),
             translation_enabled: app.translation_enabled,
@@ -2189,7 +2256,7 @@ async fn run_event_loop(
         let mut subagent_list_refresh_requested = false;
         let mut queued_to_send: Option<QueuedMessage> = None;
         let mut respawn_after_provider_rollback: Option<String> = None;
-        let mut fallback_after_engine_error: Option<ApiProvider> = None;
+        let mut fallback_after_engine_error: Option<ProviderFallbackRollback> = None;
         {
             let mut rx = engine_handle.rx_event.write().await;
             let mut progress_redraw_agents: HashSet<String> = HashSet::new();
@@ -2722,17 +2789,18 @@ async fn run_event_loop(
                         app.session.last_prompt_cache_hit_tokens = usage.prompt_cache_hit_tokens;
                         app.session.last_prompt_cache_miss_tokens = usage.prompt_cache_miss_tokens;
                         app.session.last_reasoning_replay_tokens = usage.reasoning_replay_tokens;
-                        let (provider, model, auto_model) = completed_turn
+                        let (provider, provider_identity, model, auto_model) = completed_turn
                             .as_ref()
                             .and_then(|turn| turn.route.as_ref())
                             .map(|route| {
                                 (
                                     Some(route.provider),
+                                    Some(route.provider_identity.clone()),
                                     Some(route.model.clone()),
                                     route.auto_model,
                                 )
                             })
-                            .unwrap_or((None, None, false));
+                            .unwrap_or((None, None, None, false));
                         let effective_turn_provider = provider.unwrap_or(app.api_provider);
                         let effective_turn_model = model
                             .as_deref()
@@ -2754,6 +2822,7 @@ async fn run_event_loop(
                         }
                         app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
                             provider,
+                            provider_identity,
                             model,
                             auto_model,
                             input_tokens: usage.input_tokens,
@@ -3001,6 +3070,12 @@ async fn run_event_loop(
                         recoverable: _,
                     } => {
                         let provider_before_error = app.api_provider;
+                        let identity_before_error = ProviderIdentity {
+                            provider: provider_before_error,
+                            key: app.provider_identity_for_persistence().to_string(),
+                            exact_id: app.provider_id_for_persistence().map(str::to_string),
+                        };
+                        let fallback_chain_before_error = app.provider_chain.clone();
                         let (health_provider, health_model) =
                             error_health_route(app, provider_before_error);
                         app.provider_health.record_failure(
@@ -3016,7 +3091,14 @@ async fn run_event_loop(
                             ) && app.pending_provider_switch.is_some();
                         apply_engine_error_to_app(app, envelope);
                         if app.api_provider != provider_before_error && app.is_fallback_active() {
-                            fallback_after_engine_error = Some(provider_before_error);
+                            // Several queued errors can be drained together.
+                            // The first route remains the rollback authority;
+                            // later chain advances must not overwrite it with
+                            // an enum/key pair from the half-applied fallback.
+                            fallback_after_engine_error.get_or_insert(ProviderFallbackRollback {
+                                identity: identity_before_error,
+                                chain: fallback_chain_before_error,
+                            });
                         }
                         if rollback_after_auth_failure
                             && let Some(rollback_warning) =
@@ -3410,19 +3492,18 @@ async fn run_event_loop(
                     } => {
                         let session_denied = is_session_denied_for_key(app, &approval_key);
                         if session_denied {
-                            // The user already said no to this exact tool /
-                            // approval key in this session; auto-deny so the
+                            // The user already denied a matching approval key
+                            // during this process; auto-deny so the
                             // model's retry loop doesn't keep re-prompting
                             // (#360).
-                            log_sensitive_event(
-                                "tool.approval.auto_deny_session",
-                                serde_json::json!({
-                                    "tool_name": tool_name,
-                                    "approval_key": approval_key,
-                                    "session_id": app.current_session_id,
-                                }),
-                            );
-                            let _ = engine_handle.deny_tool_call(id.clone()).await;
+                            auto_deny_session_approval(
+                                app,
+                                &engine_handle,
+                                &id,
+                                &tool_name,
+                                &approval_key,
+                            )
+                            .await;
                         } else if should_auto_approve_approval_request(
                             app,
                             &tool_name,
@@ -3574,9 +3655,8 @@ async fn run_event_loop(
                 events_drained = events_drained.saturating_add(1);
             }
         }
-        if let Some(previous_provider) = fallback_after_engine_error {
-            apply_provider_fallback_switch(app, &mut engine_handle, config, previous_provider)
-                .await;
+        if let Some(rollback) = fallback_after_engine_error {
+            apply_provider_fallback_switch(app, &mut engine_handle, config, rollback).await;
         }
         if let Some(rollback_warning) = respawn_after_provider_rollback {
             let _ = engine_handle.send(Op::Shutdown).await;
@@ -3698,31 +3778,34 @@ async fn run_event_loop(
         // the empty water is large enough to earn it.
         let ombre_field_breathes = app.ocean_treatment.is_ombre()
             && crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some();
-        let ambient_life_visible = app.viewport.last_transcript_area.is_some_and(|area| {
-            area.width >= crate::tui::ocean::AMBIENT_MIN_WIDTH
-                && area.height >= crate::tui::ocean::AMBIENT_MIN_HEIGHT
-        });
         let browsing_history = !app.viewport.transcript_scroll.is_at_tail();
-        let underwater_ambient_motion = !app.low_motion
-            && app.fancy_animations
-            && app.ocean_treatment.supports_ambient_life()
-            && (ombre_field_breathes || ambient_life_visible)
-            && app.onboarding == OnboardingState::None
-            && !app.attention_hold_active()
+        let empty_water_visible = app.history.is_empty()
+            && app
+                .active_cell
+                .as_ref()
+                .is_none_or(crate::tui::active_cell::ActiveCell::is_empty)
+            && !app.is_loading;
+        // A paused terminal owns the eye. Modal/launch/onboarding visibility
+        // and attention stillness are centralized in the shell motion gate.
+        let underwater_surface_obscured = event_broker.is_paused();
+        let underwater_motion_visible = underwater_motion_surface_visible(
+            app.viewport.last_transcript_area,
+            ombre_field_breathes,
+            empty_water_visible,
+            underwater_surface_obscured,
+        );
+        let shell_motion_enabled = crate::tui::underwater::decorative_shell_motion_enabled(app);
+        let underwater_ambient_motion = shell_motion_enabled
+            && underwater_motion_visible
             && (browsing_history
                 || matches!(
                     crate::tui::underwater::ShellPhase::from_app(app),
                     crate::tui::underwater::ShellPhase::Working
                         | crate::tui::underwater::ShellPhase::Verifying
                 )
-                || (app.history.is_empty()
-                    && app
-                        .active_cell
-                        .as_ref()
-                        .is_none_or(crate::tui::active_cell::ActiveCell::is_empty)
-                    && !app.is_loading));
-        let underwater_completion_motion = !app.low_motion
-            && app.fancy_animations
+                || empty_water_visible);
+        let underwater_completion_motion = shell_motion_enabled
+            && !underwater_surface_obscured
             && matches!(app.runtime_turn_status.as_deref(), Some("completed"))
             && app
                 .ocean_completion_started_at
@@ -3813,6 +3896,12 @@ async fn run_event_loop(
         if let Some(tree) = app.file_tree.as_mut()
             && tree.poll_background()
         {
+            app.needs_redraw = true;
+        }
+        // Completion discovery is serialized off-thread. Polling is
+        // non-blocking and makes a finished initial `@` scan visible even
+        // after the user stops typing (#4365).
+        if crate::tui::file_mention::poll_background_mention_discovery(app) {
             app.needs_redraw = true;
         }
         // Expire the "Press Ctrl+C again to quit" prompt silently after its
@@ -3940,7 +4029,7 @@ async fn run_event_loop(
                     Err(err) => {
                         tracing::warn!(error = %err, "failed to restart terminal input pump");
                         app.push_status_toast(
-                            "Terminal input stalled; recovery failed. Restart CodeWhale if keys stop responding.",
+                            "Terminal input stalled; recovery failed. Restart Codewhale if keys stop responding.",
                             StatusToastLevel::Error,
                             None,
                         );
@@ -4242,6 +4331,14 @@ async fn run_event_loop(
             // PTY/raw-mode — and by some kitty-keyboard-protocol terminals —
             // to canonical Ctrl+C so the quit-arm flow always runs (#4090).
             normalize_raw_ctrl_c(&mut key);
+
+            // Approval is a decision boundary, not a viewport lock. Keep the
+            // card focused for its ordinary selection keys while letting the
+            // same transcript navigation used by the main shell review the
+            // evidence above it (#4371).
+            if handle_approval_transcript_key(app, &key) {
+                continue;
+            }
 
             // Decision card keyboard routing (v0.8.43 truth-surface).
             // When a card is active, number keys 1-9 select options,
@@ -4634,7 +4731,8 @@ async fn run_event_loop(
                 if app.view_stack.top_kind() == Some(ModalKind::Help) {
                     app.view_stack.pop();
                 } else {
-                    app.view_stack.push(HelpView::new_for_locale(app.ui_locale));
+                    app.view_stack
+                        .push(HelpView::new_for_shortcuts(app.ui_locale));
                 }
                 continue;
             }
@@ -4743,7 +4841,22 @@ async fn run_event_loop(
                     "Compacting context (Ctrl+L)...".to_string()
                 });
                 if !app.is_compacting {
-                    let _ = engine_handle.send(Op::CompactContext).await;
+                    match validated_app_runtime_route(app, config) {
+                        Ok(route) => {
+                            let compaction = compaction_for_validated_route(app, &route);
+                            let _ = engine_handle
+                                .send(Op::CompactContext {
+                                    route: Box::new(route.into_resolved()),
+                                    compaction: Box::new(compaction),
+                                })
+                                .await;
+                        }
+                        Err(err) => {
+                            app.status_message = Some(format!(
+                                "Cannot compact because the active provider route is invalid: {err}"
+                            ));
+                        }
+                    }
                 }
                 app.needs_redraw = true;
                 continue;
@@ -5776,16 +5889,20 @@ async fn run_event_loop(
                 {
                     app.delete_word_backward();
                 }
-                KeyCode::Char('s') | KeyCode::Char('S')
+                KeyCode::Char('s')
+                | KeyCode::Char('S')
+                | KeyCode::Char('g')
+                | KeyCode::Char('G')
                     if key.modifiers == KeyModifiers::CONTROL =>
                 {
-                    if send_ctrl_s_queued_message_now(app, config, &engine_handle).await? {
+                    if send_shortcut_queued_message_now(app, config, &engine_handle).await? {
                         continue;
                     }
-                    // #440: park the current draft to the persistent
-                    // stash and clear the composer. Empty composers
-                    // are a no-op so a stray Ctrl+S can't pollute the
-                    // file. Surface a toast so the user sees the
+                    // #440: park the current draft to the persistent stash and
+                    // clear the composer. Ctrl+G is the terminal-safe alias for
+                    // hosts such as Cursor/VS Code that reserve Ctrl+S for Save.
+                    // Empty composers are a no-op so a stray shortcut cannot
+                    // pollute the file. Surface a toast so the user sees the
                     // confirmation (no-op feels broken otherwise).
                     if !app.input.is_empty() {
                         crate::composer_stash::push_stash(&app.input);
@@ -5928,6 +6045,37 @@ fn decision_card_number_from_key(key: &event::KeyEvent) -> Option<usize> {
     }
 
     Some((c as u8 - b'1' + 1) as usize)
+}
+
+/// Let the transcript remain reviewable while an approval card owns focus.
+fn handle_approval_transcript_key(app: &mut App, key: &event::KeyEvent) -> bool {
+    if app.view_stack.top_kind() != Some(ModalKind::Approval) {
+        return false;
+    }
+
+    let page = app.viewport.last_transcript_visible.max(1);
+    match key.code {
+        KeyCode::PageUp => app.scroll_up(page),
+        KeyCode::PageDown => app.scroll_down(page),
+        KeyCode::Up
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+        {
+            app.scroll_up(3);
+        }
+        KeyCode::Down
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+        {
+            app.scroll_down(3);
+        }
+        KeyCode::Home => app.scroll_up(usize::MAX),
+        KeyCode::End => app.scroll_to_bottom(),
+        _ => return false,
+    }
+    true
 }
 
 /// Route only non-text controls to a focused workflow panel.
@@ -6171,7 +6319,7 @@ async fn handle_setup_constitution_model_draft(
     app.status_message = Some(match locale {
         crate::localization::Locale::ZhHans => {
             format!(
-                "{model_label} 正在起草宪法……（最多 {}s）",
+                "{model_label} 正在生成协作准则草案……（最多 {}s）",
                 DRAFT_TIMEOUT.as_secs()
             )
         }
@@ -6375,10 +6523,10 @@ fn deliver_fleet_draft_result(
                 if installed {
                     app.status_message = Some(match locale {
                         crate::localization::Locale::ZhHans => {
-                            format!("{model_label} 已起草配置。请查看下方 TOML，然后按 g 批准。")
+                            format!("{model_label} 已起草配置。请查看下方 TOML，然后按 g 保存。")
                         }
                         _ => format!(
-                            "{model_label} drafted the profile. Review the TOML below, then press g to ratify."
+                            "{model_label} drafted the profile. Review the TOML below, then press g to save."
                         ),
                     });
                 }
@@ -6444,7 +6592,9 @@ fn build_session_snapshot(
             .clone_from(&cached.parent_session_id);
         session.metadata.forked_from_message_count = cached.forked_from_message_count;
     }
-    session.metadata.model_provider = app.api_provider.as_str().to_string();
+    session
+        .metadata
+        .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     app.sync_cost_to_metadata(&mut session.metadata);
     session.context_references = app.session_context_references.clone();
     session.artifacts = app.session_artifacts.clone();
@@ -6941,11 +7091,20 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
     } = pending;
 
     *config = previous_config;
-    app.api_provider = previous_provider;
+    if let Ok(identity) = config.active_provider_identity(previous_provider) {
+        app.set_provider_identity_record(identity);
+    } else {
+        app.set_provider_identity(
+            previous_provider,
+            config.provider_identity_for(previous_provider),
+        );
+    }
     app.billing_presentation = crate::route_billing::for_route(config, previous_provider);
     app.set_model_selection(previous_model.clone());
-    app.provider_models
-        .insert(previous_provider.as_str().to_string(), previous_model);
+    app.provider_models.insert(
+        app.provider_identity_for_persistence().to_string(),
+        previous_model,
+    );
     app.model_ids_passthrough = previous_model_ids_passthrough;
     app.active_context_window_override = previous_context_window_override;
     app.active_route_limits = previous_route_limits;
@@ -6961,12 +7120,12 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
         crate::config_persistence::persist_root_string_key(
             app.config_path.as_deref(),
             "provider",
-            previous_provider.as_str(),
+            app.provider_identity_for_persistence(),
         )?;
         let mut settings = crate::settings::Settings::load_persisted()?;
-        settings.default_provider = Some(previous_provider.as_str().to_string());
+        settings.default_provider = Some(app.provider_identity_for_persistence().to_string());
         settings.set_model_for_provider(
-            previous_provider.as_str(),
+            app.provider_identity_for_persistence(),
             &app.model_selection_for_persistence(),
         );
         if matches!(
@@ -7327,7 +7486,7 @@ fn queue_current_draft_for_next_turn(app: &mut App) -> bool {
     true
 }
 
-fn take_ctrl_s_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<usize>)> {
+fn take_shortcut_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<usize>)> {
     if let Some(mut draft) = app.queued_draft.take() {
         if let Some(input) = app.submit_input() {
             draft.display = input;
@@ -7342,12 +7501,12 @@ fn take_ctrl_s_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<us
     None
 }
 
-async fn send_ctrl_s_queued_message_now(
+async fn send_shortcut_queued_message_now(
     app: &mut App,
     config: &Config,
     engine_handle: &EngineHandle,
 ) -> Result<bool> {
-    let Some((message, restore_index)) = take_ctrl_s_queued_message(app) else {
+    let Some((message, restore_index)) = take_shortcut_queued_message(app) else {
         return Ok(false);
     };
     send_taken_queued_message_now(app, config, engine_handle, message, restore_index).await?;
@@ -7526,45 +7685,84 @@ fn paused_command_note(title: &str, resume: bool) -> String {
         "The user is not resuming that paused command. Answer only the new message and do not continue the paused command."
     };
     format!(
-        "\n\nCodeWhale paused custom slash command context:\n\
+        "\n\nCodewhale paused custom slash command context:\n\
 Paused custom slash command: {title}\n\
 Paused command: {title}\n\
 {instruction}"
     )
 }
 
-fn prepare_paused_command_message(
-    app: &mut App,
-    engine_handle: &EngineHandle,
-    user_message: &str,
-) -> Option<String> {
-    if !app.paused && app.paused_quarry.is_none() {
-        engine_handle.set_paused(false);
-        return None;
+#[derive(Debug, Clone)]
+enum PausedCommandDispatch {
+    None,
+    ClearWithoutQuarry,
+    Resume { quarry: String, note: String },
+    Detach { note: String },
+}
+
+impl PausedCommandDispatch {
+    fn note(&self) -> Option<&str> {
+        match self {
+            Self::Resume { note, .. } | Self::Detach { note } => Some(note),
+            Self::None | Self::ClearWithoutQuarry => None,
+        }
     }
 
-    engine_handle.set_paused(false);
-    app.paused = false;
+    fn goal_objective(&self, app: &App) -> Option<String> {
+        match self {
+            Self::Resume { quarry, .. } => Some(quarry.clone()),
+            Self::Detach { .. } | Self::ClearWithoutQuarry => None,
+            Self::None => app.hunt.quarry.clone(),
+        }
+    }
+
+    fn apply(self, app: &mut App, engine_handle: &EngineHandle) {
+        engine_handle.set_paused(false);
+        match self {
+            Self::None => {}
+            Self::ClearWithoutQuarry => {
+                app.paused = false;
+                app.pausable = false;
+            }
+            Self::Resume { quarry, .. } => {
+                app.paused = false;
+                app.paused_quarry = None;
+                app.hunt.quarry = Some(quarry);
+                app.pausable = true;
+            }
+            Self::Detach { .. } => {
+                app.paused = false;
+                app.hunt.quarry = None;
+                app.hunt.tokens_used = 0;
+                app.hunt.time_used_seconds = 0;
+                app.hunt.continuation_count = 0;
+            }
+        }
+    }
+}
+
+fn plan_paused_command_message(app: &App, user_message: &str) -> PausedCommandDispatch {
+    if !app.paused && app.paused_quarry.is_none() {
+        return PausedCommandDispatch::None;
+    }
 
     let Some(quarry) = app
         .paused_quarry
         .clone()
         .or_else(|| app.hunt.quarry.clone())
     else {
-        app.pausable = false;
-        return None;
+        return PausedCommandDispatch::ClearWithoutQuarry;
     };
     let title = paused_quarry_title(&quarry).to_string();
     if is_resume_message(user_message) {
-        app.hunt.quarry = Some(app.paused_quarry.take().unwrap_or(quarry));
-        app.pausable = true;
-        Some(paused_command_note(&title, true))
+        PausedCommandDispatch::Resume {
+            quarry,
+            note: paused_command_note(&title, true),
+        }
     } else {
-        app.hunt.quarry = None;
-        app.hunt.tokens_used = 0;
-        app.hunt.time_used_seconds = 0;
-        app.hunt.continuation_count = 0;
-        Some(paused_command_note(&title, false))
+        PausedCommandDispatch::Detach {
+            note: paused_command_note(&title, false),
+        }
     }
 }
 
@@ -7590,6 +7788,46 @@ fn clear_paused_command_state(app: &mut App, engine_handle: &EngineHandle) {
     app.paused = false;
     app.paused_quarry = None;
     engine_handle.set_paused(false);
+}
+
+fn validated_app_runtime_route(
+    app: &App,
+    config: &Config,
+) -> Result<crate::route_runtime::ValidatedRuntimeRoute, String> {
+    let (identity, scoped) = app_scoped_runtime_config(app, config);
+    resolve_runtime_route_for_identity(&scoped, &identity, Some(&app.model))?.validate()
+}
+
+fn app_scoped_runtime_config(app: &App, config: &Config) -> (ProviderIdentity, Config) {
+    let identity = ProviderIdentity {
+        provider: app.api_provider,
+        key: app.provider_identity_for_persistence().to_string(),
+        exact_id: app.provider_id_for_persistence().map(str::to_string),
+    };
+    let mut scoped = config.clone();
+    scoped.scope_to_provider_identity(&identity);
+    (identity, scoped)
+}
+
+fn compaction_for_validated_route(
+    app: &App,
+    route: &crate::route_runtime::ValidatedRuntimeRoute,
+) -> crate::compaction::CompactionConfig {
+    app.compaction_config_for_route(
+        route.identity.provider,
+        &route.model,
+        crate::route_budget::known_route_limits(route.candidate.limits),
+    )
+}
+
+fn validated_profile_default_route(
+    config: &Config,
+) -> Result<crate::route_runtime::ValidatedRuntimeRoute> {
+    let provider = config.api_provider();
+    let model = config.default_model();
+    resolve_runtime_route(config, provider, Some(&model))
+        .and_then(crate::route_runtime::ResolvedRuntimeRoute::validate)
+        .map_err(anyhow::Error::msg)
 }
 
 async fn dispatch_user_message(
@@ -7628,18 +7866,10 @@ async fn dispatch_user_message(
         }
     }
 
-    let paused_note = prepare_paused_command_message(app, engine_handle, &message.display);
-
-    // Set immediately to prevent double-dispatch before TurnStarted event arrives.
-    let dispatch_started_at = Instant::now();
-    app.is_loading = true;
-    app.dispatch_started_at = Some(dispatch_started_at);
-    app.runtime_turn_status = None;
-    app.last_send_at = Some(dispatch_started_at);
-    app.last_submitted_prompt = Some(message.display.clone());
-    // Clear the previous turn's receipt and evidence.
-    app.clear_receipt();
-    app.tool_evidence.clear();
+    // Plan paused-command changes without touching App or the engine pause
+    // gate. Route selection can await and client preflight can fail; neither
+    // may resume or discard a paused command unless a turn is ready to send.
+    let paused_dispatch = plan_paused_command_message(app, &message.display);
 
     let cwd = std::env::current_dir().ok();
     let references = crate::tui::file_mention::context_references_from_input(
@@ -7648,11 +7878,14 @@ async fn dispatch_user_message(
         cwd.clone(),
     );
     let mut content = queued_message_content_for_app(app, &message, cwd);
-    if let Some(note) = paused_note.as_deref() {
+    if let Some(note) = paused_dispatch.note() {
         content.push_str(note);
     }
+    let (app_route_identity, route_config) = app_scoped_runtime_config(app, config);
     let auto_selection = if auto_router::should_resolve_auto_model_selection(app) {
-        match auto_router::resolve_auto_model_selection(app, config, &message, &content).await {
+        match auto_router::resolve_auto_model_selection(app, &route_config, &message, &content)
+            .await
+        {
             Ok(selection) => Some(selection),
             Err(err) => {
                 app.is_loading = false;
@@ -7669,41 +7902,6 @@ async fn dispatch_user_message(
         .as_ref()
         .map(|selection| selection.provider)
         .unwrap_or(app.api_provider);
-    let message_index = app.api_messages.len();
-    app.system_prompt = Some(build_app_system_prompt(app, config));
-    app.add_message(HistoryCell::User {
-        content: message.display.clone(),
-    });
-    let history_cell = app.history.len().saturating_sub(1);
-    app.record_context_references(history_cell, message_index, references);
-    app.scroll_to_bottom();
-    app.api_messages.push(Message {
-        role: "user".to_string(),
-        content: vec![ContentBlock::Text {
-            text: content.clone(),
-            cache_control: None,
-        }],
-    });
-    maybe_warn_context_pressure(app);
-    if should_auto_compact_before_send(app) {
-        app.status_message =
-            Some("Context threshold reached; compacting before send...".to_string());
-        let _ = engine_handle.send(Op::CompactContext).await;
-    }
-    app.session.last_prompt_tokens = None;
-    app.session.last_completion_tokens = None;
-    app.session.last_output_throughput = None;
-    app.session.last_prompt_cache_hit_tokens = None;
-    app.session.last_prompt_cache_miss_tokens = None;
-    app.session.last_reasoning_replay_tokens = None;
-    // Persist immediately so abrupt termination can recover this in-flight turn.
-    // Offloaded to the persistence actor.
-    if let Ok(manager) = SessionManager::default_location()
-        && let Ok(session) = build_session_snapshot(app, &manager)
-    {
-        persistence_actor::persist(PersistRequest::Checkpoint(session));
-    }
-
     let effective_model = if app.auto_model {
         auto_selection
             .as_ref()
@@ -7714,9 +7912,44 @@ async fn dispatch_user_message(
     } else {
         app.model.clone()
     };
-
+    // Resolve the exact turn route before mutating loading, transcript, API
+    // messages, receipts, or the persisted checkpoint. Real engines also
+    // construct the concrete client here so a credential/TLS failure cannot
+    // leave a zombie turn. Explicit injected/mock engines own their model-I/O
+    // seam and therefore require structural route validation only.
+    let turn_route = if effective_provider == app_route_identity.provider {
+        resolve_runtime_route_for_identity(
+            &route_config,
+            &app_route_identity,
+            Some(&effective_model),
+        )
+    } else {
+        resolve_runtime_route(&route_config, effective_provider, Some(&effective_model))
+    }
+    .map_err(anyhow::Error::msg)?;
+    let turn_route = if engine_handle.client_preflight_required() {
+        turn_route.preflight().map_err(anyhow::Error::msg)?
+    } else {
+        turn_route
+    };
+    let turn_route_limits = crate::route_budget::known_route_limits(turn_route.candidate.limits);
+    let turn_compaction = app.compaction_config_for_route(
+        turn_route.identity.provider,
+        &turn_route.model,
+        turn_route_limits,
+    );
+    let goal_objective = paused_dispatch.goal_objective(app);
+    let next_system_prompt =
+        build_app_system_prompt_with_goal(app, config, goal_objective.as_deref());
+    let next_api_message = Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: content.clone(),
+            cache_control: None,
+        }],
+    };
     let auto_controls_reasoning = app.auto_model || app.reasoning_effort == ReasoningEffort::Auto;
-    let effective_reasoning_effort = if auto_controls_reasoning {
+    let selected_reasoning_effort = if auto_controls_reasoning {
         let effort = auto_selection
             .as_ref()
             .and_then(|selection| selection.reasoning_effort)
@@ -7726,17 +7959,91 @@ async fn dispatch_user_message(
                     &message.display,
                 ))
             });
-        app.last_effective_reasoning_effort = Some(effort);
+        Some(effort)
+    } else {
+        None
+    };
+    let effective_reasoning_effort = if let Some(effort) = selected_reasoning_effort {
         effort
             .api_value_for_provider(effective_provider)
             .map(str::to_string)
     } else {
-        app.last_effective_reasoning_effort = None;
         app.reasoning_effort
             .api_value_for_provider(effective_provider)
             .map(str::to_string)
     };
 
+    // Enqueue the turn before applying any paused-command transition or
+    // mutating transcript/session state. A closed mailbox therefore leaves
+    // the exact App state, persisted checkpoint, and engine pause gate intact.
+    // SendMessage carries the route-bound compaction policy; the engine adds
+    // the user message and evaluates auto-compaction inside this same op before
+    // the provider request. Never split pre-send compaction into a second
+    // mailbox operation or a receiver-close race can partially dispatch.
+    engine_handle
+        .send(Op::SendMessage {
+            content,
+            mode: app.mode,
+            route: Box::new(turn_route),
+            compaction: Box::new(turn_compaction.clone()),
+            goal_objective,
+            goal_token_budget: app.hunt.token_budget,
+            goal_status: app.hunt.verdict.goal_status(),
+            reasoning_effort: effective_reasoning_effort,
+            reasoning_effort_auto: auto_controls_reasoning,
+            auto_model: app.auto_model,
+            allow_shell: app.allow_shell,
+            trust_mode: app.trust_mode,
+            auto_approve: app_auto_approve_enabled(app),
+            approval_mode: app.approval_mode,
+            translation_enabled: app.translation_enabled,
+            show_thinking: app.show_thinking,
+            allowed_tools: app.active_allowed_tools.clone(),
+            dynamic_tools: Vec::new(),
+            hook_executor: app.runtime_services.hook_executor.clone(),
+            verbosity: app.verbosity.clone(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
+        })
+        .await?;
+
+    paused_dispatch.apply(app, engine_handle);
+
+    // Set only after the operation is accepted so a failed dispatch cannot
+    // claim a turn or alter the retryable user input.
+    let dispatch_started_at = Instant::now();
+    app.is_loading = true;
+    app.dispatch_started_at = Some(dispatch_started_at);
+    app.runtime_turn_status = None;
+    app.last_send_at = Some(dispatch_started_at);
+    app.last_submitted_prompt = Some(message.display.clone());
+    app.clear_receipt();
+    app.tool_evidence.clear();
+
+    let message_index = app.api_messages.len();
+    app.system_prompt = Some(next_system_prompt);
+    app.add_message(HistoryCell::User {
+        content: message.display.clone(),
+    });
+    let history_cell = app.history.len().saturating_sub(1);
+    app.record_context_references(history_cell, message_index, references);
+    app.scroll_to_bottom();
+    app.api_messages.push(next_api_message);
+    maybe_warn_context_pressure_for_config(app, &turn_compaction);
+    app.session.last_prompt_tokens = None;
+    app.session.last_completion_tokens = None;
+    app.session.last_output_throughput = None;
+    app.session.last_prompt_cache_hit_tokens = None;
+    app.session.last_prompt_cache_miss_tokens = None;
+    app.session.last_reasoning_replay_tokens = None;
+    // Persist only after the engine accepted the turn. A failed mailbox send
+    // must not leave a checkpoint for work that never started.
+    if let Ok(manager) = SessionManager::default_location()
+        && let Ok(session) = build_session_snapshot(app, &manager)
+    {
+        persistence_actor::persist(PersistRequest::Checkpoint(session));
+    }
+
+    app.last_effective_reasoning_effort = selected_reasoning_effort;
     if let Some(selection) = auto_selection.as_ref() {
         if app.auto_model {
             app.last_effective_model = Some(effective_model.clone());
@@ -7758,42 +8065,7 @@ async fn dispatch_user_message(
         app.last_effective_model = None;
         app.last_effective_provider = None;
     }
-
-    app.pending_turn_route = Some((effective_provider, effective_model.clone(), app.auto_model));
-    if let Err(err) = engine_handle
-        .send(Op::SendMessage {
-            content,
-            mode: app.mode,
-            provider: Some(effective_provider),
-            model: effective_model,
-            route_limits: app.active_route_limits,
-            compaction: Box::new(app.compaction_config()),
-            goal_objective: app.hunt.quarry.clone(),
-            goal_token_budget: app.hunt.token_budget,
-            goal_status: app.hunt.verdict.goal_status(),
-            reasoning_effort: effective_reasoning_effort,
-            reasoning_effort_auto: auto_controls_reasoning,
-            auto_model: app.auto_model,
-            allow_shell: app.allow_shell,
-            trust_mode: app.trust_mode,
-            auto_approve: app_auto_approve_enabled(app),
-            approval_mode: app.approval_mode,
-            translation_enabled: app.translation_enabled,
-            show_thinking: app.show_thinking,
-            allowed_tools: app.active_allowed_tools.clone(),
-            dynamic_tools: Vec::new(),
-            hook_executor: app.runtime_services.hook_executor.clone(),
-            verbosity: app.verbosity.clone(),
-            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
-        })
-        .await
-    {
-        app.is_loading = false;
-        app.dispatch_started_at = None;
-        app.last_send_at = None;
-        app.pending_turn_route = None;
-        return Err(err);
-    }
+    app.pending_turn_route = Some((effective_provider, effective_model, app.auto_model));
 
     Ok(())
 }
@@ -8019,33 +8291,44 @@ async fn apply_model_picker_choice(
     config: &mut Config,
     model: String,
     target_provider: Option<ApiProvider>,
+    target_provider_id: Option<String>,
     mut effort: crate::tui::app::ReasoningEffort,
     previous_model: String,
     previous_effort: crate::tui::app::ReasoningEffort,
 ) {
+    let target_provider = target_provider.unwrap_or(app.api_provider);
+    let target_identity = if target_provider == ApiProvider::Custom {
+        target_provider_id.unwrap_or_else(|| config.provider_identity_for(target_provider))
+    } else {
+        target_provider.as_str().to_string()
+    };
     let model_is_auto = model.trim().eq_ignore_ascii_case("auto");
     if model_is_auto {
         effort = ReasoningEffort::Auto;
     } else {
-        effort = effort.normalize_for_provider(target_provider.unwrap_or(app.api_provider));
+        effort = effort.normalize_for_provider(target_provider);
     }
-    if let Some(target_provider) = target_provider
-        && target_provider != app.api_provider
-        && !model_is_auto
+    if target_provider != app.api_provider
+        || target_identity != app.provider_identity_for_persistence()
     {
+        config.provider = Some(target_identity.clone());
         switch_provider(
             app,
             engine_handle,
             config,
             target_provider,
-            Some(model.clone()),
+            (!model_is_auto).then_some(model.clone()),
         )
         .await;
-        if app.api_provider != target_provider {
+        if app.api_provider != target_provider
+            || app.provider_identity_for_persistence() != target_identity
+        {
             return;
         }
-        apply_picker_effort_choice(app, engine_handle, effort, previous_effort).await;
-        return;
+        if !model_is_auto {
+            apply_picker_effort_choice(app, engine_handle, effort, previous_effort).await;
+            return;
+        }
     }
 
     let model_changed = model != previous_model || app.auto_model != model_is_auto;
@@ -8092,13 +8375,14 @@ async fn apply_model_picker_choice(
     if model_changed {
         app.set_model_selection(resolved_model.clone());
         app.provider_models.insert(
-            app.api_provider.as_str().to_string(),
+            app.provider_identity_for_persistence().to_string(),
             resolved_model.clone(),
         );
         app.clear_model_scoped_telemetry();
     }
     if effort_changed {
         app.reasoning_effort = effort;
+        app.reasoning_effort_explicit = true;
         app.last_effective_reasoning_effort = None;
     }
     if model_changed || effort_changed {
@@ -8117,7 +8401,8 @@ async fn apply_model_picker_choice(
             ) {
                 settings.set("default_model", &resolved_model)?;
             }
-            settings.set_model_for_provider(app.api_provider.as_str(), &resolved_model);
+            settings
+                .set_model_for_provider(app.provider_identity_for_persistence(), &resolved_model);
         }
         if effort_changed {
             settings.set(
@@ -8190,6 +8475,7 @@ async fn apply_picker_effort_choice(
     }
 
     app.reasoning_effort = effort;
+    app.reasoning_effort_explicit = true;
     app.last_effective_reasoning_effort = None;
     app.update_model_compaction_budget();
 
@@ -8236,9 +8522,12 @@ async fn switch_provider(
     model_override: Option<String>,
 ) {
     let previous_provider = app.api_provider;
+    let previous_identity = app.provider_identity_for_persistence().to_string();
+    let requested_identity = config.provider_identity_for(target);
     let previous_model = app.model.clone();
     let previous_model_ids_passthrough = app.model_ids_passthrough;
-    let previous_config = config.clone();
+    let mut previous_config = config.clone();
+    previous_config.provider = Some(previous_identity.clone());
     app.pending_provider_switch = Some(PendingProviderSwitch {
         previous_provider,
         previous_model: previous_model.clone(),
@@ -8272,6 +8561,7 @@ async fn switch_provider(
                     )
                     .map(|picker| picker.with_provider_health(&app.provider_health))
                 {
+                    *config = previous_config;
                     app.view_stack.push(picker);
                     app.status_message = Some(format!(
                         "{} needs a key or local runtime — enter one to switch.",
@@ -8281,11 +8571,11 @@ async fn switch_provider(
                     return;
                 }
             }
+            *config = previous_config;
             app.add_message(HistoryCell::System {
                 content: format!(
                     "Cannot switch to {}: {reason}\nProvider unchanged ({}).",
-                    target.as_str(),
-                    previous_provider.as_str()
+                    requested_identity, previous_identity
                 ),
             });
             app.status_message = Some(format!(
@@ -8295,27 +8585,33 @@ async fn switch_provider(
             return;
         }
     };
-    let resolved_endpoint = resolved_route.candidate.endpoint.base_url.clone();
-    let next_config = resolved_route.config;
-    let new_model = resolved_route.model;
-
-    if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
-        app.pending_provider_switch = None;
-        app.add_message(HistoryCell::System {
-            content: format!(
-                "Failed to switch provider to {}: {err}\nProvider unchanged ({}).",
-                target.as_str(),
-                previous_provider.as_str()
-            ),
-        });
-        return;
-    }
-    *config = next_config;
+    let validated_route = match resolved_route.validate() {
+        Ok(route) => route,
+        Err(err) => {
+            app.pending_provider_switch = None;
+            *config = previous_config;
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Failed to switch provider to {}: {err}\nProvider unchanged ({}).",
+                    requested_identity, previous_identity
+                ),
+            });
+            return;
+        }
+    };
+    let target_identity_record = validated_route.identity.clone();
+    let target_identity = target_identity_record.key.clone();
+    let resolved_endpoint = validated_route.candidate.endpoint.base_url.clone();
+    let route_limits = validated_route.candidate.limits;
+    let new_model = validated_route.model.clone();
+    *config = *validated_route.config;
 
     let new_base_url = resolved_endpoint;
     let new_endpoint = display_base_url_host(&new_base_url);
-    let cache_scope_changed = previous_provider != target || previous_model != new_model;
-    app.api_provider = target;
+    let cache_scope_changed = previous_provider != target
+        || previous_identity != target_identity
+        || previous_model != new_model;
+    app.set_provider_identity_record(target_identity_record);
     app.billing_presentation = crate::route_billing::for_route(config, target);
     app.max_subagents = config
         .max_subagents_for_provider(target)
@@ -8326,13 +8622,13 @@ async fn switch_provider(
         .filter(|chain| chain.providers().len() > 1);
     app.last_fallback_reason = None;
     app.model_ids_passthrough = config.model_ids_pass_through();
-    app.reasoning_effort = app.reasoning_effort.normalize_for_provider(target);
+    app.apply_provider_switch_reasoning_effort(target, &new_base_url, model_override.as_deref());
     app.set_model_selection(new_model.clone());
     app.set_active_context_window_override(config.context_window_for_provider_config(target));
-    app.set_active_route_limits(resolved_route.candidate.limits);
+    app.set_active_route_limits(route_limits);
     if model_override.is_some() {
         app.provider_models
-            .insert(target.as_str().to_string(), new_model.clone());
+            .insert(target_identity.clone(), new_model.clone());
     }
     app.update_model_compaction_budget();
     if cache_scope_changed {
@@ -8367,7 +8663,7 @@ async fn switch_provider(
         .await;
 
     let persist_warning = (|| -> anyhow::Result<()> {
-        let provider_key = provider_persistence_key(config, target);
+        let provider_key = config.provider_identity_for(target);
         crate::config_persistence::persist_root_string_key(
             app.config_path.as_deref(),
             "provider",
@@ -8375,9 +8671,9 @@ async fn switch_provider(
         )?;
 
         let mut settings = crate::settings::Settings::load_persisted()?;
-        settings.default_provider = Some(provider_key);
+        settings.default_provider = Some(provider_key.clone());
         if model_override.is_some() {
-            settings.set_model_for_provider(target.as_str(), &new_model);
+            settings.set_model_for_provider(&provider_key, &new_model);
             if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
                 settings.set("default_model", &new_model)?;
             }
@@ -8390,8 +8686,7 @@ async fn switch_provider(
 
     let mut switch_summary = format!(
         "Provider switched: {} → {}",
-        previous_provider.as_str(),
-        target.as_str(),
+        previous_identity, target_identity,
     );
     switch_summary.push(char::from(10));
     switch_summary.push_str(&format!("Model: {previous_model} → {new_model}"));
@@ -8405,7 +8700,7 @@ async fn switch_provider(
         content: switch_summary,
     });
 
-    let mut status_message = format!("Provider: {} via {}", target.as_str(), new_endpoint);
+    let mut status_message = format!("Provider: {target_identity} via {new_endpoint}");
     let persisted = persist_warning.is_none();
     if persist_warning.is_some() {
         status_message.push_str(" (not fully persisted)");
@@ -8416,37 +8711,30 @@ async fn switch_provider(
     }
 }
 
-fn provider_persistence_key(config: &Config, provider: ApiProvider) -> String {
-    if provider == ApiProvider::Custom
-        && let Some(provider_id) = config
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|provider_id| !provider_id.is_empty())
-        && config
-            .providers
-            .as_ref()
-            .and_then(|providers| providers.custom_provider_config(provider_id))
-            .is_some()
-    {
-        return provider_id.to_string();
-    }
-    provider.as_str().to_string()
+struct ProviderFallbackRollback {
+    identity: ProviderIdentity,
+    chain: Option<codewhale_config::ProviderChain>,
 }
 
 async fn apply_provider_fallback_switch(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-    previous_provider: ApiProvider,
+    rollback: ProviderFallbackRollback,
 ) {
+    let ProviderFallbackRollback {
+        identity: previous_identity,
+        chain: previous_chain,
+    } = rollback;
+    let previous_provider = previous_identity.provider;
     let target = app.api_provider;
     let previous_model = app.model.clone();
 
     let resolved_route = match resolve_runtime_route(config, target, None) {
         Ok(route) => route,
         Err(reason) => {
-            app.api_provider = previous_provider;
+            app.set_provider_identity_record(previous_identity.clone());
+            app.provider_chain = previous_chain.clone();
             app.last_fallback_reason = Some(format!(
                 "Fallback provider {} route was rejected: {reason}",
                 target.as_str()
@@ -8459,12 +8747,14 @@ async fn apply_provider_fallback_switch(
             return;
         }
     };
+    let target_identity = resolved_route.identity.clone();
     let resolved_endpoint = resolved_route.candidate.endpoint.base_url.clone();
     let next_config = resolved_route.config;
     let new_model = resolved_route.model;
 
     if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
-        app.api_provider = previous_provider;
+        app.set_provider_identity_record(previous_identity);
+        app.provider_chain = previous_chain;
         app.last_fallback_reason = Some(format!(
             "Fallback provider {} was unavailable: {err}",
             target.as_str()
@@ -8476,7 +8766,8 @@ async fn apply_provider_fallback_switch(
         ));
         return;
     }
-    *config = next_config;
+    *config = *next_config;
+    app.set_provider_identity_record(target_identity);
     app.billing_presentation = crate::route_billing::for_route(config, target);
 
     let new_base_url = resolved_endpoint;
@@ -8549,11 +8840,17 @@ fn display_base_url_host(base_url: &str) -> String {
 }
 
 fn sync_config_provider_from_app(config: &mut Config, app: &App) {
-    config.provider = Some(app.api_provider.as_str().to_string());
+    config.provider = Some(app.provider_identity_for_persistence().to_string());
 }
 
-fn provider_picker_model_override(app: &App, provider: ApiProvider) -> Option<String> {
-    (app.api_provider == provider).then(|| app.model.clone())
+fn provider_picker_model_override(
+    app: &App,
+    config: &Config,
+    provider: ApiProvider,
+) -> Option<String> {
+    (app.api_provider == provider
+        && app.provider_identity_for_persistence() == config.provider_identity_for(provider))
+    .then(|| app.model.clone())
 }
 
 async fn query_provider_runtime_status(
@@ -8702,7 +8999,83 @@ async fn apply_command_result(
                 app.status_message = Some(format!("Session saved to {}", path.display()));
             }
             AppAction::LoadSession(path) => {
-                app.status_message = Some(format!("Session loaded from {}", path.display()));
+                let session: SavedSession = match std::fs::read_to_string(&path)
+                    .map_err(|err| err.to_string())
+                    .and_then(|raw| serde_json::from_str(&raw).map_err(|err| err.to_string()))
+                {
+                    Ok(session) => session,
+                    Err(err) => {
+                        app.status_message = Some(format!(
+                            "Failed to load session from {}: {err}",
+                            path.display()
+                        ));
+                        return Ok(false);
+                    }
+                };
+                let fresh_config =
+                    match Config::load(app.config_path.clone(), app.config_profile.as_deref()) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            app.status_message = Some(format!(
+                                "Failed to load live config for session restore: {err}"
+                            ));
+                            return Ok(false);
+                        }
+                    };
+                let (recovered, respawn) = match apply_loaded_session_config_snapshot(
+                    app,
+                    config,
+                    &session,
+                    fresh_config,
+                    true,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        app.status_message = Some(format!("Failed to restore session: {err}"));
+                        return Ok(false);
+                    }
+                };
+                sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
+                if respawn {
+                    let _ = engine_handle.send(Op::Shutdown).await;
+                    *engine_handle = spawn_engine(build_engine_config(app, config), config);
+                } else {
+                    let _ = engine_handle
+                        .send(Op::SetModel {
+                            model: app.model.clone(),
+                            mode: app.mode,
+                            route_limits: app.active_route_limits,
+                        })
+                        .await;
+                }
+                let _ = engine_handle
+                    .send(Op::SyncSession {
+                        session_id: app.current_session_id.clone(),
+                        messages: app.api_messages.clone(),
+                        system_prompt: app.system_prompt.clone(),
+                        system_prompt_override: false,
+                        model: app.model.clone(),
+                        workspace: app.workspace.clone(),
+                        mode: app.mode,
+                    })
+                    .await;
+                let _ = engine_handle
+                    .send(Op::SetCompaction {
+                        config: app.compaction_config(),
+                    })
+                    .await;
+                let success_message = format!(
+                    "Session loaded from {} (ID: {}, {} messages)",
+                    path.display(),
+                    crate::session_manager::truncate_id(&session.metadata.id),
+                    session.metadata.message_count
+                );
+                app.add_message(HistoryCell::System {
+                    content: success_message.clone(),
+                });
+                if !recovered {
+                    app.status_message = Some(success_message);
+                }
             }
             AppAction::SyncSession {
                 session_id,
@@ -8724,11 +9097,22 @@ async fn apply_command_result(
                     apply_workspace_runtime_state(app, config, workspace.clone());
                     sync_runtime_workspace_state(task_manager, workspace.clone()).await;
                 }
-                let provider_changed = config.api_provider() != app.api_provider;
+                let provider_changed = config.api_provider() != app.api_provider
+                    || config.provider_identity_for(config.api_provider())
+                        != app.provider_identity_for_persistence();
                 if provider_changed {
-                    let provider_name = app.api_provider.as_str().to_string();
-                    restore_loaded_session_provider(app, config, &provider_name);
-                    config.provider_config_for_mut(app.api_provider).model = Some(model.clone());
+                    let identity = match config
+                        .resolve_provider_identity(app.provider_identity_for_persistence())
+                    {
+                        Ok(identity) => identity,
+                        Err(err) => {
+                            app.status_message =
+                                Some(format!("Failed to restore saved session provider: {err}"));
+                            return Ok(false);
+                        }
+                    };
+                    restore_loaded_session_provider(app, config, identity);
+                    config.set_provider_model_override(app.api_provider, Some(model.clone()));
                 }
                 // Re-resolve from the live config even when the provider did
                 // not change. The command layer intentionally has no Config
@@ -8955,6 +9339,7 @@ async fn apply_command_result(
                     config,
                     model,
                     Some(provider),
+                    None,
                     previous_effort.normalize_for_provider(provider),
                     previous_model,
                     previous_effort,
@@ -9202,9 +9587,27 @@ async fn apply_command_result(
             AppAction::OpenContextInspector => {
                 open_context_inspector(app);
             }
+            AppAction::OpenLiveTranscript => {
+                open_live_transcript_overlay(app);
+            }
             AppAction::CompactContext => {
                 app.status_message = Some("Compacting context...".to_string());
-                let _ = engine_handle.send(Op::CompactContext).await;
+                match validated_app_runtime_route(app, config) {
+                    Ok(route) => {
+                        let compaction = compaction_for_validated_route(app, &route);
+                        let _ = engine_handle
+                            .send(Op::CompactContext {
+                                route: Box::new(route.into_resolved()),
+                                compaction: Box::new(compaction),
+                            })
+                            .await;
+                    }
+                    Err(err) => {
+                        app.status_message = Some(format!(
+                            "Cannot compact because the active provider route is invalid: {err}"
+                        ));
+                    }
+                }
             }
             AppAction::PurgeContext => {
                 app.status_message = Some("Agent purging context...".to_string());
@@ -9283,36 +9686,27 @@ async fn apply_command_result(
                 switch_workspace(app, engine_handle, task_manager, config, workspace).await;
             }
             AppAction::SwitchProfile { profile } => {
-                app.config_profile = Some(profile.clone());
-                match Config::load(app.config_path.clone(), Some(&profile)) {
-                    Ok(new_config) => {
+                let previous_profile = app.config_profile.clone();
+                match Config::load(app.config_path.clone(), Some(&profile)).and_then(|new_config| {
+                    validated_profile_default_route(&new_config)
+                        .map(|validated_route| (new_config, validated_route))
+                }) {
+                    Ok((new_config, validated_route)) => {
+                        let new_model = validated_route.model.clone();
+                        let provider_identity = validated_route.identity.clone();
+                        let route_limits = crate::route_budget::known_route_limits(
+                            validated_route.candidate.limits,
+                        );
+                        app.config_profile = Some(profile.clone());
                         *config = new_config.clone();
-                        app.api_provider = config.api_provider();
+                        app.set_provider_identity_record(provider_identity);
                         app.billing_presentation =
                             crate::route_billing::for_route(config, app.api_provider);
-                        let new_model = config.default_model();
                         app.set_model_selection(new_model.clone());
                         app.set_active_context_window_override(
                             config.context_window_for_provider_config(app.api_provider),
                         );
-                        app.active_route_limits = if app.auto_model {
-                            app.context_window_override_limits()
-                        } else {
-                            let saved_provider_model = config
-                                .provider_config_for(app.api_provider)
-                                .and_then(|provider| provider.model.as_deref());
-                            resolve_route_candidate(
-                                app.api_provider,
-                                Some(&new_model),
-                                saved_provider_model,
-                                Some(config.deepseek_base_url()),
-                                app.active_context_window_override,
-                            )
-                            .ok()
-                            .and_then(|candidate| {
-                                crate::route_budget::known_route_limits(candidate.limits)
-                            })
-                        };
+                        app.active_route_limits = route_limits;
                         app.update_model_compaction_budget();
                         app.session.last_prompt_tokens = None;
                         app.session.last_completion_tokens = None;
@@ -9337,13 +9731,13 @@ async fn apply_command_result(
                         app.add_message(HistoryCell::System {
                             content: format!(
                                 "Switched to profile '{profile}'. Model: {new_model}, Provider: {}",
-                                config.api_provider().as_str()
+                                app.provider_identity_for_persistence()
                             ),
                         });
                         app.status_message = Some(format!("Profile: {profile}"));
                     }
                     Err(err) => {
-                        app.config_profile = None;
+                        app.config_profile = previous_profile;
                         app.status_message =
                             Some(format!("Failed to switch to profile '{profile}': {err}"));
                     }
@@ -9654,7 +10048,7 @@ fn handle_shell_job_action(app: &mut App, action: crate::tui::app::ShellJobActio
         Err(_) => {
             add_shell_job_message(
                 app,
-                "Shell tracking hit an internal error — restart CodeWhale to recover.".to_string(),
+                "Shell tracking hit an internal error — restart Codewhale to recover.".to_string(),
             );
             return;
         }
@@ -9746,8 +10140,7 @@ async fn execute_command_input(
         // already removes all saved keys; clearing only the active slot here
         // prevents surprising side-effects when the user has multiple providers
         // configured.
-        config.api_key = None;
-        config.provider_config_for_mut(app.api_provider).api_key = None;
+        clear_active_provider_api_key_from_memory(app, config);
         app.api_key_env_only = crate::config::active_provider_uses_env_only_api_key(config);
     }
     apply_command_result(
@@ -9760,6 +10153,20 @@ async fn execute_command_input(
         result,
     )
     .await
+}
+
+fn clear_active_provider_api_key_from_memory(app: &App, config: &mut Config) {
+    let active_identity = app.provider_identity_for_persistence();
+    let clears_legacy_root = matches!(
+        app.api_provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN
+    ) || (app.api_provider == ApiProvider::Custom
+        && active_identity == ApiProvider::Custom.as_str()
+        && config.uses_legacy_literal_custom_route());
+    if clears_legacy_root {
+        config.api_key = None;
+    }
+    config.set_provider_api_key_override(app.api_provider, None);
 }
 
 fn parse_queue_send_command(input: &str) -> Option<Result<usize, String>> {
@@ -9801,7 +10208,9 @@ async fn steer_user_message(
     message: QueuedMessage,
 ) -> Result<()> {
     let paused_snapshot = snapshot_steer_paused_state(app);
-    let paused_note = prepare_paused_command_message(app, engine_handle, &message.display);
+    let paused_dispatch = plan_paused_command_message(app, &message.display);
+    let paused_note = paused_dispatch.note().map(str::to_string);
+    paused_dispatch.apply(app, engine_handle);
     let cwd = std::env::current_dir().ok();
     let references = crate::tui::file_mention::context_references_from_input(
         &message.display,
@@ -9908,10 +10317,17 @@ async fn attempt_steer_with_queue_fallback(
 async fn queue_follow_up(app: &mut App, message: QueuedMessage) -> Result<()> {
     let display = message.display.clone();
     enqueue_offline_message(app, message);
-    let toast = format!(
-        "Queued: {display} ({} total) — sends after current output; ↑ to edit",
-        app.queued_message_count()
-    );
+    let toast = if app.mode == AppMode::Operate {
+        format!(
+            "Queued task: {display} ({} total) — dispatches next while workers continue; ↑ to edit",
+            app.queued_message_count()
+        )
+    } else {
+        format!(
+            "Queued: {display} ({} total) — sends after current output; ↑ to edit",
+            app.queued_message_count()
+        )
+    };
     app.status_message = Some(toast.clone());
     app.push_status_toast(toast, StatusToastLevel::Info, Some(3_000));
     Ok(())
@@ -9928,7 +10344,12 @@ async fn submit_or_steer_message(
         .unwrap_or(SubmitDisposition::Immediate)
     {
         SubmitDisposition::Immediate => {
-            dispatch_user_message(app, config, engine_handle, message).await
+            if let Err(err) =
+                dispatch_user_message(app, config, engine_handle, message.clone()).await
+            {
+                restore_failed_immediate_submit(app, message, &err);
+            }
+            Ok(())
         }
         SubmitDisposition::Queue => {
             let count = app.queued_message_count().saturating_add(1);
@@ -9937,6 +10358,13 @@ async fn submit_or_steer_message(
                 (
                     format!("Offline: {count} queued follow-up(s) — ↑ edit last, /queue send <n>"),
                     format!("Offline: queued follow-up ({count} total)"),
+                )
+            } else if app.mode == AppMode::Operate {
+                (
+                    format!(
+                        "{count} queued task(s) — dispatches next while workers continue; ↑ edit last, /queue send <n>"
+                    ),
+                    format!("Queued task ({count} total) — dispatches next"),
                 )
             } else {
                 (
@@ -9958,6 +10386,21 @@ async fn submit_or_steer_message(
         }
         SubmitDisposition::QueueFollowUp => queue_follow_up(app, message).await,
     }
+}
+
+fn restore_failed_immediate_submit(app: &mut App, message: QueuedMessage, error: &anyhow::Error) {
+    tracing::warn!(
+        error = %error,
+        "immediate user message dispatch failed; restored composer"
+    );
+    app.input = message.display;
+    app.cursor_position = app.input.chars().count();
+    app.active_skill = message.skill_instruction;
+    let status = tr(app.ui_locale, MessageId::ComposerDispatchFailedRestored)
+        .replace("{error}", &error.to_string());
+    app.status_message = Some(status.clone());
+    app.set_sticky_status(status, StatusToastLevel::Error, None);
+    app.needs_redraw = true;
 }
 
 /// Drain `app.pending_steers` into a single `QueuedMessage` ready for
@@ -10126,36 +10569,32 @@ async fn handle_plan_choice(
 /// - `rejected_steers` — engine declined a mid-turn steer (scaffolding;
 ///   no engine path produces these yet but the bucket renders with a distinct
 ///   rejected-steer label).
-/// - `queued_messages` — Enter while busy (offline-mode FIFO); drained at
-///   end-of-turn.
+/// - `queued_messages` — Enter while busy; drained at end-of-turn. In Operate,
+///   the foreground operator dispatches these as additional background tasks.
 fn build_pending_input_preview(app: &App) -> PendingInputPreview {
     let mut preview = PendingInputPreview::new();
     let selected_attachment = app.selected_composer_attachment_index();
     let mut attachment_index = 0usize;
-    preview.context_items = crate::tui::file_mention::pending_context_previews(
-        &app.input,
-        &app.workspace,
-        std::env::current_dir().ok(),
-    )
-    .into_iter()
-    .map(|item| {
-        let selected = if item.removable {
-            let selected = selected_attachment == Some(attachment_index);
-            attachment_index += 1;
-            selected
-        } else {
-            false
-        };
-        ContextPreviewItem {
-            kind: item.kind,
-            label: item.label,
-            detail: item.detail,
-            included: item.included,
-            removable: item.removable,
-            selected,
-        }
-    })
-    .collect();
+    preview.context_items = crate::tui::file_mention::pending_context_previews(&app.input)
+        .into_iter()
+        .map(|item| {
+            let selected = if item.removable {
+                let selected = selected_attachment == Some(attachment_index);
+                attachment_index += 1;
+                selected
+            } else {
+                false
+            };
+            ContextPreviewItem {
+                kind: item.kind,
+                label: item.label,
+                detail: item.detail,
+                included: item.included,
+                removable: item.removable,
+                selected,
+            }
+        })
+        .collect();
     preview.pending_steers = app
         .pending_steers
         .iter()
@@ -10224,6 +10663,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     let size = f.area();
     let classic_shell = app.ocean_treatment.is_classic();
     app.sidebar_hover = crate::tui::app::SidebarHoverState::default();
+    app.viewport.last_approval_area = None;
 
     // Clear entire area with the configured app background.
     let background = Block::default().style(Style::default().bg(app.ui_theme.surface_bg));
@@ -10239,6 +10679,9 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         crate::tui::underwater::render_launch_screen(size, f.buffer_mut(), app);
         crate::tui::underwater::record_launch_row_areas(size, &mut app.launch);
         if !app.view_stack.is_empty() {
+            if app.view_stack.top_kind() == Some(ModalKind::Approval) {
+                app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
+            }
             let buf = f.buffer_mut();
             app.view_stack.render(size, buf);
         }
@@ -10309,8 +10752,9 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
             .saturating_add(composer_height)
             .saturating_add(footer_height),
     );
-    // Preserve the direct send-now hint when the terminal has breathing room,
-    // while keeping the release-floor layout to three compact rows.
+    // Queued-only previews author the direct controls in row two (and fall
+    // back to controls-only when just one row remains). Mixed previews retain
+    // up to three compact rows at the release floor.
     let preview_cap = if size.height >= 20 { 4 } else { 3 };
     let preview_height = desired_preview_height.min(auxiliary_budget.min(preview_cap));
     let workflow_panel_height =
@@ -10632,6 +11076,9 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         } else if app.view_stack.top_kind() == Some(ModalKind::ContextInspector) {
             refresh_context_inspector_overlay(app);
         }
+        if app.view_stack.top_kind() == Some(ModalKind::Approval) {
+            app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
+        }
         let buf = f.buffer_mut();
         app.view_stack.render(size, buf);
     }
@@ -10727,12 +11174,9 @@ fn open_backtrack_overlay(app: &mut App) {
     app.needs_redraw = true;
 }
 
-/// Toggle the live transcript overlay on `Ctrl+Shift+T`. Closes the overlay if it's
-/// already on top; otherwise pushes a fresh one in sticky-tail mode.
-fn toggle_live_transcript_overlay(app: &mut App) {
+/// Open a fresh live transcript overlay in sticky-tail mode.
+fn open_live_transcript_overlay(app: &mut App) {
     if app.view_stack.top_kind() == Some(ModalKind::LiveTranscript) {
-        app.view_stack.pop();
-        app.needs_redraw = true;
         return;
     }
     let mut overlay = LiveTranscriptOverlay::new();
@@ -10740,6 +11184,17 @@ fn toggle_live_transcript_overlay(app: &mut App) {
     app.view_stack.push(overlay);
     app.status_message = Some("Live transcript: tailing (Esc to close)".to_string());
     app.needs_redraw = true;
+}
+
+/// Toggle the live transcript overlay on `Ctrl+Shift+T`. Closes the overlay if it's
+/// already on top; otherwise uses the same open path as `/transcript`.
+fn toggle_live_transcript_overlay(app: &mut App) {
+    if app.view_stack.top_kind() == Some(ModalKind::LiveTranscript) {
+        app.view_stack.pop();
+        app.needs_redraw = true;
+        return;
+    }
+    open_live_transcript_overlay(app);
 }
 
 /// Open the `/model` picker pre-filtered to `provider` (#3083). The model
@@ -11144,10 +11599,15 @@ async fn handle_view_events(
 
                 match manager.load_session(&session_id) {
                     Ok(session) => {
-                        let previous_provider = app.api_provider;
-                        let previous_workspace = app.workspace.clone();
-                        let recovered = match apply_loaded_session(app, config, &session) {
-                            Ok(recovered) => recovered,
+                        let next_config = config.clone();
+                        let (recovered, respawn) = match apply_loaded_session_config_snapshot(
+                            app,
+                            config,
+                            &session,
+                            next_config,
+                            false,
+                        ) {
+                            Ok(outcome) => outcome,
                             Err(err) => {
                                 app.status_message =
                                     Some(format!("Failed to restore session: {err}"));
@@ -11155,9 +11615,7 @@ async fn handle_view_events(
                             }
                         };
                         sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
-                        if app.api_provider != previous_provider
-                            || app.workspace != previous_workspace
-                        {
+                        if respawn {
                             let _ = engine_handle.send(Op::Shutdown).await;
                             *engine_handle = spawn_engine(build_engine_config(app, config), config);
                         } else {
@@ -11345,14 +11803,25 @@ async fn handle_view_events(
                     Some(tr(app.ui_locale, MessageId::SubagentsFetching).to_string());
                 let _ = engine_handle.try_send(Op::ListSubAgents);
             }
-            ViewEvent::FleetProfileDraftCommitRequested { draft } => {
+            ViewEvent::FleetProfileDraftCommitRequested { draft, scope } => {
                 // The TOML is rendered deterministically from the validated
                 // draft and written atomically; the target path is derived
                 // from the sanitized id, never model-chosen.
-                let target = app
-                    .workspace
-                    .join(crate::fleet::profile::WORKSPACE_AGENT_PROFILE_DIR)
-                    .join(draft.file_name());
+                let profile_dir =
+                    match crate::fleet::profile::agent_profile_dir_for_scope(scope, &app.workspace)
+                    {
+                        Ok(dir) => dir,
+                        Err(err) => {
+                            app.set_sticky_status(
+                                format!("Fleet {} scope is unavailable: {err:#}", scope.label()),
+                                StatusToastLevel::Error,
+                                None,
+                            );
+                            app.needs_redraw = true;
+                            continue;
+                        }
+                    };
+                let target = profile_dir.join(draft.file_name());
                 // A ratified profile must not silently clobber a differently
                 // named existing profile that shares this id (which would also
                 // make the whole agents dir fail to load on the duplicate).
@@ -11364,7 +11833,7 @@ async fn handle_view_events(
                 // unreadable files, and invalid ids still fail closed because
                 // then we cannot prove there is no collision.
                 let existing_profiles =
-                    crate::fleet::profile::load_workspace_agent_profile_identities(&app.workspace);
+                    crate::fleet::profile::load_agent_profile_identities_from_dir(&profile_dir);
                 if let Err(err) = &existing_profiles {
                     let message = tr(app.ui_locale, MessageId::FleetProfileIdentityVerifyFailed)
                         .replace("{error}", &format!("{err:#}"));
@@ -11410,18 +11879,39 @@ async fn handle_view_events(
                 txn.stage(target.clone(), draft.render_toml().into_bytes());
                 match txn.commit() {
                     Ok(()) => {
+                        let roster = std::sync::Arc::new(crate::fleet::roster::FleetRoster::load(
+                            &config.fleet_config(),
+                            &app.workspace,
+                        ));
+                        let roster_refresh_failed = engine_handle
+                            .try_send(Op::SetFleetRoster { roster })
+                            .is_err();
                         let zh = app.ui_locale == crate::localization::Locale::ZhHans;
                         app.add_message(HistoryCell::System {
                             content: if zh {
-                                format!("已批准并保存 Fleet 配置：{}", target.display())
+                                format!("已保存 Fleet 配置：{}", target.display())
                             } else {
-                                format!("Fleet profile ratified and saved: {}", target.display())
+                                format!(
+                                    "Fleet {} profile saved: {}",
+                                    scope.label(),
+                                    target.display()
+                                )
                             },
                         });
                         app.status_message = Some(if zh {
                             format!("已保存 Fleet 配置：{}", draft.file_name())
+                        } else if roster_refresh_failed {
+                            format!(
+                                "Fleet {} profile saved, but the live roster could not refresh; restart before dispatching {}",
+                                scope.label(),
+                                draft.id
+                            )
                         } else {
-                            format!("Fleet profile saved: {}", draft.file_name())
+                            format!(
+                                "Fleet {} profile saved: {}",
+                                scope.label(),
+                                draft.file_name()
+                            )
                         });
                     }
                     Err(err) => {
@@ -11551,6 +12041,7 @@ async fn handle_view_events(
             ViewEvent::ModelPickerApplied {
                 model,
                 provider,
+                provider_id,
                 effort,
                 previous_model,
                 previous_effort,
@@ -11561,6 +12052,7 @@ async fn handle_view_events(
                     config,
                     model,
                     provider,
+                    provider_id,
                     effort,
                     previous_model,
                     previous_effort,
@@ -11572,6 +12064,7 @@ async fn handle_view_events(
                 view,
                 selected_row_id,
             } => {
+                sync_config_provider_from_app(config, app);
                 app.model_picker_memory = Some(crate::tui::app::ModelPickerMemory {
                     catalog_view,
                     view: Some(view),
@@ -11582,6 +12075,9 @@ async fn handle_view_events(
                 catalog_view,
                 selected_provider_id,
             } => {
+                // A picker preview must never become route authority. Restore
+                // Config from the committed App identity on every dismissal.
+                sync_config_provider_from_app(config, app);
                 app.provider_picker_memory = Some(crate::tui::app::ProviderPickerMemory {
                     catalog_view,
                     selected_provider_id,
@@ -11594,7 +12090,7 @@ async fn handle_view_events(
                 if let Some(provider_id) = provider_id {
                     set_active_custom_provider_in_memory(config, &provider_id);
                 }
-                let model_override = provider_picker_model_override(app, provider);
+                let model_override = provider_picker_model_override(app, config, provider);
                 switch_provider(app, engine_handle, config, provider, model_override).await;
                 refresh_config_view_if_open(app, "provider");
             }
@@ -11603,10 +12099,9 @@ async fn handle_view_events(
                 provider_id,
                 api_key,
             } => {
-                if let Some(provider_id) = provider_id {
-                    set_active_custom_provider_in_memory(config, &provider_id);
-                }
-                apply_provider_picker_api_key(app, engine_handle, config, provider, api_key).await;
+                let identity = picker_provider_identity(config, provider, provider_id.as_deref())
+                    .map_err(anyhow::Error::msg)?;
+                apply_provider_picker_api_key(app, engine_handle, config, identity, api_key).await;
                 refresh_config_view_if_open(app, "provider");
             }
             ViewEvent::ProviderPickerSetupConfirmed {
@@ -11615,14 +12110,13 @@ async fn handle_view_events(
                 api_key,
                 model,
             } => {
-                if let Some(provider_id) = provider_id {
-                    set_active_custom_provider_in_memory(config, &provider_id);
-                }
+                let identity = picker_provider_identity(config, provider, provider_id.as_deref())
+                    .map_err(anyhow::Error::msg)?;
                 apply_provider_picker_setup_confirmed(
                     app,
                     engine_handle,
                     config,
-                    provider,
+                    identity,
                     api_key,
                     model,
                 )
@@ -12262,6 +12756,31 @@ fn set_active_custom_provider_in_memory(config: &mut Config, provider_id: &str) 
         .or_default();
 }
 
+fn picker_provider_identity(
+    config: &Config,
+    provider: ApiProvider,
+    provider_id: Option<&str>,
+) -> Result<crate::config::ProviderIdentity, String> {
+    let identity = match provider_id {
+        Some(provider_id) => config
+            .resolve_persisted_provider_identity(Some(provider.as_str()), Some(provider_id))?,
+        None if provider == ApiProvider::Custom => config.active_provider_identity(provider)?,
+        None => config.resolve_persisted_provider_identity(
+            Some(provider.as_str()),
+            Some(provider.as_str()),
+        )?,
+    };
+    if identity.provider != provider {
+        return Err(format!(
+            "provider picker identity '{}' resolved as {}, not {}",
+            identity.key,
+            identity.provider.as_str(),
+            provider.as_str()
+        ));
+    }
+    Ok(identity)
+}
+
 async fn apply_provider_picker_custom_provider(
     app: &mut App,
     engine_handle: &mut EngineHandle,
@@ -12317,14 +12836,14 @@ async fn apply_provider_picker_api_key(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-    provider: ApiProvider,
+    identity: crate::config::ProviderIdentity,
     api_key: String,
 ) {
     apply_provider_picker_api_key_with_verifier(
         app,
         engine_handle,
         config,
-        provider,
+        identity,
         api_key,
         &LiveProviderKeyVerifier,
     )
@@ -12378,15 +12897,18 @@ async fn apply_provider_picker_api_key_with_verifier(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-    provider: ApiProvider,
+    identity: crate::config::ProviderIdentity,
     api_key: String,
     verifier: &dyn ProviderKeyVerifier,
 ) {
+    let provider = identity.provider;
+    let mut scoped_config = config.clone();
+    scoped_config.provider = Some(identity.key.clone());
     // #3875: verify the key against the provider before opening the rest of
     // the guided flow. Nothing is persisted until the confirm stage.
     // Use the provider's configured base URL (or the default) for the
     // models-endpoint probe so custom endpoints are also verified.
-    let base_url = config
+    let base_url = scoped_config
         .provider_config_for(provider)
         .and_then(|entry| entry.base_url.as_deref())
         .filter(|url| !url.trim().is_empty())
@@ -12400,7 +12922,7 @@ async fn apply_provider_picker_api_key_with_verifier(
                 crate::tui::provider_picker::ProviderPickerView::new_for_model_pick_after_validation(
                     app.api_provider,
                     provider,
-                    config,
+                    &scoped_config,
                     runtime_status,
                     api_key,
                 )
@@ -12428,7 +12950,7 @@ async fn apply_provider_picker_api_key_with_verifier(
                 crate::tui::provider_picker::ProviderPickerView::new_for_key_entry_with_error(
                     app.api_provider,
                     provider,
-                    config,
+                    &scoped_config,
                     runtime_status,
                     reason,
                 )
@@ -12454,11 +12976,13 @@ async fn apply_provider_picker_setup_confirmed(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-    provider: ApiProvider,
+    identity: crate::config::ProviderIdentity,
     api_key: String,
     model: String,
 ) {
-    use crate::config::{save_api_key_for, save_provider_model_for};
+    use crate::config::{save_api_key_for_identity, save_provider_model_for_identity};
+
+    let provider = identity.provider;
 
     let model = model.trim().to_string();
     if model.is_empty() {
@@ -12474,9 +12998,9 @@ async fn apply_provider_picker_setup_confirmed(
     // Persist key first via the existing comment-preserving path, then pin the
     // chosen default model on the same document when the provider uses a
     // `[providers.<name>]` table.
-    match save_api_key_for(provider, &api_key) {
+    match save_api_key_for_identity(&identity, config, &api_key) {
         Ok(path) => {
-            if let Err(err) = save_provider_model_for(provider, &model) {
+            if let Err(err) = save_provider_model_for_identity(&identity, config, &model) {
                 app.add_message(HistoryCell::System {
                     content: format!(
                         "Saved {} API key to {}, but failed to pin model `{model}`: {err}",
@@ -12504,6 +13028,7 @@ async fn apply_provider_picker_setup_confirmed(
         }
     }
 
+    config.provider = Some(identity.key);
     mirror_saved_api_key_in_config(config, provider, api_key);
     mirror_saved_model_in_config(config, provider, model.clone());
     switch_provider(app, engine_handle, config, provider, Some(model)).await;
@@ -12514,11 +13039,15 @@ fn mirror_saved_model_in_config(config: &mut Config, provider: ApiProvider, mode
         config.default_text_model = Some(model);
         return;
     }
-    config.provider_config_for_mut(provider).model = Some(model);
+    config.set_provider_model_override(provider, Some(model));
 }
 
 fn mirror_saved_api_key_in_config(config: &mut Config, provider: ApiProvider, api_key: String) {
     if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+        config.api_key = Some(api_key);
+        return;
+    }
+    if provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route() {
         config.api_key = Some(api_key);
         return;
     }
@@ -12708,10 +13237,26 @@ fn apply_loaded_session(
             "runtime work is active; wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work before switching sessions".to_string(),
         );
     }
+    let provider_identity = config.resolve_persisted_provider_identity(
+        Some(&session.metadata.model_provider),
+        session.metadata.model_provider_id.as_deref(),
+    )?;
+    let restored_route = resolve_runtime_route_for_identity(
+        config,
+        &provider_identity,
+        Some(&session.metadata.model),
+    )
+    .map_err(|reason| {
+        format!(
+            "saved session provider '{}' could not be resolved from the live config: {reason}. Codewhale will not fall back",
+            provider_identity.key
+        )
+    })?;
     // Restore/validate the contended state before mutating conversation or
     // workspace fields. A failed session switch must leave the current session
     // wholly intact.
     app.restore_work_state(session.work_state.as_ref())?;
+    *config = *restored_route.config;
     let (messages, recovered_draft) = recover_interrupted_user_tail(&session.messages);
     app.api_messages = messages;
     app.clear_history();
@@ -12755,11 +13300,11 @@ fn apply_loaded_session(
     app.sync_context_references_from_session(&session.context_references, &message_to_cell);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
-    restore_loaded_session_provider(app, config, &session.metadata.model_provider);
+    restore_loaded_session_provider(app, config, provider_identity);
     app.set_model_selection(session.metadata.model.clone());
     resolve_loaded_session_route(app, config);
     app.provider_models.insert(
-        app.api_provider.as_str().to_string(),
+        app.provider_identity_for_persistence().to_string(),
         app.model_selection_for_persistence(),
     );
     app.update_model_compaction_budget();
@@ -12825,13 +13370,56 @@ fn apply_loaded_session(
     Ok(recovered)
 }
 
-fn restore_loaded_session_provider(app: &mut App, config: &mut Config, model_provider: &str) {
-    let Some(provider) = ApiProvider::parse(model_provider) else {
-        return;
-    };
+fn loaded_session_requires_engine_respawn(
+    app: &App,
+    previous_provider: ApiProvider,
+    previous_provider_identity: &str,
+    previous_workspace: &Path,
+) -> bool {
+    app.api_provider != previous_provider
+        || app.provider_identity_for_persistence() != previous_provider_identity
+        || app.workspace != previous_workspace
+}
 
-    app.api_provider = provider;
-    config.provider = Some(provider.as_str().to_string());
+fn apply_loaded_session_config_snapshot(
+    app: &mut App,
+    config: &mut Config,
+    session: &SavedSession,
+    mut next_config: Config,
+    force_engine_respawn: bool,
+) -> Result<(bool, bool), String> {
+    if force_engine_respawn {
+        // File `/load` supplies a freshly loaded disk snapshot, but the live
+        // Config also contains CLI and workspace/project overlays that are not
+        // represented by that file. Refresh the provider registry atomically
+        // over the effective Config instead of dropping permission controls.
+        let mut effective_config = config.clone();
+        effective_config.refresh_provider_routes_from(&next_config);
+        next_config = effective_config;
+    }
+    let previous_provider = app.api_provider;
+    let previous_provider_identity = app.provider_identity_for_persistence().to_string();
+    let previous_workspace = app.workspace.clone();
+    let recovered = apply_loaded_session(app, &mut next_config, session)?;
+    // A file load reads a fresh disk snapshot. Even when the route's enum and
+    // exact identity are unchanged, endpoint, key, headers, TLS, or retry
+    // settings may have changed. Rebuild from that same validated snapshot so
+    // compaction and other pre-turn engine work cannot retain the old client.
+    let respawn = force_engine_respawn
+        || loaded_session_requires_engine_respawn(
+            app,
+            previous_provider,
+            &previous_provider_identity,
+            &previous_workspace,
+        );
+    *config = next_config;
+    Ok((recovered, respawn))
+}
+
+fn restore_loaded_session_provider(app: &mut App, config: &mut Config, identity: ProviderIdentity) {
+    let provider = identity.provider;
+    config.provider = Some(identity.key.clone());
+    app.set_provider_identity_record(identity);
     app.billing_presentation = crate::route_billing::for_route(config, provider);
     app.max_subagents = config
         .max_subagents_for_provider(provider)
@@ -13367,7 +13955,7 @@ pub(crate) fn request_foreground_shell_background(app: &mut App) {
         }
         Err(_) => {
             app.status_message = Some(
-                "Shell tracking hit an internal error — restart CodeWhale to recover.".to_string(),
+                "Shell tracking hit an internal error — restart Codewhale to recover.".to_string(),
             );
         }
     }
@@ -13496,6 +14084,10 @@ pub(crate) fn context_usage_snapshot(app: &App) -> Option<(i64, u32, f64)> {
         app.effective_model_for_budget(),
         app.active_route_limits,
     );
+    context_usage_snapshot_for_window(app, max)
+}
+
+fn context_usage_snapshot_for_window(app: &App, max: u32) -> Option<(i64, u32, f64)> {
     let max_i64 = i64::from(max);
     let reported = app
         .session
@@ -13543,20 +14135,37 @@ fn is_reported_context_inflated(reported: i64, estimated: i64) -> bool {
         && reported >= estimated.saturating_mul(4)
 }
 
+#[cfg(test)]
 fn maybe_warn_context_pressure(app: &mut App) {
-    let Some((used, max, percent)) = context_usage_snapshot(app) else {
+    let config = app.compaction_config();
+    maybe_warn_context_pressure_for_config(app, &config);
+}
+
+fn maybe_warn_context_pressure_for_config(
+    app: &mut App,
+    config: &crate::compaction::CompactionConfig,
+) {
+    let max = config.effective_context_window.unwrap_or_else(|| {
+        crate::route_budget::route_context_window_tokens(
+            app.api_provider,
+            app.effective_model_for_budget(),
+            app.active_route_limits,
+        )
+    });
+    let Some((used, max, percent)) = context_usage_snapshot_for_window(app, max) else {
         return;
     };
 
     let configured_threshold = app.auto_compact_threshold_percent.clamp(10.0, 100.0);
     let warning_threshold = CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT.min(configured_threshold);
-    if percent < warning_threshold {
+    let will_auto_compact = config.enabled && used.max(0) as usize >= config.token_threshold;
+    if percent < warning_threshold && !will_auto_compact {
         return;
     }
 
-    let recommendation = if !app.auto_compact {
+    let recommendation = if !config.enabled {
         "Consider enabling auto_compact or use /compact."
-    } else if percent >= configured_threshold {
+    } else if will_auto_compact {
         "Auto-compaction will run before the next send."
     } else {
         "Auto-compaction is enabled."
@@ -13581,12 +14190,32 @@ fn maybe_warn_context_pressure(app: &mut App) {
     }
 }
 
+#[cfg(test)]
 fn should_auto_compact_before_send(app: &App) -> bool {
-    if !app.auto_compact {
+    let config = app.compaction_config();
+    should_auto_compact_before_send_with_config(app, &config)
+}
+
+#[cfg(test)]
+fn should_auto_compact_before_send_with_config(
+    app: &App,
+    config: &crate::compaction::CompactionConfig,
+) -> bool {
+    if !config.enabled {
         return false;
     }
-    context_usage_snapshot(app)
-        .map(|(_, _, pct)| pct >= app.auto_compact_threshold_percent.clamp(10.0, 100.0))
+    // Use the same ceiling-anchored token threshold as the engine. Comparing
+    // against a raw percentage of the input-plus-output window can delay this
+    // gate until after the spendable input budget has already been exhausted.
+    let max = config.effective_context_window.unwrap_or_else(|| {
+        crate::route_budget::route_context_window_tokens(
+            app.api_provider,
+            app.effective_model_for_budget(),
+            app.active_route_limits,
+        )
+    });
+    context_usage_snapshot_for_window(app, max)
+        .map(|(used, _, _)| used.max(0) as usize >= config.token_threshold)
         .unwrap_or(false)
 }
 
@@ -13596,6 +14225,30 @@ fn status_animation_interval_ms(app: &App) -> u64 {
     } else {
         UI_STATUS_ANIMATION_MS
     }
+}
+
+/// Whether any underwater motion owner is actually visible in the transcript
+/// host. This keeps the scheduler honest: ombre needs a non-empty viewport,
+/// fish need their collision-safe water budget, and the smaller idle whale may
+/// independently earn its caustic. Obscured surfaces never request frames.
+#[must_use]
+fn underwater_motion_surface_visible(
+    area: Option<Rect>,
+    ombre_field_breathes: bool,
+    empty_water_visible: bool,
+    obscured: bool,
+) -> bool {
+    if obscured {
+        return false;
+    }
+    area.is_some_and(|area| {
+        area.width > 0
+            && area.height > 0
+            && (ombre_field_breathes
+                || (area.width >= crate::tui::ocean::AMBIENT_MIN_WIDTH
+                    && area.height >= crate::tui::ocean::AMBIENT_MIN_HEIGHT)
+                || (empty_water_visible && crate::tui::underwater::empty_state_mark_visible(area)))
+    })
 }
 
 fn animation_interval_ms(app: &App, status_motion: bool, underwater_motion: bool) -> u64 {
@@ -14044,6 +14697,37 @@ mod provider_key_validation_tests {
         }
     }
 
+    fn two_named_custom_routes() -> Config {
+        Config {
+            provider: Some("custom-a".to_string()),
+            providers: Some(ProvidersConfig {
+                custom: std::collections::HashMap::from([
+                    (
+                        "custom-a".to_string(),
+                        ProviderConfig {
+                            kind: Some("openai-compatible".to_string()),
+                            base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+                            model: Some("model-a".to_string()),
+                            api_key: Some("key-a".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        "custom-b".to_string(),
+                        ProviderConfig {
+                            kind: Some("openai-compatible".to_string()),
+                            base_url: Some("http://127.0.0.1:18182/v1".to_string()),
+                            model: Some("model-b".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn provider_key_check_classifies_transport_failures_truthfully() {
         assert_eq!(
@@ -14079,12 +14763,14 @@ mod provider_key_validation_tests {
         let mut engine = mock_engine_handle();
         let mut config = openrouter_config("https://mock.openrouter.test/v1");
         let verifier = MockProviderKeyVerifier::new(Ok(()));
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
 
         apply_provider_picker_api_key_with_verifier(
             &mut app,
             &mut engine.handle,
             &mut config,
-            ApiProvider::Openrouter,
+            identity,
             "sk-verified".to_string(),
             &verifier,
         )
@@ -14156,12 +14842,14 @@ base_url = "https://mock.openrouter.test/v1"
         let mut engine = mock_engine_handle();
         let mut config = openrouter_config("https://mock.openrouter.test/v1");
         let model = "deepseek/deepseek-v4-pro".to_string();
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
 
         apply_provider_picker_setup_confirmed(
             &mut app,
             &mut engine.handle,
             &mut config,
-            ApiProvider::Openrouter,
+            identity,
             "sk-confirmed".to_string(),
             model.clone(),
         )
@@ -14204,12 +14892,14 @@ base_url = "https://mock.openrouter.test/v1"
         let mut engine = mock_engine_handle();
         let mut config = openrouter_config("https://mock.openrouter.test/v1");
         let verifier = MockProviderKeyVerifier::new(Err("HTTP 401: unauthorized".to_string()));
+        let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
+            .expect("OpenRouter identity");
 
         apply_provider_picker_api_key_with_verifier(
             &mut app,
             &mut engine.handle,
             &mut config,
-            ApiProvider::Openrouter,
+            identity,
             "sk-rejected".to_string(),
             &verifier,
         )
@@ -14248,6 +14938,165 @@ base_url = "https://mock.openrouter.test/v1"
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("Verification failed: HTTP 401: unauthorized"));
+    }
+
+    #[tokio::test]
+    async fn named_custom_verification_failure_and_dismiss_keep_committed_a_route() {
+        let _config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        app.set_provider_identity(ApiProvider::Custom, "custom-a");
+        app.set_model_selection("model-a".to_string());
+        let mut engine = mock_engine_handle();
+        let mut config = two_named_custom_routes();
+        let identity = picker_provider_identity(&config, ApiProvider::Custom, Some("custom-b"))
+            .expect("custom B identity");
+        let verifier = MockProviderKeyVerifier::new(Err("HTTP 401: unauthorized".to_string()));
+
+        apply_provider_picker_api_key_with_verifier(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            "rejected-b-key".to_string(),
+            &verifier,
+        )
+        .await;
+
+        assert_eq!(config.provider.as_deref(), Some("custom-a"));
+        assert_eq!(app.provider_identity_for_persistence(), "custom-a");
+        app.view_stack.pop().expect("failed verifier picker");
+        sync_config_provider_from_app(&mut config, &app);
+        let route = validated_app_runtime_route(&app, &config).expect("committed A route");
+        assert_eq!(route.identity.key, "custom-a");
+        assert_eq!(route.client.base_url(), "http://127.0.0.1:18181/v1");
+    }
+
+    #[tokio::test]
+    async fn named_custom_setup_persists_exact_provider_table_and_model() {
+        let config_env = ConfigPathEnvGuard::new();
+        std::fs::write(
+            config_env.config_path(),
+            r#"provider = "custom-a"
+
+[providers.custom-a]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18181/v1"
+model = "model-a"
+
+[providers.custom-b]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18182/v1"
+model = "model-b"
+"#,
+        )
+        .expect("seed named custom config");
+        let mut app = create_test_app();
+        app.set_provider_identity(ApiProvider::Custom, "custom-a");
+        app.set_model_selection("model-a".to_string());
+        let mut engine = mock_engine_handle();
+        let mut config = two_named_custom_routes();
+        let identity = picker_provider_identity(&config, ApiProvider::Custom, Some("custom-b"))
+            .expect("custom B identity");
+
+        apply_provider_picker_setup_confirmed(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            "saved-b-key".to_string(),
+            "model-b-confirmed".to_string(),
+        )
+        .await;
+
+        assert_eq!(app.provider_identity_for_persistence(), "custom-b");
+        assert_eq!(config.provider.as_deref(), Some("custom-b"));
+        let saved = std::fs::read_to_string(config_env.config_path()).expect("saved config");
+        assert!(saved.contains("[providers.custom-b]"));
+        assert!(saved.contains("api_key = \"saved-b-key\""));
+        assert!(saved.contains("model = \"model-b-confirmed\""));
+        assert!(!saved.contains("[providers.custom]\n"));
+    }
+
+    #[test]
+    fn legacy_literal_custom_identity_persistence_stays_root_shaped() {
+        let config_env = ConfigPathEnvGuard::new();
+        std::fs::write(
+            config_env.config_path(),
+            r#"provider = "custom"
+base_url = "http://127.0.0.1:18180/v1"
+default_text_model = "legacy-model"
+"#,
+        )
+        .expect("seed legacy root route");
+        let config = Config {
+            provider: Some("custom".to_string()),
+            base_url: Some("http://127.0.0.1:18180/v1".to_string()),
+            default_text_model: Some("legacy-model".to_string()),
+            ..Default::default()
+        };
+        let identity = config
+            .resolve_provider_identity("custom")
+            .expect("legacy identity");
+
+        crate::config::save_api_key_for_identity(&identity, &config, "legacy-saved-key")
+            .expect("save legacy key");
+        crate::config::save_provider_model_for_identity(&identity, &config, "legacy-model-updated")
+            .expect("save legacy model");
+
+        let saved = std::fs::read_to_string(config_env.config_path()).expect("saved config");
+        assert!(saved.contains("api_key = \"legacy-saved-key\""));
+        assert!(saved.contains("default_text_model = \"legacy-model-updated\""));
+        assert!(!saved.contains("[providers.custom]"));
+        let reloaded = Config::load(Some(config_env.config_path()), None).expect("reload legacy");
+        assert!(reloaded.uses_legacy_literal_custom_route());
+        assert_eq!(
+            reloaded
+                .resolve_provider_identity("custom")
+                .expect("repeat legacy identity"),
+            identity
+        );
+        let route =
+            resolve_runtime_route(&reloaded, ApiProvider::Custom, Some("legacy-model-updated"))
+                .expect("resolve reloaded legacy")
+                .validate()
+                .expect("preflight reloaded legacy");
+        assert_eq!(route.client.base_url(), "http://127.0.0.1:18180/v1");
+    }
+
+    #[test]
+    fn legacy_active_route_does_not_redirect_named_custom_persistence_to_root() {
+        let config_env = ConfigPathEnvGuard::new();
+        std::fs::write(
+            config_env.config_path(),
+            r#"provider = "custom"
+api_key = "legacy-root-key"
+base_url = "http://127.0.0.1:18180/v1"
+default_text_model = "legacy-model"
+
+[providers.custom-b]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18182/v1"
+model = "model-b"
+"#,
+        )
+        .expect("seed coexistence config");
+        let config = Config::load(Some(config_env.config_path()), None).expect("load config");
+        assert!(config.uses_legacy_literal_custom_route());
+        let identity = config
+            .resolve_provider_identity("custom-b")
+            .expect("named custom identity");
+
+        crate::config::save_api_key_for_identity(&identity, &config, "saved-b-key")
+            .expect("save named custom key");
+        crate::config::save_provider_model_for_identity(&identity, &config, "model-b-updated")
+            .expect("save named custom model");
+
+        let saved = std::fs::read_to_string(config_env.config_path()).expect("saved config");
+        assert!(saved.contains("api_key = \"legacy-root-key\""));
+        assert!(saved.contains("default_text_model = \"legacy-model\""));
+        assert!(saved.contains("[providers.custom-b]"));
+        assert!(saved.contains("api_key = \"saved-b-key\""));
+        assert!(saved.contains("model = \"model-b-updated\""));
     }
 }
 

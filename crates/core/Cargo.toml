@@ -2,21 +2,22 @@
 name = "codewhale-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core runtime boundaries for CodeWhale"
+description = "Core runtime boundaries for Codewhale"
 
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-codewhale-agent = { path = "../agent", version = "0.8.68" }
-codewhale-config = { path = "../config", version = "0.8.68" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.8.68" }
-codewhale-hooks = { path = "../hooks", version = "0.8.68" }
-codewhale-mcp = { path = "../mcp", version = "0.8.68" }
-codewhale-protocol = { path = "../protocol", version = "0.8.68" }
-codewhale-state = { path = "../state", version = "0.8.68" }
-codewhale-tools = { path = "../tools", version = "0.8.68" }
+codewhale-agent = { path = "../agent", version = "0.9.0" }
+codewhale-config = { path = "../config", version = "0.9.0" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.0" }
+codewhale-hooks = { path = "../hooks", version = "0.9.0" }
+codewhale-mcp = { path = "../mcp", version = "0.9.0" }
+codewhale-protocol = { path = "../protocol", version = "0.9.0" }
+codewhale-state = { path = "../state", version = "0.9.0" }
+codewhale-tools = { path = "../tools", version = "0.9.0" }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true

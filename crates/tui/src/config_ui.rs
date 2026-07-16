@@ -682,7 +682,10 @@ fn validate_document(doc: &ConfigUiDocument) -> Result<()> {
 fn reload_runtime_config(app: &mut App, config: &mut Config) -> Result<()> {
     let reloaded = Config::load(app.config_path.clone(), app.config_profile.as_deref())?;
     *config = reloaded.clone();
-    app.api_provider = reloaded.api_provider();
+    let identity = reloaded
+        .active_provider_identity(reloaded.api_provider())
+        .map_err(anyhow::Error::msg)?;
+    app.set_provider_identity_record(identity);
     app.reasoning_effort =
         ReasoningEffort::from_setting(reloaded.reasoning_effort().unwrap_or_else(|| {
             app.reasoning_effort

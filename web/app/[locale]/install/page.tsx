@@ -257,16 +257,23 @@ codewhale doctor`;
             <p className="mt-3 text-sm text-ink-soft leading-relaxed">
               {isZh ? (
                 <>
-                  默认 Plan 模式（只读调查）。按{" "}
+                  新会话默认以 Act 模式打开。输入区空闲时，按{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Tab</kbd>{" "}
-                  切换到 Agent 模式（执行工具，按需审批）。再按一次进入 YOLO 模式（自动批准）。
+                  循环 Plan → Act → Operate；按{" "}
+                  <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Shift+Tab</kbd>{" "}
+                  循环 Ask → Auto-Review → Full Access 权限姿态。也可以运行{" "}
+                  <code className="inline">/mode</code> 选择模式或运行 <code className="inline">/config</code>{" "}
+                  查看权限。Plan 始终只读；Full Access 仅应用于你信任的工作区。
                 </>
               ) : (
                 <>
-                  Plan mode (read-only) is the default. Press{" "}
+                  New sessions open in Act mode by default. When the composer is idle, press{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Tab</kbd>{" "}
-                  to switch to Agent mode (tool execution, per-action approval). Press again for
-                  YOLO (auto-approve).
+                  to cycle Plan → Act → Operate; press{" "}
+                  <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Shift+Tab</kbd>{" "}
+                  to cycle Ask → Auto-Review → Full Access permission postures. You can also run{" "}
+                  <code className="inline">/mode</code> to choose a mode or <code className="inline">/config</code>{" "}
+                  to inspect permissions. Plan stays read-only; use Full Access only in a workspace you trust.
                 </>
               )}
             </p>
@@ -286,8 +293,8 @@ codewhale doctor`;
           </h2>
           <p className="text-sm text-ink-soft max-w-2xl mb-10">
             {isZh
-              ? "如果上面的脚本路径不适合你，从下面找到匹配你情况的一条。每条都安装同一组 codewhale / codewhale-tui 二进制。"
-              : "If the script above doesn't fit your setup, pick the row that matches your situation. Every path installs the same codewhale / codewhale-tui binary pair."}
+              ? "如果上面的脚本路径不适合你，请从下面选择匹配你环境的方式。各渠道的命令和打包形式有所不同，说明会明确列出安装内容。"
+              : "If the script above doesn't fit your setup, choose the channel that matches your environment. Command availability and packaging differ by channel, and each description states exactly what it installs."}
           </p>
 
           <div className="space-y-10">

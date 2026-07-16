@@ -1,4 +1,4 @@
-# Installing CodeWhale
+# Installing Codewhale
 
 This page covers every supported install path and the most common
 "it didn't install" failures, including **Linux ARM64** and other less
@@ -22,16 +22,17 @@ verifies them against `codewhale-artifacts-sha256.txt`, installs to
 
 ## 1. Supported platforms
 
-CodeWhale ships matched `codewhale`, `codew`, and `codewhale-tui` prebuilt binaries for
-these platform/architecture combinations. Linux ARM64 is available from
-v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
+Codewhale ships matched `codewhale`, `codew`, and `codewhale-tui` prebuilt binaries for
+the supported platform/architecture combinations below. Android/Termux is a
+preview in v0.9.0 pending real-device QA. Linux ARM64 is available from v0.8.8
+onward. Linux RISC-V prebuilts are temporarily paused because the locked
 `rquickjs-sys` dependency does not ship `riscv64gc-unknown-linux-gnu` bindings.
 
 | Platform     | Architecture | npm install | `cargo install` | GitHub release asset                                  |
 | ------------ | ------------ | :---------: | :-------------: | ----------------------------------------------------- |
 | Linux        | x64 (x86_64) |     ✅      |       ✅        | `codewhale-linux-x64`, `codew-linux-x64`, `codewhale-tui-linux-x64`        |
 | Linux        | arm64        |     ✅      |       ✅        | `codewhale-linux-arm64`, `codew-linux-arm64`, `codewhale-tui-linux-arm64`    |
-| Android / Termux | arm64 (aarch64) | ❌¹ | ✅² | `codewhale-android-arm64.tar.gz` Termux archive when published |
+| Android / Termux | arm64 (aarch64) | ❌¹ | ⚠️⁴ preview | `codewhale-android-arm64.tar.gz` preview archive when published |
 | Linux        | riscv64      |     ❌¹     |       ❌³       | temporarily unsupported until upstream bindings land |
 | macOS        | x64          |     ✅      |       ✅        | `codewhale-macos-x64`, `codew-macos-x64`, `codewhale-tui-macos-x64`        |
 | macOS        | arm64 (M-series) | ✅      |       ✅        | `codewhale-macos-arm64`, `codew-macos-arm64`, `codewhale-tui-macos-arm64`    |
@@ -45,6 +46,9 @@ v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
   [Build from source](#7-build-from-source) below.
 ³ RISC-V source builds currently need upstream `rquickjs-sys` RISC-V bindings or
   a bindgen-enabled dependency build.
+⁴ The Android/Termux build and setup paths are implemented, but v0.9.0 remains
+  preview-only until the real-device compile, startup, approval, file-tool, and
+  update checks tracked in #4236 and #4242 are complete.
 
 Android / Termux is not the same target as Linux arm64. Do not install the
 GNU libc `codewhale-linux-arm64` archive in Termux; use the Termux-specific
@@ -64,8 +68,8 @@ and are built on Ubuntu 24.04, so they can require `GLIBC_2.39`.
 
 This floor applies only to the **GNU libc** arm64 asset. The static x64 (musl)
 asset has no `GLIBC_*` symbols, so it passes the install preflight and runs on
-older systems without error. In the current v0.8.67 release lane, the GNU asset
-is built on Ubuntu 24.04 and can require `GLIBC_2.39`. Ubuntu 22.04 ships glibc
+older systems without error. The v0.9.0 GNU arm64 asset is built on Ubuntu
+24.04 and can require `GLIBC_2.39`. Ubuntu 22.04 ships glibc
 2.35, so those arm64 binaries fail with errors such as:
 
 ```text
@@ -136,9 +140,13 @@ cargo install codewhale-cli --locked
 cargo install codewhale-tui --locked
 ```
 
-First-run setup is the same as other platforms. Prefer `codewhale auth set` or
-provider environment variables; do not assume a desktop Secret Service keyring
-exists inside Termux.
+The normal first-run setup path is implemented, but its Android interaction is
+still part of the preview QA above. Prefer provider environment variables for
+temporary credentials. `codewhale auth set` is available, but the Termux build
+has no supported OS keyring integration and falls back to file-backed secrets
+by writing `~/.codewhale/config.toml` and mirroring keys to
+`~/.codewhale/secrets/secrets.json`. Both are plaintext files protected by
+`0600` permissions and are not encrypted at rest.
 
 ```bash
 codewhale auth set --provider deepseek
@@ -163,12 +171,14 @@ codewhale-tui --version
 
 Known limitations:
 
-- Sandbox behavior must be verified on-device. Android kernels and Termux
-  packaging may not expose the same Landlock, seccomp, or Bubblewrap behavior
-  documented for desktop/server Linux.
-- OS keyring behavior is best-effort. If Termux cannot provide a usable secret
-  store, use `codewhale auth status` to confirm the actual source and fall back
-  to provider env vars or config-backed auth.
+- Commands inherit Android's per-app UID, SELinux, and seccomp protections and
+  any permissions granted to Termux. Codewhale's additional Landlock/bwrap
+  child-process sandbox is Linux-only and is not built on Android, so approved
+  commands receive no Codewhale-specific filesystem narrowing.
+- The Termux build has no supported Android Keystore or desktop Secret Service
+  integration. Use `codewhale auth status` to confirm the active source and
+  prefer provider environment variables when file-backed plaintext storage is
+  not acceptable.
 - Terminal rendering varies by Android terminal app. The TUI always owns the
   alternate screen; `--no-alt-screen` is accepted only as a deprecated
   compatibility no-op. If a terminal app cannot render the full-screen TUI,
@@ -215,11 +225,11 @@ a download sourced from an impersonating repository or mirror.
 ## 3. Install via npm
 
 npm is the recommended install path. The `codewhale` wrapper is published at
-v0.8.68 (Node 18+; wrapper available for v0.8.56 and later).
+v0.9.0 (Node 18+; wrapper available for v0.8.56 and later).
 
 ```bash
 npm install -g codewhale
-codewhale --version   # 0.8.68
+codewhale --version   # 0.9.0
 ```
 
 `postinstall` downloads the right pair of binaries from the matching GitHub
@@ -476,7 +486,7 @@ curl -L -o codewhale-bundles-sha256.txt \
   https://github.com/Hmbown/CodeWhale/releases/download/vX.Y.Z/codewhale-bundles-sha256.txt
 ```
 
-Inside a CodeWhale workspace, `/restore list [N]` lists side-git file snapshots
+Inside a Codewhale workspace, `/restore list [N]` lists side-git file snapshots
 and `/restore <N>` restores files from the chosen snapshot. That workspace
 rollback does not change your installed binary version and does not rewrite
 conversation history.
@@ -519,7 +529,7 @@ CodeWhaleSetup.exe /S
 
 The installer is per-user and does not request elevation. Run silent installs in
 the target user's context, or use a deployment tool that can run the installer
-for each user profile that needs CodeWhale.
+for each user profile that needs Codewhale.
 
 The release-built installer is currently unsigned and may trigger Windows
 SmartScreen. Verify the SHA-256 checksum from `codewhale-artifacts-sha256.txt`
@@ -530,7 +540,7 @@ your environment requires signed application packages.
 
 ```powershell
 cd scripts\installer
-# Place codewhale.exe and codewhale-tui.exe here, then:
+# Place codewhale.exe, codew.exe, and codewhale-tui.exe here, then:
 makensis /DVERSION=<version> codewhale.nsi
 ```
 
@@ -799,7 +809,7 @@ cargo install codewhale-tui --locked
 ```
 
 The prebuilt npm/GitHub binaries do not need these build-time packages; they
-only apply when WSL2 is compiling CodeWhale from source.
+only apply when WSL2 is compiling Codewhale from source.
 
 ### Wrapper installs but `codewhale` isn't found
 

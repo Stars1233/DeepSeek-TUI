@@ -61,10 +61,10 @@ function highlight(text: string, query: string): React.ReactNode {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Topic card                                                         */
+/*  Topic row                                                          */
 /* ------------------------------------------------------------------ */
 
-function TopicCard({
+function TopicRow({
   topic,
   locale,
   query,
@@ -82,20 +82,19 @@ function TopicCard({
     <Link
       href={href}
       target={isExternal ? "_blank" : undefined}
-      className="hairline-t hairline-b hairline-l hairline-r p-4 hover:bg-paper-deep transition-colors group block"
+      rel={isExternal ? "noreferrer" : undefined}
+      className="docs-topic-row"
     >
-      <div className="flex items-center gap-2 mb-1.5">
-        <span className="font-mono text-[0.62rem] uppercase tracking-widest text-ink-mute">
+      <div className="docs-topic-main">
+        <div className="docs-topic-title">
           {highlight(isZh ? topic.label.zh : topic.label.en, query)}
-        </span>
-        {isExternal && (
-          <span className="font-mono text-[0.6rem] text-ink-mute">↗</span>
-        )}
+          <span>{isExternal ? (isZh ? "源文档" : "Source doc") : (isZh ? "网页" : "Web guide")}</span>
+        </div>
+        <p>
+          {highlight(isZh ? topic.description.zh : topic.description.en, query)}
+        </p>
       </div>
-      <p className="text-sm text-ink-soft leading-relaxed">
-        {highlight(isZh ? topic.description.zh : topic.description.en, query)}
-      </p>
-      <div className="mt-2 font-mono text-[0.62rem] text-ink-mute truncate">
+      <div className="docs-topic-source">
         {sources.map((s, i) => (
           <span key={s}>
             {i > 0 && ", "}
@@ -103,6 +102,7 @@ function TopicCard({
           </span>
         ))}
       </div>
+      <span className="docs-topic-arrow" aria-hidden="true">{isExternal ? "↗" : "→"}</span>
     </Link>
   );
 }
@@ -155,11 +155,15 @@ export function DocsSearch({ locale }: { locale: string }) {
   const hasQuery = query.trim().length > 0;
 
   return (
-    <div>
+    <div className="docs-index">
       {/* Search bar */}
-      <div className="mb-8">
+      <div className="docs-search-block">
+        <label htmlFor="docs-search" className="docs-search-label">
+          {isZh ? "搜索文档" : "Search documentation"}
+        </label>
         <div className="relative">
           <input
+            id="docs-search"
             ref={inputRef}
             type="text"
             value={query}
@@ -169,13 +173,14 @@ export function DocsSearch({ locale }: { locale: string }) {
                 ? "搜索文档…（按 / 快速聚焦）"
                 : "Search docs… (press / to focus)"
             }
-            className="search-input w-full"
+            className="search-input docs-search-input w-full"
             aria-label={isZh ? "搜索文档" : "Search documentation"}
           />
           {hasQuery && (
             <button
+              type="button"
               onClick={() => setQuery("")}
-              className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-sm text-ink-mute hover:text-indigo transition-colors"
+              className="docs-search-clear"
               aria-label={isZh ? "清除" : "Clear"}
             >
               ✕
@@ -183,7 +188,7 @@ export function DocsSearch({ locale }: { locale: string }) {
           )}
         </div>
         {hasQuery && (
-          <div className="mt-2 font-mono text-[0.7rem] text-ink-mute">
+          <div className="docs-search-count" aria-live="polite">
             {matched > 0
               ? isZh
                 ? `${matched} / ${total} 篇文档匹配 "${query.trim()}"`
@@ -197,26 +202,27 @@ export function DocsSearch({ locale }: { locale: string }) {
 
       {/* Results */}
       {matched > 0 ? (
-        <div className="space-y-12">
+        <div className="docs-result-groups">
           {[...grouped.entries()].map(([cat, topics]) => (
-            <section key={cat} id={cat}>
-              <h2 className="font-display text-2xl mb-1">
-                {isZh ? CATEGORY_LABELS[cat]?.zh ?? cat : CATEGORY_LABELS[cat]?.en ?? cat}
-              </h2>
-              <div className="grid sm:grid-cols-2 gap-4 mt-4">
+            <section key={cat} id={cat} className="docs-result-group">
+              <div className="docs-result-heading">
+                <h2>{isZh ? CATEGORY_LABELS[cat]?.zh ?? cat : CATEGORY_LABELS[cat]?.en ?? cat}</h2>
+                <span>{topics.length}</span>
+              </div>
+              <div className="docs-topic-list">
                 {topics.map((t) => (
-                  <TopicCard key={t.id} topic={t} locale={locale} query={query} />
+                  <TopicRow key={t.id} topic={t} locale={locale} query={query} />
                 ))}
               </div>
             </section>
           ))}
         </div>
       ) : (
-        <div className="text-center py-16">
-          <p className="font-display text-lg text-ink-mute mb-2">
+        <div className="docs-empty">
+          <p>
             {isZh ? "未找到结果" : "No results found"}
           </p>
-          <p className="text-sm text-ink-mute">
+          <p>
             {isZh
               ? "尝试使用不同的关键字，或浏览 GitHub 上的完整文档。"
               : "Try a different keyword, or browse the full docs on GitHub."}
@@ -224,20 +230,20 @@ export function DocsSearch({ locale }: { locale: string }) {
           <Link
             href="https://github.com/Hmbown/CodeWhale/tree/main/docs"
             target="_blank"
-            className="inline-flex items-center gap-2 mt-4 px-4 py-2 hairline-t hairline-b hairline-l hairline-r font-mono text-[0.7rem] uppercase tracking-wider hover:bg-paper-deep transition-colors"
+            className="portal-button portal-button-secondary"
           >
             {isZh ? "GitHub 文档目录 ↗" : "GitHub docs directory ↗"}
           </Link>
         </div>
       )}
 
-      {/* Footer note (only when not searching) */}
+      {/* Source note (only when not searching) */}
       {!hasQuery && (
-        <section className="hairline-t pt-8 mt-12">
-          <p className="text-sm text-ink-mute leading-relaxed max-w-2xl">
+        <section className="docs-source-note">
+          <p>
             {isZh
-              ? "§ 标记的条目在 Codewhale 网站上有独立页面；↗ 标记的条目链接到 GitHub 仓库中的源文档。所有内容来源于 docs/ 目录下的 40+ 篇 Markdown 文档，通过 docs-map.ts 注册表维护。"
-              : "Entries marked § have dedicated pages on codewhale.net; entries marked ↗ link to source documents in the GitHub repository. All content is sourced from 40+ Markdown documents in the docs/ directory, maintained through the docs-map.ts registry."}
+              ? "“网页”条目提供站内指南；“源文档”条目直接打开 GitHub 仓库中的完整参考资料。文档索引由仓库中的 docs-map.ts 注册表维护。"
+              : "Web guides stay on codewhale.net. Source docs open the complete reference in the GitHub repository. The index is maintained from the docs-map.ts registry in the repository."}
           </p>
         </section>
       )}

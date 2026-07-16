@@ -585,7 +585,7 @@ impl HotbarActionSource for BuiltinHotbarActionSource {
             "mode.operate",
             "operate",
             "Operate mode",
-            "Coordinate a Fleet for multi-step work.",
+            "Send tasks while Fleet workers run in parallel.",
             AppHotbarKind::Mode(AppMode::Operate),
         ));
         registry.register(AppHotbarAction::new(

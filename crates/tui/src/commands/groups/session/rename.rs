@@ -90,7 +90,9 @@ pub(crate) fn rename_with_manager(
     session.context_references = app.session_context_references.clone();
     session.artifacts = app.session_artifacts.clone();
     session.metadata.model = app.model_selection_for_persistence();
-    session.metadata.model_provider = app.api_provider.as_str().to_string();
+    session
+        .metadata
+        .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     session.metadata.workspace.clone_from(&app.workspace);
     session.metadata.mode = Some(app.mode.as_setting().to_string());
     app.sync_cost_to_metadata(&mut session.metadata);
@@ -200,8 +202,8 @@ mod tests {
         );
         let session_id = session.metadata.id.clone();
         manager.save_session(&session).unwrap();
-        app.set_model_selection("openrouter/new-route".to_string());
-        app.api_provider = crate::config::ApiProvider::Openrouter;
+        app.set_model_selection("local-code-model".to_string());
+        app.set_provider_identity(crate::config::ApiProvider::Custom, "lm-studio");
         app.mode = crate::tui::app::AppMode::Operate;
         app.system_prompt = None;
         {
@@ -221,8 +223,12 @@ mod tests {
         assert_eq!(reloaded.metadata.title, "Brand New Title");
         assert_eq!(reloaded.work_state, expected_work_state);
         assert!(reloaded.system_prompt.is_none());
-        assert_eq!(reloaded.metadata.model, "openrouter/new-route");
-        assert_eq!(reloaded.metadata.model_provider, "openrouter");
+        assert_eq!(reloaded.metadata.model, "local-code-model");
+        assert_eq!(reloaded.metadata.model_provider, "custom");
+        assert_eq!(
+            reloaded.metadata.model_provider_id.as_deref(),
+            Some("lm-studio")
+        );
         assert_eq!(reloaded.metadata.workspace, app.workspace);
         assert_eq!(reloaded.metadata.mode.as_deref(), Some("operate"));
         assert_eq!(app.session_title.as_deref(), Some("Brand New Title"));

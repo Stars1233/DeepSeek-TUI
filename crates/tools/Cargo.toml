@@ -2,14 +2,15 @@
 name = "codewhale-tools"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Tool invocation lifecycle, schema validation, and scheduler parallelism for CodeWhale"
+description = "Tool invocation lifecycle, schema validation, and scheduler parallelism for Codewhale"
 
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-codewhale-protocol = { path = "../protocol", version = "0.8.68" }
+codewhale-protocol = { path = "../protocol", version = "0.9.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

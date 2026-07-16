@@ -129,14 +129,15 @@ pub fn assess_workflow_elevation(
         &mut secrets,
     );
 
-    // Planner risk string is stored on `description` by the structured-plan
-    // lowerer when present (`risk: elevated|writes|shell|network|…`).
-    apply_plan_risk_hint(
-        spec.description.as_deref(),
-        &mut writes,
-        &mut shell,
-        &mut network,
-    );
+    // The structured-plan lowerer stores its validated risk enum on
+    // `description`, while authored Workflow specs use that field for ordinary
+    // prose. Only consume recognized enum values here: treating free-form
+    // descriptions as unknown risk would falsely report writes, shell, and
+    // network in the approval receipt. Unknown planner risk remains fail-closed
+    // in `assess_plan_risk_string` and is rejected before structured lowering.
+    if let Some(risk) = embedded_plan_risk_hint(spec.description.as_deref()) {
+        apply_plan_risk_hint(Some(risk), &mut writes, &mut shell, &mut network);
+    }
 
     let effective_tokens = options
         .token_budget
@@ -265,6 +266,29 @@ fn apply_plan_risk_hint(
             *network = true;
         }
     }
+}
+
+fn embedded_plan_risk_hint(description: Option<&str>) -> Option<&str> {
+    let value = description
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    matches!(
+        value,
+        "read_only"
+            | "readonly"
+            | "low"
+            | "safe"
+            | "writes"
+            | "write"
+            | "read_write"
+            | "readwrite"
+            | "medium"
+            | "shell"
+            | "network"
+            | "elevated"
+            | "high"
+    )
+    .then_some(value)
 }
 
 fn format_budget_label(
@@ -560,6 +584,49 @@ mod tests {
     }
 
     #[test]
+    fn free_form_description_is_not_treated_as_plan_risk() {
+        let spec = spec_with(
+            vec![WorkflowNode::Leaf(leaf("scan", TaskMode::ReadOnly))],
+            Some(
+                "Read-only release acceptance fixture; no step edits files or accesses the network.",
+            ),
+        );
+
+        let elevation = assess_workflow_elevation(&spec, ElevationOptions::default());
+        assert!(elevation.is_read_only_envelope(), "{elevation:?}");
+        assert!(!elevation.writes, "{elevation:?}");
+        assert!(!elevation.shell, "{elevation:?}");
+        assert!(!elevation.network, "{elevation:?}");
+        assert!(elevation.reasons.is_empty(), "{elevation:?}");
+    }
+
+    #[test]
+    fn read_only_implementer_role_is_not_write_capable_or_elevated() {
+        let mut implementer = leaf("verify-only", TaskMode::ReadOnly);
+        implementer.agent_type = AgentType::Implementer;
+        implementer.role = Some("implementer".to_string());
+        let spec = spec_with(
+            vec![WorkflowNode::BranchSet(BranchSpec {
+                id: "parallel-read-only".to_string(),
+                description: None,
+                parallel: true,
+                budget: BudgetSpec::default(),
+                permissions: PermissionSpec::default(),
+                model_policy: ModelPolicy::default(),
+                children: vec![WorkflowNode::Leaf(implementer)],
+            })],
+            Some("read_only"),
+        );
+
+        let elevation = assess_workflow_elevation(&spec, ElevationOptions::default());
+        assert!(elevation.is_read_only_envelope(), "{elevation:?}");
+        assert!(!elevation.elevated, "{elevation:?}");
+        assert!(!elevation.writes, "{elevation:?}");
+        assert!(!elevation.shell, "{elevation:?}");
+        assert!(!elevation.worktree, "{elevation:?}");
+    }
+
+    #[test]
     fn write_plan_elevates_and_flags_shell_for_implementer() {
         let spec = spec_with(
             vec![WorkflowNode::Leaf(leaf("impl", TaskMode::ReadWrite))],
@@ -669,6 +736,11 @@ mod tests {
         assert_eq!(
             assess_plan_risk_string(Some("elevated")),
             PlanRiskHint::Elevated
+        );
+        assert_eq!(
+            assess_plan_risk_string(Some("unknown-risk")),
+            PlanRiskHint::Elevated,
+            "unknown planner risk must remain fail-closed"
         );
         assert!(assess_plan_risk_string(Some("elevated")).elevates());
         assert!(!assess_plan_risk_string(Some("read_only")).elevates());

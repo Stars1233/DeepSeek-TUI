@@ -1,7 +1,9 @@
 # Dogfood: Automatic Workflow scenarios (#4131)
 
-Reproducible checks for the soft-auto Workflow product path. Another engineer
-should be able to rerun every scenario from this doc alone.
+Reproducible checks for the optional Act/Agent soft-auto Workflow path. Operate
+uses direct workers for ordinary messages and chooses Workflow only for ordered
+phases, gates, shared budgets, replay, or deterministic fan-in. Another
+engineer should be able to rerun every scenario from this doc alone.
 
 Related:
 
@@ -46,7 +48,8 @@ Primary interactive surface:
 codewhale-tui   # or: cargo run -p codewhale-tui --locked
 ```
 
-Confirm soft-auto is on (`[workflow] automatic = true` is the default).
+Switch to Act mode and confirm soft-auto is on (`[workflow] automatic = true`
+is the default).
 
 ---
 
@@ -67,7 +70,7 @@ Fill the pass/fail table at the bottom after each interactive pass.
 
 ### Reproducible prompt
 
-In `codewhale-tui` with workspace = CodeWhale checkout (or a copy):
+In `codewhale-tui` in Act mode with workspace = CodeWhale checkout (or a copy):
 
 ```text
 Audit this repository for security and reliability risks. Stay read-only:

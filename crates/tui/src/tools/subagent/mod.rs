@@ -211,9 +211,9 @@ const SUBAGENT_TYPE_DESCRIPTION: &str = "Sub-agent type. Accepted vocabulary: ge
 /// don't conflate with existing agent type labels. Porpoises (Phocoenidae)
 /// are excluded because their name doesn't carry well as a friendly label.
 ///
-/// English and Simplified-Chinese names are interleaved so any newly spawned
-/// agent has a roughly even chance of either — the goal is friendly variety,
-/// not a strict locale match.
+/// English and Simplified-Chinese names are stored as adjacent pairs. Name
+/// selection follows the active session locale; it never mixes languages in
+/// one session. Smaller curated pools below cover every other shipped locale.
 ///
 /// Taxonomy source: Society for Marine Mammalogy (2025).
 pub const WHALE_NICKNAMES: &[&str] = &[
@@ -321,27 +321,136 @@ pub const WHALE_NICKNAMES: &[&str] = &[
     "拉河豚",
 ];
 
-/// Return a deterministic whale name for a given agent ID using a hash of
-/// the ID string. The same ID always gets the same name — stable across
-/// session restarts for persisted agents.
+const WHALE_NICKNAMES_JA: &[&str] = &[
+    "シロナガスクジラ",
+    "ザトウクジラ",
+    "マッコウクジラ",
+    "ナガスクジラ",
+    "イワシクジラ",
+    "ミンククジラ",
+    "コククジラ",
+    "ホッキョククジラ",
+    "シロイルカ",
+    "イッカク",
+    "シャチ",
+    "ゴンドウクジラ",
+];
+
+const WHALE_NICKNAMES_ZH_HANT: &[&str] = &[
+    "藍鯨",
+    "座頭鯨",
+    "抹香鯨",
+    "長鬚鯨",
+    "塞鯨",
+    "布氏鯨",
+    "小鬚鯨",
+    "灰鯨",
+    "弓頭鯨",
+    "白鯨",
+    "獨角鯨",
+    "虎鯨",
+];
+
+const WHALE_NICKNAMES_PT_BR: &[&str] = &[
+    "Azul",
+    "Jubarte",
+    "Cachalote",
+    "Baleia-fin",
+    "Baleia-sei",
+    "Baleia-de-bryde",
+    "Baleia-minke",
+    "Cinzenta",
+    "Baleia-franca",
+    "Beluga",
+    "Narval",
+    "Orca",
+];
+
+const WHALE_NICKNAMES_ES_419: &[&str] = &[
+    "Azul",
+    "Jorobada",
+    "Cachalote",
+    "Rorcual común",
+    "Rorcual sei",
+    "Rorcual de Bryde",
+    "Rorcual aliblanco",
+    "Gris",
+    "Ballena franca",
+    "Beluga",
+    "Narval",
+    "Orca",
+];
+
+const WHALE_NICKNAMES_VI: &[&str] = &[
+    "Cá voi xanh",
+    "Cá voi lưng gù",
+    "Cá nhà táng",
+    "Cá voi vây",
+    "Cá voi Sei",
+    "Cá voi Bryde",
+    "Cá voi Minke",
+    "Cá voi xám",
+    "Cá voi đầu cong",
+    "Cá voi trắng",
+    "Kỳ lân biển",
+    "Cá voi sát thủ",
+];
+
+const WHALE_NICKNAMES_KO: &[&str] = &[
+    "대왕고래",
+    "혹등고래",
+    "향유고래",
+    "참고래",
+    "보리고래",
+    "브라이드고래",
+    "밍크고래",
+    "귀신고래",
+    "북극고래",
+    "흰고래",
+    "외뿔고래",
+    "범고래",
+];
+
+/// Return a deterministic whale name in the active UI locale.
 #[must_use]
-pub fn whale_name_for_id(id: &str) -> String {
+pub fn whale_name_for_id_in_locale(id: &str, locale_tag: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     id.hash(&mut hasher);
-    let idx = (hasher.finish() as usize) % WHALE_NICKNAMES.len();
+    let hash = hasher.finish() as usize;
+    let normalized = locale_tag.trim().to_ascii_lowercase();
+
+    let localized_pool = match normalized.as_str() {
+        "ja" => Some(WHALE_NICKNAMES_JA),
+        "zh-hant" => Some(WHALE_NICKNAMES_ZH_HANT),
+        "pt-br" => Some(WHALE_NICKNAMES_PT_BR),
+        "es-419" => Some(WHALE_NICKNAMES_ES_419),
+        "vi" => Some(WHALE_NICKNAMES_VI),
+        "ko" => Some(WHALE_NICKNAMES_KO),
+        _ => None,
+    };
+    if let Some(pool) = localized_pool {
+        return pool[hash % pool.len()].to_string();
+    }
+
+    debug_assert_eq!(WHALE_NICKNAMES.len() % 2, 0);
+    let pair_count = WHALE_NICKNAMES.len() / 2;
+    let pair = hash % pair_count;
+    let language_offset = usize::from(normalized == "zh-hans");
+    let idx = pair * 2 + language_offset;
     WHALE_NICKNAMES[idx].to_string()
 }
 
-/// Assign a unique whale name for an agent ID, avoiding collisions with
-/// names already in `active_names`. If the deterministic name is taken,
-/// appends a numeric suffix (e.g. "Orca (2)").
+/// Assign a unique locale-matched whale name for an agent ID.
+/// If the deterministic name is taken, appends a numeric suffix (for example,
+/// `Orca (2)`).
 #[must_use]
-pub fn assign_unique_whale_name(
+pub fn assign_unique_whale_name_in_locale(
     id: &str,
     active_names: &std::collections::HashSet<String>,
+    locale_tag: &str,
 ) -> String {
-    let base = whale_name_for_id(id);
+    let base = whale_name_for_id_in_locale(id, locale_tag);
     if !active_names.contains(&base) {
         return base;
     }
@@ -364,6 +473,96 @@ pub fn assign_unique_whale_name(
     }
     // Fallback (should never reach here)
     format!("{base} ({})", id.get(..4).unwrap_or("?"))
+}
+
+/// Return the unsuffixed whale label when `name` could have been generated for
+/// this exact agent id in a shipped locale. Numeric collision suffixes are
+/// presentation-only and do not make the label user-authored.
+fn generated_whale_name_base<'a>(agent_id: &str, name: &'a str) -> Option<&'a str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let base = name
+        .rsplit_once(" (")
+        .and_then(|(base, suffix)| {
+            suffix
+                .strip_suffix(')')
+                .filter(|number| !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()))
+                .map(|_| base)
+        })
+        .unwrap_or(name);
+
+    // With no persisted provenance bit, the narrowest truthful test is whether
+    // this exact agent id could have generated the label in a shipped locale.
+    // A user-authored label that happens to be a whale word for some other id
+    // remains explicit. An exact deterministic match is inherently ambiguous
+    // and stays classified as generated for backward compatibility.
+    crate::localization::Locale::shipped()
+        .iter()
+        .any(|locale| whale_name_for_id_in_locale(agent_id, locale.tag()) == base)
+        .then_some(base)
+}
+
+/// Derive the generated whale labels shown for a set of workers from their
+/// locale-neutral ids and the active UI language.
+///
+/// Persisted `nickname` values predate locale-scoped naming and may contain a
+/// whale label chosen under another language. Those generated values are
+/// deliberately ignored here. A nickname that this agent id could not have
+/// generated is an explicit custom label and remains intact, even when it is a
+/// whale word from a built-in pool.
+#[must_use]
+pub(crate) fn localized_whale_display_names<'a>(
+    agents: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    locale_tag: &str,
+) -> std::collections::HashMap<String, String> {
+    let mut by_id = std::collections::BTreeMap::<String, Option<String>>::new();
+    for (agent_id, nickname) in agents {
+        if agent_id.trim().is_empty() {
+            continue;
+        }
+        let nickname = nickname
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
+        by_id
+            .entry(agent_id.to_string())
+            .and_modify(|existing| {
+                if existing.is_none() && nickname.is_some() {
+                    *existing = nickname.clone();
+                }
+            })
+            .or_insert(nickname);
+    }
+
+    let mut names = std::collections::HashMap::with_capacity(by_id.len());
+    let mut active_names = std::collections::HashSet::new();
+
+    // Reserve explicit labels first so generated names never shadow them.
+    for (agent_id, nickname) in &by_id {
+        let Some(nickname) = nickname
+            .as_deref()
+            .filter(|name| generated_whale_name_base(agent_id, name).is_none())
+        else {
+            continue;
+        };
+        active_names.insert(nickname.to_string());
+        names.insert(agent_id.clone(), nickname.to_string());
+    }
+
+    // BTreeMap iteration makes collision suffix ownership stable even when
+    // manager/progress event order changes between frames or session loads.
+    for agent_id in by_id.keys() {
+        if names.contains_key(agent_id) {
+            continue;
+        }
+        let name = assign_unique_whale_name_in_locale(agent_id, &active_names, locale_tag);
+        active_names.insert(name.clone());
+        names.insert(agent_id.clone(), name);
+    }
+
+    names
 }
 
 // === Types ===
@@ -1070,7 +1269,14 @@ fn worker_profile_for_spawn(
     let mut requested = WorkerRuntimeProfile::for_role(agent_type.clone());
     requested.tools = worker_tool_scope(tool_profile);
     requested.model = model_route.unwrap_or_else(|| ModelRoute::Fixed(effective_model.to_string()));
-    requested.provider = Some(runtime.client.api_provider().as_str().to_string());
+    let provider = runtime.client.api_provider();
+    requested.provider = Some(
+        runtime
+            .api_config
+            .as_ref()
+            .map(|config| config.provider_identity_for(provider))
+            .unwrap_or_else(|| provider.as_str().to_string()),
+    );
     requested.max_spawn_depth = runtime.max_spawn_depth.saturating_sub(runtime.spawn_depth);
     requested.background = true;
     runtime.worker_profile.derive_child(&requested)
@@ -1279,7 +1485,7 @@ struct SpawnRequest {
     /// inside the parent's workspace. For first-class git worktree isolation,
     /// use `worktree` instead of pre-creating a cwd by hand.
     cwd: Option<PathBuf>,
-    /// Optional first-class git worktree isolation. When set, CodeWhale
+    /// Optional first-class git worktree isolation. When set, Codewhale
     /// creates a sibling worktree/branch and runs the child from that checkout.
     worktree: Option<SubAgentWorktreeRequest>,
     /// Optional file path for cache-aware resident mode (#529). When set,
@@ -1384,7 +1590,7 @@ struct PersistedSubAgent {
     assignment: SubAgentAssignment,
     #[serde(default)]
     model: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     nickname: Option<String>,
     status: SubAgentStatus,
     result: Option<String>,
@@ -1500,6 +1706,9 @@ pub struct SubAgentRuntime {
     /// would send model B's id to provider A's endpoint, the exact #4093 defect.
     pub api_config: Option<std::sync::Arc<crate::config::Config>>,
     pub model: String,
+    /// Active UI/model locale used for generated human-facing worker names.
+    /// Internal ids and session handles remain language-neutral.
+    pub locale_tag: String,
     pub auto_model: bool,
     pub reasoning_effort: Option<String>,
     pub reasoning_effort_auto: bool,
@@ -1513,8 +1722,14 @@ pub struct SubAgentRuntime {
     pub allow_shell: bool,
     /// When true, Suggest-level file writes auto-accept for write-capable roles
     /// without full parent auto-approve. Shell/network/MCP still gated.
-    /// Set for Workflow-spawned children.
+    /// Set for Workflow-spawned children and parent-approved root Operate
+    /// workers.
     pub accept_edits: bool,
+    /// Allow the built-in, non-custom verification tools after a root Operate
+    /// worker start has crossed the parent's approval boundary. This is not a
+    /// general shell grant: arbitrary commands and custom verifier programs
+    /// remain blocked unless the parent session is auto-approved.
+    pub accept_verification: bool,
     /// Native Agent-mode tool surface inherited from the parent turn. Carries
     /// feature/config-dependent families such as web search, patch, memory,
     /// vision, notify, and FIM so child catalogs stay in parity with the parent.
@@ -1600,6 +1815,7 @@ impl SubAgentRuntime {
             client,
             api_config: None,
             model,
+            locale_tag: "en".to_string(),
             auto_model: false,
             reasoning_effort: None,
             reasoning_effort_auto: false,
@@ -1608,6 +1824,7 @@ impl SubAgentRuntime {
             context,
             allow_shell,
             accept_edits: false,
+            accept_verification: false,
             agent_tool_surface_options: AgentToolSurfaceOptions::new(
                 ShellPolicy::from_legacy_allow_shell(allow_shell),
             ),
@@ -1634,6 +1851,13 @@ impl SubAgentRuntime {
     #[must_use]
     pub fn with_parent_mode(mut self, mode: AppMode) -> Self {
         self.parent_mode = mode;
+        self
+    }
+
+    /// Match generated worker display names to the active session language.
+    #[must_use]
+    pub fn with_locale_tag(mut self, locale_tag: impl Into<String>) -> Self {
+        self.locale_tag = locale_tag.into();
         self
     }
 
@@ -1763,7 +1987,10 @@ impl SubAgentRuntime {
     /// credentials/base URL cannot be resolved. Callers MUST surface that error
     /// rather than fall back to the session client: a silent fallback would send
     /// the pinned model id to the session provider's endpoint (#4093).
-    fn client_for_provider_id(&self, provider_id: &str) -> Result<DeepSeekClient, String> {
+    fn scoped_config_for_provider_id(
+        &self,
+        provider_id: &str,
+    ) -> Result<(crate::config::Config, crate::config::ProviderIdentity), String> {
         let Some(api_config) = self.api_config.as_ref() else {
             return Err(
                 "session Config was not threaded into this runtime; cannot build a \
@@ -1775,31 +2002,15 @@ impl SubAgentRuntime {
         if provider_id.is_empty() {
             return Err("provider pin was blank".to_string());
         }
-        let built_in = crate::config::ApiProvider::parse(provider_id);
-        let custom = built_in.is_none()
-            && api_config
-                .providers
-                .as_ref()
-                .and_then(|providers| providers.custom_provider_config(provider_id))
-                .is_some();
-        if built_in.is_none() && !custom {
-            return Err(format!(
-                "provider '{provider_id}' is neither a built-in provider nor a configured \
-                 [providers.{provider_id}] custom provider"
-            ));
-        }
+        let identity = api_config.resolve_provider_identity(provider_id)?;
         let mut provider_config = (**api_config).clone();
         // EPIC #2608: the provider is taken verbatim from the profile pin
         // (built-in id or configured custom id), never inferred from the model
         // id. Overriding only `provider` makes `Config::api_provider`,
         // `deepseek_base_url`, and `deepseek_api_key` all re-resolve for the
         // pinned provider.
-        provider_config.provider = Some(
-            built_in
-                .map(|provider| provider.as_str().to_string())
-                .unwrap_or_else(|| provider_id.to_string()),
-        );
-        DeepSeekClient::new(&provider_config).map_err(|err| err.to_string())
+        provider_config.provider = Some(identity.key.clone());
+        Ok((provider_config, identity))
     }
 
     /// Install the merged fleet roster (#fleet-roster cutover (v0.8.67)).
@@ -1862,6 +2073,7 @@ impl SubAgentRuntime {
             client: self.client.clone(),
             api_config: self.api_config.clone(),
             model: self.model.clone(),
+            locale_tag: self.locale_tag.clone(),
             auto_model: self.auto_model,
             reasoning_effort: self.reasoning_effort.clone(),
             reasoning_effort_auto: self.reasoning_effort_auto,
@@ -1870,6 +2082,10 @@ impl SubAgentRuntime {
             context: child_context,
             allow_shell: self.allow_shell,
             accept_edits: self.accept_edits,
+            // A parent-approved Operate verification lease belongs to its
+            // direct worker only; nested children must cross their own
+            // approval boundary instead of silently inheriting it.
+            accept_verification: self.accept_verification && self.spawn_depth == 0,
             agent_tool_surface_options: self.agent_tool_surface_options.clone(),
             worker_profile: self.worker_profile.clone(),
             event_tx: self.event_tx.clone(),
@@ -2193,7 +2409,13 @@ impl SubAgentManager {
                 prompt: agent.prompt.clone(),
                 assignment: agent.assignment.clone(),
                 model: agent.model.clone(),
-                nickname: agent.nickname.clone(),
+                // Generated whale names are locale-derived presentation, not
+                // durable identity. Persist only an explicit custom nickname;
+                // legacy generated values are discarded again on load.
+                nickname: agent
+                    .nickname
+                    .clone()
+                    .filter(|name| generated_whale_name_base(&agent.id, name).is_none()),
                 status: agent.status.clone(),
                 result: agent.result.clone(),
                 steps_taken: agent.steps_taken,
@@ -2350,6 +2572,9 @@ impl SubAgentManager {
         self.agents.clear();
         self.worker_records.clear();
         for persisted in state.agents {
+            let nickname = persisted
+                .nickname
+                .filter(|name| generated_whale_name_base(&persisted.id, name).is_none());
             let mut status = persisted.status;
             if matches!(status, SubAgentStatus::Running) {
                 status = SubAgentStatus::Interrupted(SUBAGENT_RESTART_REASON.to_string());
@@ -2381,7 +2606,10 @@ impl SubAgentManager {
                 } else {
                     persisted.model
                 },
-                nickname: persisted.nickname,
+                // v0.8.68 and earlier persisted generated whale text. It may
+                // have been chosen under a different UI language, so never
+                // replay it into a new session. Explicit custom names survive.
+                nickname,
                 status,
                 result: persisted.result,
                 steps_taken: persisted.steps_taken,
@@ -3244,9 +3472,13 @@ impl SubAgentManager {
             .values()
             .filter_map(|a| a.nickname.clone())
             .collect();
-        let nickname = options
-            .nickname
-            .or_else(|| Some(assign_unique_whale_name(&agent_id, &active_names)));
+        let nickname = options.nickname.or_else(|| {
+            Some(assign_unique_whale_name_in_locale(
+                &agent_id,
+                &active_names,
+                &runtime.locale_tag,
+            ))
+        });
         let tools = build_allowed_tools(&agent_type, allowed_tools, runtime.allow_shell)?;
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let mut agent = SubAgent::new(
@@ -4480,11 +4712,11 @@ impl ToolSpec for AgentTool {
 
     fn description(&self) -> &'static str {
         concat!(
-            "Start a focused child agent task. Prefer deliberate delegation: declare type (or profile), ",
-            "workspace_policy, expected_artifact, and write_authority (deliberate=true makes them required). ",
-            "For coordination after spawn, use agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait — ",
-            "do not poll. Pass profile to spawn a saved Fleet roster member. ",
-            "Legacy action=status|peek|wait|cancel remain for compatibility; prefer the narrow agents/* tools."
+            "Start one focused background worker and return immediately with its agent_id; a prompt is enough. ",
+            "Use multiple starts for independent parallel tasks. Add a Fleet profile, role, worktree, or explicit limits only when they improve the task. ",
+            "Coordinate later with agents/list, agents/message, agents/followup, agents/interrupt, or agents/wait instead of polling. ",
+            "In Operate, approving a root start delegates workspace edits and built-in non-custom verification for that task; arbitrary shell remains gated. ",
+            "Legacy action=status|peek|wait|cancel remain for compatibility."
         )
     }
 
@@ -4495,7 +4727,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "status", "peek", "wait", "cancel"],
-                    "description": "start (default) launches a child. status lists current children or inspects agent_id. peek is status for one child. wait blocks until a running child settles (agent_id for one specific child, otherwise the next completion) — use this instead of polling peek/status or sleeping. cancel stops a running child by agent_id."
+                    "description": "start (default) launches a background worker and returns immediately. status lists current children or inspects agent_id. peek is status for one child. wait blocks until a running child settles (agent_id for one specific child, otherwise the next completion). cancel stops a running child by agent_id."
                 },
                 "agent_id": {
                     "type": "string",
@@ -4517,7 +4749,7 @@ impl ToolSpec for AgentTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Focused task for the child agent. Prefer a compact Subagent Brief with QUESTION, SCOPE, ALREADY_KNOWN, EFFORT, STOP_CONDITION, and OUTPUT."
+                    "description": "The focused task to give the background worker. This is the only field needed for an ordinary start."
                 },
                 "type": {
                     "type": "string",
@@ -4525,7 +4757,7 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Optional Fleet roster member to run this child as (e.g. reviewer, scout, builder, verifier, synthesizer, manager, or a custom member from .codewhale/agents/ or [fleet.profiles] config). The member supplies role posture, model routing, instruction overlay, and delegation bounds; explicit type/model/model_strength/max_depth here override the member's defaults. See /fleet."
+                    "description": "Optional Fleet roster member to run this child as (e.g. reviewer, scout, builder, verifier, synthesizer, manager, or a custom member from project .codewhale/agents/, personal $CODEWHALE_HOME/agents/, or [fleet.profiles] config). The member supplies role posture, model routing, instruction overlay, and delegation bounds; explicit type/model/model_strength/max_depth here override the member's defaults. See /fleet."
                 },
                 "model_strength": {
                     "type": "string",
@@ -4676,7 +4908,7 @@ impl ToolSpec for AgentTool {
                 return cancel_agent_from_input(&input, self.manager.clone(), context).await;
             }
         }
-        let (snapshot, spawn_policy_note, _) =
+        let (snapshot, _) =
             spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone()).await?;
         let worker_record = {
             let manager = self.manager.read().await;
@@ -4685,15 +4917,14 @@ impl ToolSpec for AgentTool {
         let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
         let mut tool_result = ToolResult::json(&projection)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-        let mut metadata = json!({
+        let metadata = json!({
+            "action": "start",
+            "agent_id": projection.agent_id,
             "status": projection.status,
             "terminal": projection.terminal,
             "context_mode": projection.context_mode,
             "prefix_cache": projection.prefix_cache,
         });
-        if let Some(note) = spawn_policy_note {
-            metadata["spawn_policy"] = json!(note);
-        }
         tool_result.metadata = Some(metadata);
         Ok(tool_result)
     }
@@ -5025,6 +5256,18 @@ async fn wait_result_payload(
 fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) -> bool {
     let provider_id = provider_id.trim();
     let session_provider = runtime.client.api_provider();
+    if let Some(config) = runtime.api_config.as_ref() {
+        let Ok(pinned) = config.resolve_provider_identity(provider_id) else {
+            return false;
+        };
+        let active_identity = config.provider_identity_for(session_provider);
+        if pinned.provider == crate::config::ApiProvider::Custom
+            || session_provider == crate::config::ApiProvider::Custom
+        {
+            return pinned.provider == session_provider && pinned.key == active_identity;
+        }
+        return pinned.provider == session_provider;
+    }
     if let Some(provider) = crate::config::ApiProvider::parse(provider_id) {
         return provider == session_provider;
     }
@@ -5035,6 +5278,51 @@ fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) ->
             .and_then(|config| config.provider.as_deref())
             .map(str::trim)
             .is_some_and(|active| active == provider_id)
+}
+
+struct ChildProviderBinding {
+    client: DeepSeekClient,
+    api_config: Option<std::sync::Arc<crate::config::Config>>,
+}
+
+fn child_provider_binding(
+    runtime: &SubAgentRuntime,
+    member: Option<&crate::fleet::profile::AgentProfile>,
+) -> Result<ChildProviderBinding, ToolError> {
+    let session_provider = runtime.client.api_provider();
+    match crate::fleet::worker_runtime::explicit_fleet_provider_id(member) {
+        Some(pinned_id) if !provider_pin_matches_session(runtime, &pinned_id) => {
+            let (scoped_config, _) =
+                runtime
+                    .scoped_config_for_provider_id(&pinned_id)
+                    .map_err(|err| {
+                        ToolError::execution_failed(format!(
+                            "fleet profile pins provider '{}' but its client could not be built \
+                         ({err}). Configure that provider's credentials/base URL, or drop the \
+                         provider pin to inherit the session provider '{}'.",
+                            pinned_id,
+                            session_provider.as_str()
+                        ))
+                    })?;
+            let client = DeepSeekClient::new(&scoped_config).map_err(|err| {
+                ToolError::execution_failed(format!(
+                    "fleet profile pins provider '{}' but its client could not be built \
+                     ({err}). Configure that provider's credentials/base URL, or drop the \
+                     provider pin to inherit the session provider '{}'.",
+                    pinned_id,
+                    session_provider.as_str()
+                ))
+            })?;
+            Ok(ChildProviderBinding {
+                client,
+                api_config: Some(std::sync::Arc::new(scoped_config)),
+            })
+        }
+        _ => Ok(ChildProviderBinding {
+            client: runtime.client.clone(),
+            api_config: runtime.api_config.clone(),
+        }),
+    }
 }
 
 /// Resolve the LLM client a freshly spawned in-process child should run on,
@@ -5053,34 +5341,21 @@ fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) ->
 /// to the session client (that silent fallback IS the #4093 misroute). The
 /// provider comes only from the explicit pin ([`explicit_fleet_provider`]),
 /// never inferred from the model id (EPIC #2608).
+#[cfg(test)]
 fn child_client_for_member(
     runtime: &SubAgentRuntime,
     member: Option<&crate::fleet::profile::AgentProfile>,
 ) -> Result<DeepSeekClient, ToolError> {
-    let session_provider = runtime.client.api_provider();
-    match crate::fleet::worker_runtime::explicit_fleet_provider_id(member) {
-        Some(pinned_id) if !provider_pin_matches_session(runtime, &pinned_id) => {
-            runtime.client_for_provider_id(&pinned_id).map_err(|err| {
-                ToolError::execution_failed(format!(
-                    "fleet profile pins provider '{}' but its client could not be built \
-                     ({err}). Configure that provider's credentials/base URL, or drop the \
-                     provider pin to inherit the session provider '{}'.",
-                    pinned_id,
-                    session_provider.as_str()
-                ))
-            })
-        }
-        _ => Ok(runtime.client.clone()),
-    }
+    child_provider_binding(runtime, member).map(|binding| binding.client)
 }
 
 async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
-    runtime: SubAgentRuntime,
-) -> Result<(SubAgentResult, Option<String>, WorkflowTaskSpawnMetadata), ToolError> {
+    mut runtime: SubAgentRuntime,
+) -> Result<(SubAgentResult, WorkflowTaskSpawnMetadata), ToolError> {
+    apply_session_spawn_defaults(&mut runtime);
     let mut spawn_request = parse_spawn_request(&input)?;
-    let spawn_policy_note = apply_session_spawn_policy(&runtime, &mut spawn_request);
     let profile_member = apply_spawn_profile(&mut spawn_request, &runtime.fleet_roster)?;
 
     if runtime.would_exceed_depth() {
@@ -5115,7 +5390,9 @@ async fn spawn_subagent_from_input(
     // `child_runtime.client.api_provider()`, so swapping the client here is what
     // actually routes the request to provider B's endpoint with B's creds —
     // rather than tagging `provider = B` on a client still pointed at A (#4093).
-    child_runtime.client = child_client_for_member(&runtime, profile_member.as_ref())?;
+    let provider_binding = child_provider_binding(&runtime, profile_member.as_ref())?;
+    child_runtime.client = provider_binding.client;
+    child_runtime.api_config = provider_binding.api_config;
     child_runtime.max_spawn_depth = child_max_spawn_depth_for_spawn(
         child_runtime.max_spawn_depth,
         child_runtime.spawn_depth,
@@ -5230,7 +5507,11 @@ async fn spawn_subagent_from_input(
         .map(|member| member.id.clone())
         .or_else(|| spawn_request.profile.clone());
     let spawn_metadata = WorkflowTaskSpawnMetadata {
-        resolved_provider: child_runtime.client.api_provider().as_str().to_string(),
+        resolved_provider: child_runtime
+            .api_config
+            .as_ref()
+            .map(|config| config.provider_identity_for(child_runtime.client.api_provider()))
+            .unwrap_or_else(|| child_runtime.client.api_provider().as_str().to_string()),
         resolved_model: effective_model.clone(),
         route_source: model_selection.source.as_str().to_string(),
         resolved_role,
@@ -5277,28 +5558,18 @@ async fn spawn_subagent_from_input(
         }
     }
 
-    Ok((result, spawn_policy_note, spawn_metadata))
+    Ok((result, spawn_metadata))
 }
 
-/// Mode-aware spawn defaults for the root orchestrator (Wave 7 M4/M5).
-fn apply_session_spawn_policy(
-    runtime: &SubAgentRuntime,
-    request: &mut SpawnRequest,
-) -> Option<String> {
-    if runtime.spawn_depth > 0 {
-        return None;
-    }
-    match runtime.parent_mode {
-        AppMode::Operate => {
-            if request.profile.is_some() || request.agent_type_explicit {
-                return None;
-            }
-            Some(
-                "Operate spawn policy: pass profile=scout|builder|reviewer|verifier or use workflow for multi-step work; the operator orchestrates, workers execute."
-                    .to_string(),
-            )
-        }
-        _ => None,
+/// A root Operate dispatch has already crossed the approval boundary on the
+/// `agent` call. Delegate Suggest-level file edits and the bounded built-in
+/// verification surfaces so a normal message can produce verified work.
+/// Arbitrary shell and custom verifier commands still follow the active
+/// permission posture.
+fn apply_session_spawn_defaults(runtime: &mut SubAgentRuntime) {
+    if runtime.spawn_depth == 0 && runtime.parent_mode == AppMode::Operate {
+        runtime.accept_edits = true;
+        runtime.accept_verification = true;
     }
 }
 
@@ -5359,11 +5630,17 @@ pub(crate) async fn spawn_workflow_task(
     if let Some(value) = request.token_budget {
         input["token_budget"] = json!(value);
     }
+    if let Some(value) = request.max_steps {
+        input["max_steps"] = json!(value);
+    }
+    if let Some(value) = request.wall_time_secs {
+        input["wall_time_secs"] = json!(value);
+    }
     // Workflow children inherit the parent tool surface and auto-accept
     // Suggest-level file edits for write-capable roles. Shell / network / MCP
     // still require parent auto-approve (or fail closed).
     runtime.accept_edits = true;
-    let (result, _, mut metadata) = spawn_subagent_from_input(input, manager, runtime).await?;
+    let (result, mut metadata) = spawn_subagent_from_input(input, manager, runtime).await?;
     // Prefer the identity values the driver stamped; fall back to task options.
     let workflow_task_label = identity
         .workflow_task_label
@@ -5500,17 +5777,30 @@ struct SubAgentTask {
 
 #[allow(clippy::too_many_lines)]
 async fn run_subagent_task(task: SubAgentTask) {
+    let deadline = task.started_at + task.wall_time;
+
     // Interactive launch gate (#3095): direct children acquire a permit
     // before their first model step so a fanout burst beyond the limit
     // queues visibly instead of executing all at once. The permit is held
-    // for the lifetime of the task. Cancellation while queued is handled by
-    // `run_subagent`'s own first-step cancel check.
+    // for the lifetime of the task. The permit wait shares the authored child
+    // deadline with model/tool work, so saturation cannot extend the whole
+    // child beyond its wall-time budget. Cancellation while queued is handled
+    // by `run_subagent`'s own first-step cancel check.
     let mut _launch_permit = None;
+    let mut launch_wait_timed_out = false;
     if let Some(gate) = task.launch_gate.as_ref() {
         match Arc::clone(gate).try_acquire_owned() {
             Ok(permit) => _launch_permit = Some(permit),
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                _launch_permit = acquire_queued_launch_permit(&task, Arc::clone(gate)).await;
+                match tokio::time::timeout_at(
+                    deadline.into(),
+                    acquire_queued_launch_permit(&task, Arc::clone(gate)),
+                )
+                .await
+                {
+                    Ok(permit) => _launch_permit = permit,
+                    Err(_) => launch_wait_timed_out = true,
+                }
             }
             Err(tokio::sync::TryAcquireError::Closed) => {
                 crate::logging::warn(format!(
@@ -5521,25 +5811,28 @@ async fn run_subagent_task(task: SubAgentTask) {
         }
     }
 
-    let deadline = task.started_at + task.wall_time;
-    let result = tokio::time::timeout_at(
-        deadline.into(),
-        run_subagent(
-            &task.runtime,
-            task.agent_id.clone(),
-            task.agent_type,
-            task.prompt,
-            task.assignment,
-            task.allowed_tools,
-            task.fork_context,
-            task.started_at,
-            task.max_steps,
-            task.token_budget,
-            task.input_rx,
-        ),
-    )
-    .await
-    .unwrap_or_else(|_| Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time))));
+    let result = if launch_wait_timed_out {
+        Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time)))
+    } else {
+        tokio::time::timeout_at(
+            deadline.into(),
+            run_subagent(
+                &task.runtime,
+                task.agent_id.clone(),
+                task.agent_type,
+                task.prompt,
+                task.assignment,
+                task.allowed_tools,
+                task.fork_context,
+                task.started_at,
+                task.max_steps,
+                task.token_budget,
+                task.input_rx,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time))))
+    };
 
     // Emit BOTH a human-friendly summary (rendered in the parent's
     // sidebar / cell) AND a structured sentinel the model can recognize
@@ -5595,9 +5888,31 @@ async fn run_subagent_task(task: SubAgentTask) {
         manager.claim_terminal_delivery(&agent_id)
     };
     if !completion_claimed {
+        // A retryable provider interruption is committed inside
+        // `run_subagent` so its checkpoint is durable before this epilogue.
+        // That makes the ordinary Running -> claimed transition unavailable,
+        // but a Workflow/nested parent still needs a terminal completion or
+        // its `task()` waiter will hang forever. Wake only when the manager
+        // still owns the same precommitted Interrupted state. If cancellation
+        // won after the interruption, the public state is Cancelled and the
+        // late completion remains suppressed.
+        let precommitted_interruption_delivered = match &result {
+            Ok(res) => {
+                emit_precommitted_interruption_completion(
+                    &task.runtime,
+                    &task.manager_handle,
+                    &agent_id,
+                    &res.status,
+                    &payload,
+                )
+                .await
+            }
+            Err(_) => false,
+        };
         tracing::debug!(
             target: "subagent",
             agent_id = %agent_id,
+            precommitted_interruption_delivered,
             "suppressing late task completion after another terminal outcome won"
         );
         return;
@@ -5662,6 +5977,25 @@ async fn run_subagent_task(task: SubAgentTask) {
             "claimed task completion could not commit terminal state"
         );
     }
+}
+
+async fn emit_precommitted_interruption_completion(
+    runtime: &SubAgentRuntime,
+    manager: &SharedSubAgentManager,
+    agent_id: &str,
+    result_status: &SubAgentStatus,
+    payload: &str,
+) -> bool {
+    if !matches!(result_status, SubAgentStatus::Interrupted(_)) {
+        return false;
+    }
+    let manager_still_interrupted = manager
+        .read()
+        .await
+        .get_result(agent_id)
+        .ok()
+        .is_some_and(|snapshot| matches!(snapshot.status, SubAgentStatus::Interrupted(_)));
+    manager_still_interrupted && emit_parent_completion(runtime, agent_id, payload)
 }
 
 async fn acquire_queued_launch_permit(
@@ -6591,13 +6925,14 @@ async fn run_subagent(
             messages.push(child_completion_runtime_message(&child_completions));
         }
 
+        let has_tools = !tools.is_empty();
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: messages.clone(),
             max_tokens: SUBAGENT_RESPONSE_MAX_TOKENS,
             system: Some(request_system.clone()),
-            tools: Some(tools.clone()),
-            tool_choice: Some(json!({ "type": "auto" })),
+            tools: has_tools.then(|| tools.clone()),
+            tool_choice: has_tools.then(|| json!({ "type": "auto" })),
             metadata: None,
             thinking: None,
             reasoning_effort: runtime.reasoning_effort.clone(),
@@ -8107,7 +8442,7 @@ fn fallback_subagent_assignment_route(
 /// Enumerates through the catalog-backed [`crate::provider_lake`] facade rather
 /// than the raw legacy `model_completion_names_for_provider` table (#4116 /
 /// #4188). The facade prefers live Models.dev, then the offline bundled
-/// snapshot, and only then the legacy hardcoded table for CodeWhale-only /
+/// snapshot, and only then the legacy hardcoded table for Codewhale-only /
 /// unbundled providers. This consumer only reads the first entry.
 fn operator_model_for_subagent(runtime: &SubAgentRuntime) -> String {
     let provider = runtime.client.api_provider();
@@ -8363,7 +8698,7 @@ fn validate_existing_child_cwd(
     };
     let canonical = resolved.canonicalize().map_err(|e| {
         ToolError::invalid_input(format!(
-            "Invalid cwd '{}': {e} (path may not exist yet — use worktree=true to let CodeWhale create an isolated checkout)",
+            "Invalid cwd '{}': {e} (path may not exist yet — use worktree=true to let Codewhale create an isolated checkout)",
             requested_cwd.display()
         ))
     })?;
@@ -8861,6 +9196,10 @@ struct SubAgentToolRegistry {
     auto_approve: bool,
     /// Workflow-spawned children auto-accept Suggest-level file edits.
     accept_edits: bool,
+    /// Root Operate workers may run only the built-in verifier surfaces after
+    /// their parent-approved `agent` start. This never delegates raw shell or
+    /// user-supplied verifier commands.
+    accept_verification: bool,
     /// The role/type of the sub-agent that this registry belongs to. Used to
     /// decide whether `Suggest`-level tools (write/edit/patch) may run inside
     /// the child without the parent runtime being auto-approved (#1828, #1833).
@@ -8933,6 +9272,7 @@ impl SubAgentToolRegistry {
             disallowed_tools: runtime.worker_profile.denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             accept_edits: runtime.accept_edits,
+            accept_verification: runtime.accept_verification,
             agent_type,
             runtime_profile: runtime.worker_profile,
             can_spawn_child,
@@ -8951,6 +9291,24 @@ impl SubAgentToolRegistry {
     /// regardless of role (#1828, #1833).
     fn role_can_delegate_writes(agent_type: &SubAgentType) -> bool {
         matches!(agent_type, SubAgentType::Implementer | SubAgentType::Custom)
+    }
+
+    fn is_delegated_builtin_verification(name: &str, input: &Value) -> bool {
+        match name {
+            // `run_tests.args` is raw Cargo argv and can redirect manifests or
+            // inject toolchain config. Only the fixed workspace-root command
+            // (optionally with the structured all_features flag) is delegated.
+            "run_tests" => match input.get("args") {
+                None => true,
+                Some(Value::String(args)) => args.trim().is_empty(),
+                Some(_) => false,
+            },
+            "run_verifiers" => input
+                .get("commands")
+                .map(|commands| commands.as_array().is_some_and(Vec::is_empty))
+                .unwrap_or(true),
+            _ => false,
+        }
     }
 
     /// Whether the role posture permits a given registered tool, independent of
@@ -9086,9 +9444,13 @@ impl SubAgentToolRegistry {
                     }
                 }
                 ApprovalRequirement::Required => {
-                    return Err(anyhow!(
-                        "Tool {name} requires approval and cannot run inside this sub-agent unless the parent session is auto-approved"
-                    ));
+                    if !(self.accept_verification
+                        && Self::is_delegated_builtin_verification(name, &input))
+                    {
+                        return Err(anyhow!(
+                            "Tool {name} requires approval and cannot run inside this sub-agent unless the parent session is auto-approved"
+                        ));
+                    }
                 }
             }
         }

@@ -85,6 +85,7 @@ impl Locale {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageId {
     ComposerPlaceholder,
+    ComposerDispatchFailedRestored,
     HistorySearchPlaceholder,
     HistorySearchTitle,
     HistoryHintMove,
@@ -374,6 +375,12 @@ pub enum MessageId {
     ClearConversation,
     ClearConversationBusy,
     ModelChanged,
+    LinksProjectTitle,
+    LinksDocumentation,
+    LinksCommunity,
+    LinksGitHub,
+    LinksManagedApp,
+    LinksManagedAppNote,
     LinksTitle,
     LinksDashboard,
     LinksDocs,
@@ -688,6 +695,7 @@ pub enum MessageId {
     ApprovalChooseAction,
     ApprovalIntentLabel,
     ApprovalMoreLines,
+    ApprovalAutoDeniedSession,
     // Sandbox elevation dialog.
     ElevationTitleSandboxDenied,
     ElevationTitleRequired,
@@ -1007,6 +1015,7 @@ pub enum MessageId {
 #[allow(dead_code)]
 pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ComposerPlaceholder,
+    MessageId::ComposerDispatchFailedRestored,
     MessageId::HistorySearchPlaceholder,
     MessageId::HistorySearchTitle,
     MessageId::HistoryHintMove,
@@ -1294,6 +1303,12 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ClearConversation,
     MessageId::ClearConversationBusy,
     MessageId::ModelChanged,
+    MessageId::LinksProjectTitle,
+    MessageId::LinksDocumentation,
+    MessageId::LinksCommunity,
+    MessageId::LinksGitHub,
+    MessageId::LinksManagedApp,
+    MessageId::LinksManagedAppNote,
     MessageId::LinksTitle,
     MessageId::LinksDashboard,
     MessageId::LinksDocs,
@@ -1598,6 +1613,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ApprovalChooseAction,
     MessageId::ApprovalIntentLabel,
     MessageId::ApprovalMoreLines,
+    MessageId::ApprovalAutoDeniedSession,
     MessageId::ElevationTitleSandboxDenied,
     MessageId::ElevationTitleRequired,
     MessageId::ElevationFieldTool,
@@ -2243,6 +2259,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn zh_hans_constitution_copy_uses_functional_terms() {
+        let messages = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            locale_json_source(Locale::ZhHans),
+        )
+        .expect("zh-Hans locale json");
+
+        for (key, value) in &messages {
+            let Some(value) = value.as_str() else {
+                continue;
+            };
+            for literal_metaphor in ["宪法", "教义", "自由原则", "仓库法则"] {
+                assert!(
+                    !value.contains(literal_metaphor),
+                    "zh-Hans {key} should use functional terminology instead of {literal_metaphor}: {value}"
+                );
+            }
+        }
+
+        let setup_intro = tr(Locale::ZhHans, MessageId::SetupStepConstitutionWhy);
+        assert!(setup_intro.contains("Codewhale"));
+        assert!(setup_intro.contains("协作准则"));
+        assert!(!setup_intro.contains("代码"));
+        let welcome = tr(Locale::ZhHans, MessageId::OnboardWelcomeLead);
+        assert!(welcome.contains("Codewhale"));
+        assert!(!welcome.contains("代码"));
+        assert!(tr(Locale::ZhHans, MessageId::OnboardTipsLine2).contains("/constitution"));
+        assert!(
+            tr(
+                Locale::ZhHans,
+                MessageId::SetupConstitutionFileLoadedUnselected
+            )
+            .contains("constitution.json")
+        );
     }
 
     #[test]

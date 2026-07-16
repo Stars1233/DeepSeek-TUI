@@ -280,17 +280,19 @@ fn list_skills(app: &mut App, arg: Option<&str>) -> CommandResult {
     CommandResult::message(output)
 }
 
+/// Run a specific skill — activates skill for next user message, or
+/// dispatches a sub-command (`install`, `update`, `uninstall`, `trust`).
 /// Try to run a skill by exact name (used for unified slash-command namespace, #435).
-/// A trailing request is dispatched immediately; a bare invocation arms the next message.
 /// Returns None when no skill with that name exists, so the caller can try other sources.
 pub(in crate::commands) fn run_skill_by_name(
     app: &mut App,
     name: &str,
-    request: Option<&str>,
+    arg: Option<&str>,
 ) -> Option<CommandResult> {
     let registry = discover_visible_skills(app);
-    if registry.get(name).is_some() {
-        Some(activate_skill_for_request(app, name, request))
+    let lookup_name = if name == "new" { "skill-creator" } else { name };
+    if registry.get(lookup_name).is_some() {
+        Some(activate_skill_with_task(app, name, arg))
     } else {
         None
     }
@@ -311,8 +313,6 @@ fn run_skill(app: &mut App, name: Option<&str>) -> CommandResult {
     let mut iter = raw.splitn(2, char::is_whitespace);
     let head = iter.next().unwrap_or("").trim();
     let rest = iter.next().unwrap_or("").trim();
-    let request = (!rest.is_empty()).then_some(rest);
-
     match head {
         "install" => return install_skill(app, rest),
         "update" => return update_skill(app, rest),
@@ -321,19 +321,19 @@ fn run_skill(app: &mut App, name: Option<&str>) -> CommandResult {
         _ => {}
     }
 
-    activate_skill_for_request(app, head, request)
+    let task = (!rest.is_empty()).then_some(rest);
+    activate_skill_with_task(app, head, task)
 }
 
-fn activate_skill_for_request(app: &mut App, name: &str, request: Option<&str>) -> CommandResult {
+/// Activate a skill and, when the invocation includes a task, send that task
+/// immediately. `AppAction::SendMessage` is converted into a `QueuedMessage`
+/// by the UI, where `app.active_skill` is consumed and attached to this turn.
+fn activate_skill_with_task(app: &mut App, name: &str, task: Option<&str>) -> CommandResult {
     let mut result = activate_skill(app, name);
-    if result.is_error {
-        return result;
-    }
-
-    if let Some(request) = request {
-        result.action = Some(AppAction::SendMessage(request.to_string()));
-    } else if let Some(message) = result.message.as_mut() {
-        message.push_str("\n\nType your request and the skill instructions will be applied.");
+    if !result.is_error
+        && let Some(task) = task.map(str::trim).filter(|task| !task.is_empty())
+    {
+        result.action = Some(AppAction::SendMessage(task.to_string()));
     }
     result
 }
@@ -357,7 +357,7 @@ fn activate_skill(app: &mut App, name: &str) -> CommandResult {
         app.active_skill = Some(instruction);
 
         CommandResult::message(format!(
-            "Skill '{}' activated.\n\nDescription: {}",
+            "Skill '{}' activated.\n\nDescription: {}\n\nType your request and the skill instructions will be applied.",
             skill.name, skill.description
         ))
     } else {
@@ -762,7 +762,7 @@ impl crate::commands::traits::RegisterCommand for SkillCmd {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::tui::app::{App, AppAction, TuiOptions};
+    use crate::tui::app::{App, TuiOptions};
     use std::ffi::OsString;
     use tempfile::TempDir;
 
@@ -1238,99 +1238,6 @@ mod tests {
         let result = run_skill(&mut app, Some("install"));
         let msg = result.message.unwrap();
         assert!(msg.contains("/skill install"), "got: {msg}");
-    }
-
-    #[test]
-    fn inline_skill_invocations_preserve_task_text() {
-        let tmpdir = TempDir::new().unwrap();
-        let _home = IsolatedHome::new(&tmpdir);
-        create_skill_dir(
-            &tmpdir,
-            "test-skill",
-            "---\nname: test-skill\ndescription: A test skill\n---\nDo something special",
-        );
-
-        for input in [
-            "$test-skill do X",
-            "/test-skill do X",
-            "/skill test-skill do X",
-        ] {
-            let mut app = create_test_app_with_tmpdir(&tmpdir);
-            let result = crate::commands::execute(input, &mut app);
-
-            assert!(!result.is_error, "{input} failed: {result:?}");
-            assert!(
-                matches!(result.action, Some(AppAction::SendMessage(ref task)) if task == "do X"),
-                "{input} did not send the trailing task: {result:?}"
-            );
-            assert!(
-                app.active_skill
-                    .as_deref()
-                    .is_some_and(|instruction| instruction.contains("Do something special")),
-                "{input} did not retain the skill instruction"
-            );
-        }
-    }
-
-    #[test]
-    fn bare_dollar_skill_still_arms_the_next_message() {
-        let tmpdir = TempDir::new().unwrap();
-        let _home = IsolatedHome::new(&tmpdir);
-        create_skill_dir(
-            &tmpdir,
-            "test-skill",
-            "---\nname: test-skill\ndescription: A test skill\n---\nDo something special",
-        );
-        let mut app = create_test_app_with_tmpdir(&tmpdir);
-
-        let result = crate::commands::execute("$test-skill", &mut app);
-
-        assert!(!result.is_error, "unexpected activation error: {result:?}");
-        assert!(result.action.is_none(), "bare invocation sent a request");
-        assert!(
-            app.active_skill
-                .as_deref()
-                .is_some_and(|instruction| instruction.contains("Do something special"))
-        );
-    }
-
-    #[test]
-    fn install_skill_uses_unified_namespaces_without_shadowing_management() {
-        let tmpdir = TempDir::new().unwrap();
-        let _home = IsolatedHome::new(&tmpdir);
-        create_skill_dir(
-            &tmpdir,
-            "install",
-            "---\nname: install\ndescription: Install review skill\n---\nReview installs safely",
-        );
-
-        for input in ["$install audit this", "/install audit this"] {
-            let mut app = create_test_app_with_tmpdir(&tmpdir);
-            let result = crate::commands::execute(input, &mut app);
-
-            assert!(!result.is_error, "{input} failed: {result:?}");
-            assert!(
-                matches!(result.action, Some(AppAction::SendMessage(ref task)) if task == "audit this"),
-                "{input} did not send the skill task: {result:?}"
-            );
-            assert!(
-                app.active_skill
-                    .as_deref()
-                    .is_some_and(|instruction| instruction.contains("Review installs safely")),
-                "{input} did not activate the installed skill"
-            );
-        }
-
-        let mut app = create_test_app_with_tmpdir(&tmpdir);
-        let management = crate::commands::execute("/skill install", &mut app);
-        assert!(management.is_error, "management command was shadowed");
-        assert!(
-            management
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("/skill install <"))
-        );
-        assert!(app.active_skill.is_none());
     }
 
     #[test]

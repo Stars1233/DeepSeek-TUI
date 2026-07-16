@@ -8,16 +8,19 @@ of the problem:
 - **Workflow** describes orchestration: phases, branches, reducers, loops, and
   agent leaves that can dispatch through the Fleet/sub-agent runtime.
 
-**Default product path:** ask in natural language. Soft-auto Workflow decides
-when orchestration helps, **tells you the shape**, may open
-`request_user_input` for 1–2 setup choices, then launches — you do not need to
-write workflow files for ordinary multi-agent work. Details:
+**Default product path:** ask in natural language. Operate can use direct tools
+under the active posture, and prefers one or more background Fleet workers when
+work is independent, parallel, isolated, or long-running. Background work keeps
+the composer available for more messages. It chooses Workflow only when
+ordered phases, gates, shared budgets, or deterministic fan-in add real value;
+you do not need to write workflow files for ordinary multi-agent work. Details:
 [Automatic Workflows](AUTOMATIC_WORKFLOWS.md).
 
 This tutorial covers the **manual** Fleet task-spec / checked-in Workflow path
 for operators who want durable host workers and reviewable specs. A
-one-sentence request should still not silently generate `tasks.json` and start
-workers without indication or approval.
+one-sentence request should still not silently generate `tasks.json`; worker
+cards and approval posture make dispatch visible without exposing authoring
+mechanics.
 
 ## 1. Prepare The Workspace
 
@@ -39,9 +42,18 @@ If you want named reusable workers, open the TUI and run:
 
 Pick a role, choose whether that profile inherits the operator route or pins a
 specific provider/model/thinking tier, review the permissions/tools/route
-posture, and ratify the rendered TOML. Ratified profiles are saved under
-`.codewhale/agents/<role>.toml`. Fleet task specs can reference those profiles
-with `worker.agent_profile` or the shorter `worker.profile` alias.
+posture, and save the rendered TOML. Project profiles are saved under
+`.codewhale/agents/<role>.toml`. On Review, press `s` before previewing to save
+a personal profile under `$CODEWHALE_HOME/agents/<role>.toml`; it is available
+across repositories, while a same-id project profile remains the higher-priority
+override. Fleet task specs can reference either resolved profile with
+`worker.agent_profile` or the shorter `worker.profile` alias.
+
+This makes the Fleet definition cross-repository, not the authority of one
+running session. For a multi-repository operation, launch Codewhale from a
+shared parent workspace. Profile availability does not grant filesystem access;
+the session's workspace, explicit trusted paths, trust mode, and permission
+posture remain authoritative.
 
 ## 2. Write A Fleet Task Spec
 
@@ -127,7 +139,7 @@ Common task fields:
 | `id`, `name` | Stable task identity and display name. |
 | `objective`, `instructions` | The worker goal and exact operating instructions. |
 | `worker.role` | Built-in or custom role intent, such as `reviewer`, `builder`, `read-only`, or `smoke-runner`. |
-| `worker.profile` / `worker.agent_profile` | Ratified Fleet roster profile from `.codewhale/agents/`. |
+| `worker.profile` / `worker.agent_profile` | Saved Fleet roster profile resolved from project `.codewhale/agents/`, personal `$CODEWHALE_HOME/agents/`, or `[fleet.profiles]`. |
 | `worker.tools` | Tool names the task expects the worker to use. |
 | `worker.model` | Preferred explicit model pin. Route resolution still owns provider/model validation. |
 | `worker.model_class`, `worker.loadout` | Compatibility routing hints for older task specs; prefer `worker.profile` plus saved profile route pins for new specs. |
@@ -240,7 +252,7 @@ Current Workflow node wrappers are `agent`, `branch`, `sequence`, `reduce`,
 Fleet roster profile; explicit agent fields override profile defaults.
 
 The model-facing `workflow` tool can start, run, inspect, or cancel a workflow
-from inline source or a `source_path`. When CodeWhale uses this path, ask it to
+from inline source or a `source_path`. When Codewhale uses this path, ask it to
 show the plan first if the workflow will launch multiple workers or touch files.
 
 ## 5. Natural Language Intake
@@ -255,7 +267,7 @@ them.
 ```
 
 After reviewing the generated spec, save it as `tasks.json` and run the Fleet
-commands above. For workflows, ask CodeWhale to draft a `.workflow.js` file,
+commands above. For workflows, ask Codewhale to draft a `.workflow.js` file,
 show the plan, and use the workflow tool path only after approval.
 
 This review step is intentional. It keeps provider routing, DeepSeek or other

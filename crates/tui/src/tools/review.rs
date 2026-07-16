@@ -629,24 +629,76 @@ async fn resolve_diff_target(
     staged: bool,
     base: Option<&str>,
 ) -> Result<String, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Git::command() else {
-        return Err(ToolError::execution_failed("git not found"));
+    let base = base.map(str::trim).filter(|base| !base.is_empty());
+    let base_commit = if let Some(base) = base {
+        // Resolve the user-supplied ref before placing it in `git diff`. This
+        // both rejects option-looking input and gives the staged path a real
+        // commit from which it can compute the merge base.
+        let revision = format!("{base}^{{commit}}");
+        let output = run_review_git(
+            workspace,
+            vec![
+                "rev-parse".to_string(),
+                "--verify".to_string(),
+                "--end-of-options".to_string(),
+                revision,
+            ],
+            "resolve review base",
+        )
+        .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ToolError::invalid_input(format!(
+                "Invalid git base ref '{base}': {}",
+                stderr.trim()
+            )));
+        }
+        let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if commit.is_empty() || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ToolError::execution_failed(format!(
+                "git resolved base ref '{base}' to an invalid commit id"
+            )));
+        }
+        Some(commit)
+    } else {
+        None
     };
-    cmd.arg("diff");
-    if staged {
-        cmd.arg("--cached");
-    }
-    if let Some(base) = base
-        && !base.trim().is_empty()
-    {
-        cmd.arg(format!("{base}...HEAD"));
-    }
-    cmd.current_dir(workspace);
 
-    let output = tokio::task::spawn_blocking(move || cmd.output())
-        .await
-        .map_err(|e| ToolError::execution_failed(format!("git diff task panicked: {e}")))?
-        .map_err(|e| ToolError::execution_failed(format!("Failed to run git diff: {e}")))?;
+    let mut args = vec!["diff".to_string()];
+    if staged {
+        args.push("--cached".to_string());
+        if let Some(base_commit) = base_commit {
+            // `git diff --cached <base>...HEAD` is invalid because the index
+            // is already one side of this diff. Preserve triple-dot semantics
+            // by resolving the merge base first, then compare that tree with
+            // the index (committed branch work plus the staged snapshot).
+            let output = run_review_git(
+                workspace,
+                vec!["merge-base".to_string(), base_commit, "HEAD".to_string()],
+                "resolve staged review merge base",
+            )
+            .await?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(ToolError::execution_failed(format!(
+                    "git merge-base failed: {}",
+                    stderr.trim()
+                )));
+            }
+            let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if merge_base.is_empty() || !merge_base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(ToolError::execution_failed(
+                    "git merge-base returned an invalid commit id",
+                ));
+            }
+            args.push(merge_base);
+        }
+    } else if let Some(base_commit) = base_commit {
+        args.push(format!("{base_commit}...HEAD"));
+    }
+    args.push("--".to_string());
+
+    let output = run_review_git(workspace, args, "generate review diff").await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(ToolError::execution_failed(format!(
@@ -659,6 +711,24 @@ async fn resolve_diff_target(
         return Err(ToolError::invalid_input("No diff to review"));
     }
     Ok(diff)
+}
+
+async fn run_review_git(
+    workspace: &Path,
+    args: Vec<String>,
+    operation: &'static str,
+) -> Result<std::process::Output, ToolError> {
+    let workspace = workspace.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let Some(mut cmd) = crate::dependencies::Git::command() else {
+            return Err(ToolError::execution_failed("git not found"));
+        };
+        cmd.args(args).current_dir(workspace).output().map_err(|e| {
+            ToolError::execution_failed(format!("Failed to {operation} with git: {e}"))
+        })
+    })
+    .await
+    .map_err(|e| ToolError::execution_failed(format!("git {operation} task panicked: {e}")))?
 }
 
 async fn gh_pr_diff(pr: &PullRequestRef, workspace: &Path) -> Result<String, ToolError> {
@@ -815,6 +885,56 @@ fn parse_pr_url(url: &str) -> Option<PullRequestRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_git(workspace: &Path, args: &[&str]) -> std::process::Output {
+        let mut command = crate::dependencies::Git::command().expect("git test dependency");
+        let output = command
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[tokio::test]
+    async fn staged_diff_with_base_compares_merge_base_to_index() {
+        let repo = tempfile::TempDir::new().expect("temp git repository");
+        fixture_git(repo.path(), &["init"]);
+        fixture_git(repo.path(), &["config", "user.name", "Codewhale Test"]);
+        fixture_git(
+            repo.path(),
+            &["config", "user.email", "codewhale-test@example.invalid"],
+        );
+
+        let tracked = repo.path().join("tracked.txt");
+        fs::write(&tracked, "base\n").expect("write base fixture");
+        fixture_git(repo.path(), &["add", "tracked.txt"]);
+        fixture_git(repo.path(), &["commit", "-m", "base"]);
+        let base =
+            String::from_utf8_lossy(&fixture_git(repo.path(), &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+
+        fs::write(&tracked, "base\ncommitted\n").expect("write committed fixture");
+        fixture_git(repo.path(), &["add", "tracked.txt"]);
+        fixture_git(repo.path(), &["commit", "-m", "branch change"]);
+        fs::write(&tracked, "base\ncommitted\nstaged\n").expect("write staged fixture");
+        fixture_git(repo.path(), &["add", "tracked.txt"]);
+        fs::write(&tracked, "base\ncommitted\nstaged\nunstaged\n").expect("write unstaged fixture");
+
+        let diff = resolve_diff_target(repo.path(), true, Some(&base))
+            .await
+            .expect("staged review diff from base");
+        assert!(diff.contains("+committed"), "{diff}");
+        assert!(diff.contains("+staged"), "{diff}");
+        assert!(!diff.contains("unstaged"), "{diff}");
+    }
 
     #[test]
     fn parses_pr_url() {

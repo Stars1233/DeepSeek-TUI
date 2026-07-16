@@ -38,6 +38,20 @@ BOT_EMAILS = {
 }
 BOT_NAMES = ("claude", "codex", "cursor")
 
+# This commit is already immutable history on origin/main. Its trailer names a
+# local Codewhale automation actor, not a human contributor. It escaped the
+# existing gate and is now immutable on origin/main. Rewriting main would
+# invalidate every descendant, while mapping the actor to a human would
+# manufacture contributor credit. Exempt only the exact full SHA + exact actor
+# identity; every other malformed trailer still fails.
+LEGACY_AUTOMATION_TRAILER_EXCEPTIONS = {
+    (
+        "9a74825cd182a62465943bcbbcbcf591d1ce99ee",
+        "codewhale agent",
+        "codewhale-agent@hmbown.local",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class Identity:
@@ -127,6 +141,10 @@ def git_log(commit_range: str) -> list[Commit]:
     for record in raw.split("\x1e"):
         if not record.strip():
             continue
+        # `git log` emits a newline after each record separator. Remove only
+        # that framing byte so the next record's full SHA remains exact while
+        # preserving commit-body whitespace.
+        record = record.lstrip("\n")
         parts = record.split("\x00", 5)
         if len(parts) != 6:
             raise RuntimeError("failed to parse git log output")
@@ -180,6 +198,12 @@ def validate(commits: list[Commit], aliases: dict[str, Identity], check_authors:
                 )
 
         for coauthor in coauthors:
+            if (
+                commit.sha.strip().lower(),
+                norm_key(coauthor.name),
+                norm_key(coauthor.email),
+            ) in LEGACY_AUTOMATION_TRAILER_EXCEPTIONS:
+                continue
             if is_bot_identity(coauthor.name, coauthor.email):
                 if not commit.is_merge_commit():
                     errors.append(

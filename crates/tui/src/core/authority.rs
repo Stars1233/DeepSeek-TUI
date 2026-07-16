@@ -170,9 +170,7 @@ pub(crate) fn provenance_can_inherit_standing_auto_authority(
 ) -> bool {
     matches!(
         provenance,
-        UserInputProvenance::ExternalUser
-            | UserInputProvenance::Runtime
-            | UserInputProvenance::SubAgentHandoff
+        UserInputProvenance::ExternalUser | UserInputProvenance::Runtime
     )
 }
 

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::future::Future;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -391,6 +392,33 @@ pub struct McpTool {
     pub input_schema: serde_json::Value,
 }
 
+const MCP_TOOL_DESCRIPTION_MAX_CHARS: usize = 80;
+
+/// Format an optional MCP tool description for terminal list surfaces.
+///
+/// CLI and TUI callers share this helper so both stay single-line and truncate
+/// on Unicode scalar boundaries rather than slicing UTF-8 bytes.
+pub(crate) fn format_mcp_tool_description(description: Option<&str>) -> String {
+    let Some(first_line) = description
+        .and_then(|description| description.split(['\r', '\n']).next())
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    else {
+        return String::new();
+    };
+
+    let mut chars = first_line.chars();
+    let summary: String = chars
+        .by_ref()
+        .take(MCP_TOOL_DESCRIPTION_MAX_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!(": {summary}...")
+    } else {
+        format!(": {summary}")
+    }
+}
+
 /// Resource discovered from an MCP server
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpResource {
@@ -442,6 +470,62 @@ pub enum ConnectionState {
     Connecting,
     Ready,
     Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct McpServerCapabilities {
+    tools: bool,
+    resources: bool,
+    prompts: bool,
+}
+
+impl McpServerCapabilities {
+    fn from_initialize_response(response: &serde_json::Value) -> Option<Self> {
+        let capabilities = response.get("result")?.get("capabilities")?.as_object()?;
+        Some(Self {
+            tools: capabilities.contains_key("tools"),
+            resources: capabilities.contains_key("resources"),
+            prompts: capabilities.contains_key("prompts"),
+        })
+    }
+}
+
+fn response_result<'a>(
+    response: &'a serde_json::Value,
+    method: &str,
+) -> Result<Option<&'a serde_json::Value>> {
+    if let Some(error) = response.get("error") {
+        anyhow::bail!("MCP error in '{method}': {error}");
+    }
+    Ok(response.get("result"))
+}
+
+async fn run_optional_discovery<F>(server: &str, method: &str, timeout: Duration, discovery: F)
+where
+    F: Future<Output = Result<()>>,
+{
+    match tokio::time::timeout(timeout, discovery).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target: "mcp",
+                server,
+                method,
+                error = %error,
+                "optional MCP discovery failed; continuing with available capabilities"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "mcp",
+                server,
+                method,
+                ?timeout,
+                error = %error,
+                "optional MCP discovery timed out; continuing with available capabilities"
+            );
+        }
+    }
 }
 
 // === McpConnection - Async Connection Management ===
@@ -811,6 +895,8 @@ pub struct McpConnection {
     request_id: AtomicU64,
     state: ConnectionState,
     config: McpServerConfig,
+    server_capabilities: Option<McpServerCapabilities>,
+    discovery_timeout: Duration,
     read_timeout_secs: u64,
     cancel_token: tokio_util::sync::CancellationToken,
 }
@@ -982,6 +1068,8 @@ impl McpConnection {
             request_id: AtomicU64::new(1),
             state: ConnectionState::Connecting,
             config,
+            server_capabilities: None,
+            discovery_timeout: Duration::from_secs(connect_timeout_secs),
             read_timeout_secs,
             cancel_token,
         };
@@ -991,13 +1079,9 @@ impl McpConnection {
             .await
             .with_context(|| format!("MCP server '{name}' initialization timed out"))??;
 
-        // Discover tools, resources, and prompts with timeout
-        tokio::time::timeout(
-            Duration::from_secs(connect_timeout_secs),
-            conn.discover_all(),
-        )
-        .await
-        .with_context(|| format!("MCP server '{name}' discovery timed out"))??;
+        conn.discover_all()
+            .await
+            .with_context(|| format!("MCP server '{name}' discovery failed"))?;
 
         conn.state = ConnectionState::Ready;
         Ok(conn)
@@ -1025,7 +1109,9 @@ impl McpConnection {
         }))
         .await?;
 
-        self.recv(init_id).await?;
+        let response = self.recv(init_id).await?;
+        response_result(&response, "initialize")?;
+        self.server_capabilities = McpServerCapabilities::from_initialize_response(&response);
 
         // Send initialized notification (no id, no response expected)
         self.send(serde_json::json!({
@@ -1039,12 +1125,54 @@ impl McpConnection {
 
     /// Discover tools, resources, and prompts
     async fn discover_all(&mut self) -> Result<()> {
-        // We use join! to discover everything concurrently if possible,
-        // but for now let's keep it sequential for simplicity in error handling
-        self.discover_tools().await?;
-        self.discover_resources().await?;
-        self.discover_resource_templates().await?;
-        self.discover_prompts().await?;
+        let capabilities = self.server_capabilities;
+        let server = self.name.clone();
+        let discovery_timeout = self.discovery_timeout;
+
+        // Missing initialize metadata is treated as a legacy/unknown server:
+        // retain tool discovery and bounded best-effort probes for compatibility.
+        // When capabilities are advertised, do not call methods the server says
+        // it does not implement (notably JetBrains tools-only MCP servers).
+        if capabilities.is_none_or(|capabilities| capabilities.tools) {
+            tokio::time::timeout(discovery_timeout, self.discover_tools())
+                .await
+                .with_context(|| {
+                    format!(
+                        "MCP server '{}' tool discovery timed out after {:?}",
+                        server, discovery_timeout
+                    )
+                })??;
+        }
+
+        // Keep all three optional calls within one discovery-timeout budget in
+        // the worst case while also respecting a tighter transport read timeout.
+        let optional_timeout =
+            (discovery_timeout / 3).min(Duration::from_secs(self.read_timeout_secs));
+        if capabilities.is_none_or(|capabilities| capabilities.resources) {
+            run_optional_discovery(
+                &server,
+                "resources/list",
+                optional_timeout,
+                self.discover_resources(),
+            )
+            .await;
+            run_optional_discovery(
+                &server,
+                "resources/templates/list",
+                optional_timeout,
+                self.discover_resource_templates(),
+            )
+            .await;
+        }
+        if capabilities.is_none_or(|capabilities| capabilities.prompts) {
+            run_optional_discovery(
+                &server,
+                "prompts/list",
+                optional_timeout,
+                self.discover_prompts(),
+            )
+            .await;
+        }
         Ok(())
     }
 
@@ -1066,7 +1194,7 @@ impl McpConnection {
             .await?;
 
             let response = self.recv(list_id).await?;
-            let Some(result) = response.get("result") else {
+            let Some(result) = response_result(&response, "tools/list")? else {
                 break;
             };
 
@@ -1118,7 +1246,7 @@ impl McpConnection {
             .await?;
 
             let response = self.recv(list_id).await?;
-            let Some(result) = response.get("result") else {
+            let Some(result) = response_result(&response, "resources/list")? else {
                 break;
             };
 
@@ -1162,7 +1290,7 @@ impl McpConnection {
             .await?;
 
             let response = self.recv(list_id).await?;
-            let Some(result) = response.get("result") else {
+            let Some(result) = response_result(&response, "resources/templates/list")? else {
                 break;
             };
 
@@ -1210,7 +1338,7 @@ impl McpConnection {
             .await?;
 
             let response = self.recv(list_id).await?;
-            let Some(result) = response.get("result") else {
+            let Some(result) = response_result(&response, "prompts/list")? else {
                 break;
             };
 

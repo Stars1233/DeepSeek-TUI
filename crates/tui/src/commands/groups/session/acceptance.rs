@@ -20,7 +20,7 @@ const FEATURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/features/session_command_workflows.feature"
 );
-const SAVE_LOAD_SCENARIO: &str = "Save, export, and load preserve the active session";
+const SAVE_LOAD_SCENARIO: &str = "Save and export preserve data while load defers restoration";
 const FORK_RESUMABLE_SCENARIO: &str = "Fork keeps the original session resumable";
 const NEW_THEN_FORK_SCENARIO: &str = "New session cannot be forked before messages exist";
 const CLEAR_THEN_FORK_SCENARIO: &str = "Cleared session cannot be forked before messages exist";
@@ -304,15 +304,14 @@ fn saved_session_file_contains_saved_message(world: &mut SessionCommandWorld) {
     assert_saved_session_contains_message(&session, "Remember the whale migration");
 }
 
-#[then("the active session id should match the saved session file")]
-fn active_session_id_matches_saved_session_file(world: &mut SessionCommandWorld) {
-    let session = read_saved_session_file(world);
-    let app = world.app.as_deref().expect("app should exist");
+#[then("the load action should target the saved session file")]
+fn load_action_targets_saved_session_file(world: &mut SessionCommandWorld) {
+    let save_path = world.save_path.as_ref().expect("save path should exist");
 
-    assert_eq!(
-        app.current_session_id.as_deref(),
-        Some(session.metadata.id.as_str())
-    );
+    assert!(matches!(
+        world.last_action.as_ref(),
+        Some(AppAction::LoadSession(path)) if path == save_path
+    ));
 }
 
 #[then("the exported markdown should contain the active transcript")]
@@ -329,24 +328,11 @@ fn exported_markdown_contains_active_transcript(world: &mut SessionCommandWorld)
     assert!(content.contains("Remember the whale migration"));
 }
 
-#[then("the restored token count should match the saved session")]
-fn restored_token_count_matches_saved_session(world: &mut SessionCommandWorld) {
-    let app = world.app.as_deref().expect("app should exist");
-
-    assert_eq!(app.session.total_tokens, 321);
-    assert_eq!(app.session.total_conversation_tokens, 321);
-}
-
-#[then("CodeWhale should report that the session was loaded")]
-fn codewhale_reports_session_loaded(world: &mut SessionCommandWorld) {
-    let message = world
-        .last_message
-        .as_deref()
-        .expect("load command should produce a message");
-
-    assert!(
-        message.contains("Session loaded from"),
-        "unexpected load message: {message}"
+#[then("CodeWhale should defer the session-loaded receipt to the event loop")]
+fn codewhale_defers_session_loaded_receipt(world: &mut SessionCommandWorld) {
+    assert_eq!(
+        world.last_message, None,
+        "the command layer must not report success before the event loop applies the load action"
     );
 }
 
@@ -625,7 +611,7 @@ fn codewhale_rejects_unknown_session_command(world: &mut SessionCommandWorld) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn save_export_and_load_session_workflow() {
-    run_scenario(SAVE_LOAD_SCENARIO, 11).await;
+    run_scenario(SAVE_LOAD_SCENARIO, 10).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

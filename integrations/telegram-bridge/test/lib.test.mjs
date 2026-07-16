@@ -257,6 +257,7 @@ test("telegramMarkdownV2 escapes text while preserving useful markdown", () => {
     "*Build* passed for [CI](https://example.com/a_(b\\))\\."
   );
   assert.equal(telegramMarkdownV2("Use `cargo test -p codewhale`."), "Use `cargo test -p codewhale`\\.");
+  assert.equal(telegramMarkdownV2("Path C:\\tmp\\file"), "Path C:\\\\tmp\\\\file");
   assert.equal(
     telegramMarkdownV2("```rust\nfn main() { println!(\"hi\"); }\n```"),
     "```rust\nfn main() { println!(\"hi\"); }\n```"

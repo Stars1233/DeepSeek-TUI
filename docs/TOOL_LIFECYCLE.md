@@ -10,14 +10,14 @@ describes *what will be done* and the invariants any future diet PR must hold.
   Legacy subagent-name cleanup + guardrail tests in this policy rebase on #2684.
 - PR **#2685** — git-history active + RLM/field errors.
 
-All file:line citations are against the verified tree at the current CodeWhale
+All file:line citations are against the verified tree at the current Codewhale
 checkout as of v0.8.52/0.8.53.
 
 ---
 
 ## 1. Purpose and the weaker-model problem
 
-CodeWhale ships a large native tool surface. The first-turn *active* partition
+Codewhale ships a large native tool surface. The first-turn *active* partition
 of that surface is what every model sees before it has run a single
 `tool_search_*` call. Today that active set contains several **near-duplicate
 tools** that map to the *same* implementation under different names:
@@ -47,7 +47,7 @@ The lifecycle policy exists to **shrink and discipline the model-visible
 surface** without ever breaking the ability to replay an old transcript that
 referenced a now-retired name.
 
-### Canonical work-tracking surface for v0.8.68
+### Canonical work-tracking surface for v0.9.0
 
 The model-visible progress surface is a single tool: `work_update` (#4132).
 Agents and Fleet workers use it for concrete To-do / Work progress under the
@@ -197,14 +197,18 @@ is "removed" in 0.8.53; replay is supported for everything listed.
 | `exec_wait` | `exec_shell_wait` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
 | `exec_interact` | `exec_shell_interact` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
 | `tts` | `speech` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
-| `checklist_write` | `work_update` | hidden-compatibility | 0.8.68 | TBD (≥ 0.9.x) | Yes |
-| `checklist_add` | `work_update` | hidden-compatibility | 0.8.68 | TBD (≥ 0.9.x) | Yes |
-| `checklist_update` | `work_update` | hidden-compatibility | 0.8.68 | TBD (≥ 0.9.x) | Yes |
-| `checklist_list` | `work_update` | hidden-compatibility | 0.8.68 | TBD (≥ 0.9.x) | Yes |
-| `todo_write` | `work_update` | hidden-compatibility | 0.8.68 | TBD (≥ 0.9.x) | Yes |
-| `todo_add` | `work_update` | hidden-compatibility | 0.8.68 | TBD (≥ 0.9.x) | Yes |
-| `todo_update` | `work_update` | hidden-compatibility | 0.8.68 | TBD (≥ 0.9.x) | Yes |
-| `todo_list` | `work_update` | hidden-compatibility | 0.8.68 | TBD (≥ 0.9.x) | Yes |
+| `checklist_write` | `work_update` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
+| `checklist_add` | `work_update` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
+| `checklist_update` | `work_update` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
+| `checklist_list` | `work_update` | hidden-compatibility | 0.9.0 | TBD (≥ 0.9.x) | Yes |
+| `todo_write` | `work_update` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
+| `todo_add` | `work_update` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
+| `todo_update` | `work_update` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
+| `todo_list` | `work_update` | hidden-compatibility | 0.8.53 | TBD (≥ 0.9.x) | Yes |
+
+The `todo_*` aliases first entered hidden compatibility in v0.8.53. v0.9.0
+changes their canonical replacement to `work_update`; it does not reset their
+first-deprecated version.
 
 **Legacy subagent names — removed, no manifest entry needed.**
 The model-visible subagent surface is only `agent`. The old lifecycle names and

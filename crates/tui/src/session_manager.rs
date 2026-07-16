@@ -118,6 +118,11 @@ pub struct SessionMetadata {
     /// Provider used for the session model. Defaults for legacy saved sessions.
     #[serde(default = "default_model_provider")]
     pub model_provider: String,
+    /// Exact configured provider key. This is separate from `model_provider`
+    /// so old consumers can keep treating that field as the built-in provider
+    /// kind (`custom` for every named custom route).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
     /// Workspace directory
     pub workspace: PathBuf,
     /// Optional mode label (agent/plan/etc.)
@@ -142,6 +147,13 @@ pub struct SessionMetadata {
 
 fn default_model_provider() -> String {
     "deepseek".to_string()
+}
+
+impl SessionMetadata {
+    pub(crate) fn set_model_provider_route(&mut self, kind: &str, identity: Option<&str>) {
+        self.model_provider = kind.to_string();
+        self.model_provider_id = identity.map(str::to_string);
+    }
 }
 
 /// Cost and high-water-mark fields persisted with each session.
@@ -858,6 +870,7 @@ pub fn create_saved_session_with_id_and_mode(
             total_tokens,
             model: model.to_string(),
             model_provider: default_model_provider(),
+            model_provider_id: None,
             workspace: workspace.to_path_buf(),
             mode: mode.map(str::to_string),
             cost: SessionCostSnapshot::default(),
@@ -1174,6 +1187,7 @@ mod tests {
                 total_tokens: 0,
                 model: "deepseek-v4-flash".to_string(),
                 model_provider: "deepseek".to_string(),
+                model_provider_id: None,
                 workspace: workspace.to_path_buf(),
                 mode: None,
                 cost: SessionCostSnapshot::default(),
@@ -1207,6 +1221,7 @@ mod tests {
                 total_tokens: 0,
                 model: "deepseek-v4-pro".to_string(),
                 model_provider: "deepseek".to_string(),
+                model_provider_id: None,
                 workspace: workspace.to_path_buf(),
                 mode: Some("yolo".to_string()),
                 cost: SessionCostSnapshot::default(),

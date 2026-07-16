@@ -151,15 +151,14 @@ CodeWhale should converge with Claude Code on **shape**, not on branding:
 The litmus test for any new agent surface: *does it launch and observe the one
 runtime, or does it invent a second one?* Only the former is allowed.
 
-## What a next-major ("0.9-level") release would mean today
+## What remains after v0.9.0
 
-Refreshed 2026-07-12 from a full audit of the 0.9-era documents. The release
-label is a maintainer decision; this section describes scope, not a version
-promise. Most of what the old cutover plan called "0.9.0" already shipped in
-v0.8.68 (Plan/Act/Operate + posture cycle, the wired Workflow engine with a
-durable run journal, the Lane CLI/runtime, the setup wizard with
-`operate_ready`, the constitution rebalance, ProviderLake/Models.dev). What
-genuinely remains:
+Refreshed 2026-07-15 from a full audit of the older 0.9-era documents. Those
+plans are evidence, not a second source of truth. v0.9.0 consolidates the
+underwater shell, message-first Operate, permission postures, the wired
+Workflow engine and durable run journal, Lane CLI/runtime, setup with
+`operate_ready`, constitution rebalance, and ProviderLake/Models.dev. The
+remaining work belongs to later releases:
 
 1. **Rebrand completion** — the only hard-dated obligations: remove the
    `deepseek`/`deepseek-tui` binary shims and shim release assets; finish the
@@ -173,7 +172,7 @@ genuinely remains:
 4. **Fleet/Workflow convergence residuals** — live tmux/verifier-gate dogfood
    closing #4175/#4177/#4178/#4179; Fleet consuming canonical AgentProfiles;
    Conductor/topology (#4010, #4012) as stretch.
-5. **TTC_DESIGN implementation** — approved and now unblocked post-0.8.68.
+5. **TTC_DESIGN implementation** — approved and now unblocked after v0.9.0.
 6. **HarnessProfile completion** — the status/UX display lane
    (`docs/rfcs/HARNESS_PROFILE_CUTLINE.md`).
 7. **File decomposition, re-scoped** — `ui.rs` (~13.6k lines) and `main.rs`

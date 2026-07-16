@@ -100,8 +100,8 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             </h2>
             <p>
               {isZh
-                ? "npm 软件包会安装两个可执行文件；完整安装指南还包括 Cargo、Homebrew、Docker 和直接下载。"
-                : "The npm package installs both executables. The full guide also covers Cargo, Homebrew, Docker, and direct downloads."}
+                ? "npm 软件包提供 codewhale、codew 和 codewhale-tui 三个命令；完整安装指南还包括 Cargo、Homebrew、Docker 和直接下载。"
+                : "The npm package exposes codewhale, codew, and codewhale-tui. The full guide also covers Cargo, Homebrew, Docker, and direct downloads."}
             </p>
             <InstallCodeBlock
               cmd="npm install -g codewhale"

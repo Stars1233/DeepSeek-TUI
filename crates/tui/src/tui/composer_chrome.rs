@@ -94,12 +94,15 @@ pub fn desired_height(
     total.clamp(1, max_height).try_into().unwrap_or(1)
 }
 
-/// Top padding inside the content budget. Prefer breathing room above the
-/// caret when the reserved rows exceed wrapped content; compact heights
-/// naturally report zero padding once the budget collapses.
+/// Top padding inside the content budget. Keep at least one quiet row below a
+/// short prompt when the density baseline has room, instead of bottom-pinning
+/// the caret directly against the phase footer. Compact heights naturally
+/// report zero padding once the budget collapses.
 #[must_use]
 pub fn top_padding(content_lines: usize, rows_budget: usize) -> usize {
-    rows_budget.saturating_sub(content_lines.clamp(1, rows_budget))
+    let content = content_lines.max(1).min(rows_budget.max(1));
+    let spare = rows_budget.saturating_sub(content);
+    spare.saturating_add(1) / 2
 }
 
 #[cfg(test)]

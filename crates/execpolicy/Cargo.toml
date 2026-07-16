@@ -2,11 +2,12 @@
 name = "codewhale-execpolicy"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Execution policy and approval model for CodeWhale"
+description = "Execution policy and approval model for Codewhale"
 
 [dependencies]
 anyhow.workspace = true
-codewhale-protocol = { path = "../protocol", version = "0.8.68" }
+codewhale-protocol = { path = "../protocol", version = "0.9.0" }
 serde.workspace = true

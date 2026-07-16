@@ -1,8 +1,11 @@
 # Automatic Workflows
 
-You do **not** need to say “workflow” or write a `.workflow.js` file for ordinary
-multi-agent work. CodeWhale decides when orchestration helps, tells you the
-shape, may ask a short setup question, then launches a Workflow.
+You do **not** need to write a `.workflow.js` file to coordinate agents. In
+Operate, ordinary messages can use direct tools or background workers; workers
+are preferred for independent, parallel, background, or long-running work.
+Workflow is reserved for ordered phases, gates, shared budgets, replay, or
+deterministic fan-in. Act/Agent can still use the optional soft-auto policy
+described below.
 
 Related docs:
 
@@ -11,12 +14,12 @@ Related docs:
 - [Configuration](CONFIGURATION.md) — `[workflow]` knobs
 - [Sandbox](SANDBOX.md) — what the Workflow VM cannot do
 
-## Soft-auto (default product path)
+## Soft-auto in Act/Agent
 
 1. **You ask naturally** — “audit every crate for unsafe,” “scout then implement,”
    “compare these two providers in parallel.”
-2. **CodeWhale decides** — broad, independent, or staged work triggers Workflow;
-   one-file edits, simple commands, and pure Q&A do not.
+2. **Codewhale decides in Act/Agent** — broad, independent, or staged work can
+   trigger Workflow; one-file edits, simple commands, and pure Q&A do not.
 3. **It tells you first** — e.g. “This looks set up for a Workflow — three scouts
    then one verifier.”
 4. **Optional setup** — if one or two facts would change the plan (read-only vs
@@ -25,7 +28,10 @@ Related docs:
 5. **Launch** — structured `plan` JSON (goal / phases / children) or a short
    inline script. Parallel branches use `parallel()` partial-success semantics.
 
-You can still type `/workflow` to force “orchestrate the current work.”
+In Operate, those same asks prefer one or more direct background workers when
+the split improves throughput, isolation, or context focus. Small or tightly
+coupled work can stay in the parent under the active tool and approval policy.
+You can always type `/workflow` to request orchestration explicitly.
 
 ## Read-only auto-start vs write approval
 
@@ -86,7 +92,7 @@ Automatic Workflow is suppressed for:
 - Risky writes without a clear decomposition  
 - Estimated children above `auto_start_child_limit` (ask or shrink first)
 
-In those cases CodeWhale uses direct tools or a single `agent` instead.
+In those cases Codewhale uses direct tools or a single `agent` instead.
 
 ## Dogfood scenarios (#4131)
 

@@ -334,6 +334,32 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         return app.view_stack.handle_mouse(mouse);
     }
 
+    // The approval prompt is intentionally inline: its card stays focused,
+    // but the wheel reviews the transcript that remains visible above it.
+    // Preserve ownership of visible side surfaces, though: wheeling over the
+    // sidebar or Ocean work surface must not move an unrelated transcript.
+    // Other modals still own their wheel input exclusively (#4371).
+    if app.view_stack.top_kind() == Some(ModalKind::Approval) {
+        let over_approval = mouse_hits_rect(mouse, app.viewport.last_approval_area);
+        let over_side_surface = mouse_hits_rect(mouse, app.viewport.last_sidebar_area)
+            || mouse_hits_rect(mouse, app.work_surface.last_area);
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if over_approval || !over_side_surface {
+                    scroll_transcript_with_mouse(app, ScrollDirection::Up);
+                }
+                return Vec::new();
+            }
+            MouseEventKind::ScrollDown => {
+                if over_approval || !over_side_surface {
+                    scroll_transcript_with_mouse(app, ScrollDirection::Down);
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
+    }
+
     if !app.view_stack.is_empty() {
         app.needs_redraw = true;
         return app.view_stack.handle_mouse(mouse);
@@ -485,26 +511,10 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
             }
         }
         MouseEventKind::ScrollUp => {
-            let update = app.viewport.mouse_scroll.on_scroll(ScrollDirection::Up);
-            app.viewport.pending_scroll_delta = app
-                .viewport
-                .pending_scroll_delta
-                .saturating_add(update.delta_lines);
-            if update.delta_lines != 0 {
-                app.user_scrolled_during_stream = true;
-                app.needs_redraw = true;
-            }
+            scroll_transcript_with_mouse(app, ScrollDirection::Up);
         }
         MouseEventKind::ScrollDown => {
-            let update = app.viewport.mouse_scroll.on_scroll(ScrollDirection::Down);
-            app.viewport.pending_scroll_delta = app
-                .viewport
-                .pending_scroll_delta
-                .saturating_add(update.delta_lines);
-            if update.delta_lines != 0 {
-                app.user_scrolled_during_stream = true;
-                app.needs_redraw = true;
-            }
+            scroll_transcript_with_mouse(app, ScrollDirection::Down);
         }
         MouseEventKind::Down(MouseButton::Left) => {
             app.viewport.transcript_scrollbar_dragging = false;
@@ -581,6 +591,18 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
     }
 
     Vec::new()
+}
+
+fn scroll_transcript_with_mouse(app: &mut App, direction: ScrollDirection) {
+    let update = app.viewport.mouse_scroll.on_scroll(direction);
+    app.viewport.pending_scroll_delta = app
+        .viewport
+        .pending_scroll_delta
+        .saturating_add(update.delta_lines);
+    if update.delta_lines != 0 {
+        app.user_scrolled_during_stream = true;
+        app.needs_redraw = true;
+    }
 }
 
 /// Resolve a right-click in the sidebar to the hovered row's full copyable

@@ -2,14 +2,15 @@
 name = "codewhale-config"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Config schema and precedence model for CodeWhale"
+description = "Config schema and precedence model for Codewhale"
 
 [dependencies]
 anyhow.workspace = true
-codewhale-execpolicy = { path = "../execpolicy", version = "0.8.68" }
-codewhale-secrets = { path = "../secrets", version = "0.8.68" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.0" }
+codewhale-secrets = { path = "../secrets", version = "0.9.0" }
 dirs.workspace = true
 libc = "0.2"
 serde.workspace = true

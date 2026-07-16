@@ -19,6 +19,14 @@ pub mod key {
         vec![0x1b]
     }
 
+    pub fn down() -> Vec<u8> {
+        b"\x1b[B".to_vec()
+    }
+
+    pub fn page_up() -> Vec<u8> {
+        b"\x1b[5~".to_vec()
+    }
+
     pub fn text(s: &str) -> Vec<u8> {
         s.as_bytes().to_vec()
     }

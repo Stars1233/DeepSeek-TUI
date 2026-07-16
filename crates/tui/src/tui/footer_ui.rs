@@ -255,7 +255,7 @@ pub(crate) fn maybe_log_provider_wait_incident(app: &mut App) {
          idle_secs={} stream_idle_budget_secs={} max_subagents={} \
          fanout_running={fanout_running} fanout_total={fanout_total} \
          running_agents={} pending_dispatch={pending_dispatch}",
-        app.api_provider.as_str(),
+        app.provider_identity_for_persistence(),
         app.model,
         provider_wait_idle_secs(app),
         app.stream_chunk_timeout_secs,

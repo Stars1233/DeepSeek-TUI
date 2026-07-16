@@ -1,10 +1,10 @@
 # CodeWhale 0.8.68 — Workflow + Stability Patch Release
 
-> **Status (2026-07-13): Historical planning record for an unpublished release
-> candidate.** v0.8.68 has not yet been tagged or publicly published. The
+> **Status (2026-07-15): Historical planning record superseded by v0.9.0.**
+> v0.8.68 was never tagged or publicly published. The
 > checkmarks and verdicts below record planning at different points in time;
 > they are not completion, test, merge, or release evidence. Use the current
-> [v0.8.68 release-candidate ledger](docs/releases/v0.8.68-release-candidate.md)
+> [v0.9.0 release-candidate ledger](docs/releases/v0.9.0-release-candidate.md)
 > for release truth. In particular, the Wave-7 "Multitask" rows describe work
 > that was rolled back; Multitask is not a startup mode, and legacy
 > `operate`/`yolo` settings normalize to Agent with permission posture stored

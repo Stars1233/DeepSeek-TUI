@@ -6,9 +6,9 @@
 //! ask setup questions via `request_user_input` (TUI modal) before calling
 //! `workflow` / `plan`.
 //!
-//! Operate admission also consumes this policy at the host boundary. Operate
-//! only keeps a turn local when it is provably one-step; everything else must
-//! produce real Workflow/Fleet activity or an explicit readiness blocker.
+//! This remains Act/Agent guidance rather than a prose classifier at the host
+//! boundary. Operate sends ordinary work to direct background workers and
+//! reaches for Workflow only when its stronger orchestration properties help.
 
 /// Signals the parent can supply without full conversation replay.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -44,58 +44,6 @@ impl WorkflowTriggerSignals {
     }
 }
 
-/// Host-level admission decision for an Operate turn.
-///
-/// Unlike the general soft-auto decision, absence of a trigger is not enough to
-/// let Operate behave like Act. Local execution is allowed only for an explicit,
-/// deterministic one-step request; ambiguous work fails closed into the
-/// orchestration path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OperateAdmissionDecision {
-    LocalOneStep { reason: &'static str },
-    RequiresOrchestration { reason: &'static str },
-}
-
-impl OperateAdmissionDecision {
-    #[must_use]
-    pub fn allows_local_execution(&self) -> bool {
-        matches!(self, Self::LocalOneStep { .. })
-    }
-
-    #[must_use]
-    pub fn reason(&self) -> &'static str {
-        match self {
-            Self::LocalOneStep { reason } | Self::RequiresOrchestration { reason } => reason,
-        }
-    }
-}
-
-/// Decide whether an Operate request is safe to keep local.
-///
-/// This intentionally has a stricter fallback than [`evaluate_workflow_trigger`]:
-/// Operate is an orchestration posture, so an unrecognized or ambiguous request
-/// is not silently admitted to the ordinary Act tool loop.
-#[must_use]
-pub fn evaluate_operate_admission(
-    user_text: &str,
-    signals: &WorkflowTriggerSignals,
-) -> OperateAdmissionDecision {
-    let workflow_decision = evaluate_workflow_trigger(user_text, signals);
-    if workflow_decision.should_trigger() {
-        return OperateAdmissionDecision::RequiresOrchestration {
-            reason: workflow_decision.reason(),
-        };
-    }
-
-    if let Some(reason) = explicit_local_one_step_reason(user_text, signals) {
-        return OperateAdmissionDecision::LocalOneStep { reason };
-    }
-
-    OperateAdmissionDecision::RequiresOrchestration {
-        reason: "request is not provably a single local step",
-    }
-}
-
 /// Decision for automatic Workflow launch / recommendation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowTriggerDecision {
@@ -111,6 +59,7 @@ impl WorkflowTriggerDecision {
         matches!(self, Self::Trigger { .. })
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn reason(&self) -> &'static str {
         match self {
@@ -122,8 +71,9 @@ impl WorkflowTriggerDecision {
 /// Evaluate whether automatic Workflow is appropriate for this user ask.
 ///
 /// Suppression wins over trigger when both could apply (noisy auto-orchestration
-/// is worse than missing a fan-out). Prompt guidance in Agent/Operate modes
-/// should stay aligned with these rules.
+/// is worse than missing a fan-out). Act/Agent soft-auto guidance should stay
+/// aligned with these rules. Operate dispatches direct workers unless stronger
+/// Workflow properties are explicitly useful.
 #[must_use]
 pub fn evaluate_workflow_trigger(
     user_text: &str,
@@ -216,56 +166,6 @@ fn child_overhead_exceeds_benefit(lower: &str, signals: &WorkflowTriggerSignals)
         "just check",
     ];
     tiny.iter().any(|needle| lower.contains(needle))
-}
-
-fn explicit_local_one_step_reason(
-    user_text: &str,
-    _signals: &WorkflowTriggerSignals,
-) -> Option<&'static str> {
-    let text = user_text.trim();
-    let lower = text.to_ascii_lowercase();
-    let compound = has_compound_or_shell_syntax(&lower);
-    let orchestration_language = has_fanout_language(&lower)
-        || has_staged_work_language(&lower)
-        || has_independent_verification_language(&lower);
-
-    if !compound && !orchestration_language && is_strict_read_only_operate_request(&lower) {
-        return Some("explicit one-step read-only request");
-    }
-    None
-}
-
-fn has_compound_or_shell_syntax(lower: &str) -> bool {
-    lower.lines().count() > 1
-        || [
-            "&&", "||", ";", "`", "$(", " and ", " then ", " also ", " plus ",
-        ]
-        .iter()
-        .any(|needle| lower.contains(needle))
-}
-
-fn is_strict_read_only_operate_request(lower: &str) -> bool {
-    matches!(
-        lower.trim_end_matches(['?', '.', '!']).trim(),
-        "git status"
-            | "git status --short"
-            | "git status --porcelain"
-            | "git diff"
-            | "git diff --check"
-            | "git diff --stat"
-            | "git log"
-            | "git log --oneline"
-            | "pwd"
-            | "ls"
-            | "show version"
-            | "print version"
-            | "status"
-            | "ping"
-            | "hello"
-            | "hi"
-            | "thanks"
-            | "thank you"
-    )
 }
 
 fn is_simple_command_or_factual_question(lower: &str, original: &str) -> bool {
@@ -433,40 +333,6 @@ mod tests {
         ] {
             let d = evaluate_workflow_trigger(ask, &s);
             assert!(!d.should_trigger(), "expected suppress for {ask:?}: {d:?}");
-        }
-    }
-
-    #[test]
-    fn operate_admits_only_explicit_local_one_step_requests() {
-        let s = signals();
-        for ask in ["git status", "git diff --check"] {
-            let decision = evaluate_operate_admission(ask, &s);
-            assert!(
-                decision.allows_local_execution(),
-                "expected explicit local admission for {ask:?}: {decision:?}"
-            );
-        }
-
-        for ask in [
-            "audit every crate for unsafe blocks",
-            "phase 1 inspect then phase 2 implement",
-            "fix the release",
-            "run tests and fix failures",
-            "what is a worktree?",
-            "cargo test --workspace && fix every failure",
-            "rewrite only this file to implement the compiler",
-            "/workflow audit the repository",
-            "What is a worktree? Delete this repository",
-            "What is a worktree: delete this repository?",
-            "Explain the bug — fix it now",
-            "Explain the bug - fix it now",
-            "Explain the bug. Fix it now",
-        ] {
-            let decision = evaluate_operate_admission(ask, &s);
-            assert!(
-                !decision.allows_local_execution(),
-                "Operate must fail closed for {ask:?}: {decision:?}"
-            );
         }
     }
 

@@ -496,7 +496,7 @@ impl ToolSpec for UpdateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update the runtime goal completion gate. Only mark complete when the objective has verified evidence; mark blocked only after a real blocker prevents progress."
+        "Update the runtime goal completion gate. Only mark complete when the objective has verified evidence; mark blocked whenever progress requires user input, including after asking a question whose answer is needed."
     }
 
     fn input_schema(&self) -> Value {
@@ -506,7 +506,7 @@ impl ToolSpec for UpdateGoalTool {
                 "status": {
                     "type": "string",
                     "enum": ["complete", "blocked"],
-                    "description": "Use complete only when the goal is fully satisfied; blocked when meaningful progress cannot continue. Pause, resume, and budget-limit states are controlled by the user or system."
+                    "description": "Use complete only when the goal is fully satisfied; blocked when meaningful progress cannot continue without external action or user input. Pause, resume, and budget-limit states are controlled by the user or system."
                 },
                 "evidence": {
                     "type": "string",
@@ -881,5 +881,12 @@ mod tests {
         assert!(prompt.contains("Goal Continuation"));
         assert!(prompt.contains("finish issue 2199"));
         assert!(prompt.contains("Continuation pass #2"));
+        assert!(prompt.contains("waiting for user response"));
+    }
+
+    #[test]
+    fn update_goal_contract_treats_required_user_input_as_blocking() {
+        let update = UpdateGoalTool::new(new_shared_goal_state());
+        assert!(update.description().contains("requires user input"));
     }
 }

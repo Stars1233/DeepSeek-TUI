@@ -231,6 +231,8 @@ pub fn build_context_report(app: &App) -> PromptSourceMap {
 
 pub fn build_headless_context_report(config: &Config, workspace: &Path) -> PromptSourceMap {
     let model = config.default_model();
+    let provider = config.api_provider();
+    let provider_identity = config.provider_identity_for(provider);
     let global_skills_dir = config.skills_dir();
     let selected_skills_dir =
         crate::tui::app::resolve_skills_dir(workspace, &global_skills_dir, config);
@@ -268,16 +270,16 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
 
     builder.push(SourceEntry::text(
         SourceKind::ModelProviderFact,
-        format!("Provider facts ({})", config.api_provider().as_str()),
+        format!("Provider facts ({provider_identity})"),
         None,
         ActivationReason::RuntimeState,
         &format!(
             "provider: {}\nmodel: {}\ncontext_window: {}",
-            config.api_provider().as_str(),
+            provider_identity,
             model,
             // Route limits aren't resolved in the headless doctor path, so report
             // the provider+model capability window (route overlay is unavailable).
-            provider_capability(config.api_provider(), &model).context_window
+            provider_capability(provider, &model).context_window
         ),
         CountingConfidence::Approximate,
         None,
@@ -289,7 +291,7 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
         .map(|entry| entry.estimated_tokens)
         .sum();
     builder.finish(
-        config.api_provider(),
+        provider,
         &model,
         // Route limits aren't resolved in the headless doctor path.
         None,
@@ -470,7 +472,7 @@ fn add_app_runtime_entries(builder: &mut ReportBuilder, app: &App) {
             "workspace: {}\nmodel: {}\nprovider: {}\nmode: {}\napproval: {}",
             app.workspace.display(),
             app.model,
-            app.api_provider.as_str(),
+            app.provider_identity_for_persistence(),
             app.mode.label(),
             app.approval_mode.permission_chip_label()
         ),

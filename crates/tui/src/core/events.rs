@@ -32,6 +32,9 @@ pub enum TurnOutcomeStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnRoute {
     pub provider: ApiProvider,
+    /// Exact non-secret configured route key. Named custom providers all map
+    /// to [`ApiProvider::Custom`], so the enum alone is not provenance.
+    pub provider_identity: String,
     pub model: String,
     pub auto_model: bool,
 }

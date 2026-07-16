@@ -115,7 +115,7 @@ impl ChatWidget {
         // empty composer, so typing or receiving the first message made the
         // fish appear to die.
         let underwater_motion_enabled =
-            !app.low_motion && app.fancy_animations && !app.attention_hold_active();
+            crate::tui::underwater::decorative_shell_motion_enabled(app);
         let browsing_history = !app.viewport.transcript_scroll.is_at_tail();
         let ocean_animated = underwater_motion_enabled
             && (render_empty_state
@@ -1293,6 +1293,16 @@ impl Renderable for ComposerWidget<'_> {
                     SubmitDisposition::Queue => {
                         if self.app.offline_mode {
                             (Some("↵ offline queue".to_string()), palette::STATUS_WARNING)
+                        } else if self.app.mode == crate::tui::app::AppMode::Operate {
+                            let label = if queue_count > 0 {
+                                format!(
+                                    "↵ queue task ({} waiting, double-↵ to steer)",
+                                    queue_count.saturating_add(1)
+                                )
+                            } else {
+                                "↵ queue task (double-↵ to steer)".to_string()
+                            };
+                            (Some(label), palette::WHALE_INFO)
                         } else {
                             let label = if queue_count > 0 {
                                 format!(
@@ -1310,7 +1320,11 @@ impl Renderable for ComposerWidget<'_> {
                         (Some("↵ steering".to_string()), palette::WHALE_INFO)
                     }
                     SubmitDisposition::QueueFollowUp => (
-                        Some("↵ queued (double-↵ to steer)".to_string()),
+                        Some(if self.app.mode == crate::tui::app::AppMode::Operate {
+                            "↵ queued task (double-↵ to steer)".to_string()
+                        } else {
+                            "↵ queued (double-↵ to steer)".to_string()
+                        }),
                         palette::TEXT_MUTED,
                     ),
                 };
@@ -3264,6 +3278,8 @@ fn placeholder_visual_lines_for(placeholder: &str, content_width: usize) -> usiz
 pub(crate) fn composer_empty_hint_text(app: &App) -> Cow<'static, str> {
     if app.is_history_search_active() {
         app.tr(crate::localization::MessageId::HistorySearchPlaceholder)
+    } else if app.mode == crate::tui::app::AppMode::Operate {
+        Cow::Borrowed("Coordinate parallel tasks...")
     } else {
         app.tr(crate::localization::MessageId::ComposerPlaceholder)
     }
@@ -4109,26 +4125,29 @@ mod tests {
         ACTIVE_REVISION_DOMAIN, ApprovalWidget, COMPOSER_PANEL_HEIGHT, COMPOSER_PLACEHOLDER,
         ChatWidget, ComposerWidget, Renderable, SlashMenuEntry, active_entry_revision,
         ambient_ping_pong, apply_detail_target_highlight, apply_selection_to_line,
-        apply_send_flash, build_empty_state_lines, composer_content_geometry, composer_height,
-        composer_max_height, composer_min_input_rows, composer_top_padding, cursor_row_col,
-        empty_composer_visual_rows, fish_flee_offset, fish_heading, fish_mark,
-        history_entry_revision, layout_input, layout_input_with_scroll, pad_lines_to_bottom,
-        placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
-        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
-        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
+        apply_send_flash, build_empty_state_lines, composer_content_geometry,
+        composer_empty_hint_text, composer_height, composer_max_height, composer_min_input_rows,
+        composer_top_padding, cursor_row_col, empty_composer_visual_rows, fish_flee_offset,
+        fish_heading, fish_mark, history_entry_revision, layout_input, layout_input_with_scroll,
+        pad_lines_to_bottom, placeholder_visual_lines, push_command_entry, receipt_is_settling,
+        revision_in_domain, should_render_empty_state, slash_completion_hints,
+        tool_run_summary_revision, wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
     use crate::palette;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
-        App, ComposerDensity, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode, TuiOptions,
+        App, AppMode, ComposerDensity, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
+        TuiOptions,
     };
     use crate::tui::history::{
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus,
     };
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
     use ratatui::{
+        Terminal,
+        backend::TestBackend,
         buffer::Buffer,
         layout::Rect,
         style::{Color, Style},
@@ -5315,7 +5334,7 @@ mod tests {
             empty_composer_visual_rows(Some(COMPOSER_PLACEHOLDER), 40, 4),
             1
         );
-        assert_eq!(widget.cursor_pos(area), Some((2, 4)));
+        assert_eq!(widget.cursor_pos(area), Some((2, 3)));
     }
 
     #[test]
@@ -5344,7 +5363,7 @@ mod tests {
             empty_composer_visual_rows(Some(COMPOSER_PLACEHOLDER), 14, 4),
             1
         );
-        assert_eq!(widget.cursor_pos(area), Some((2, 4)));
+        assert_eq!(widget.cursor_pos(area), Some((2, 3)));
     }
 
     #[test]
@@ -5376,6 +5395,12 @@ mod tests {
         assert!(
             row_text(&buf, area, cursor_y).contains(COMPOSER_PLACEHOLDER),
             "prompt and hint should share one row: {rendered}"
+        );
+        assert!(
+            row_text(&buf, area, cursor_y.saturating_add(1))
+                .trim()
+                .is_empty(),
+            "comfortable composer should keep a quiet row before the footer: {rendered}"
         );
     }
 
@@ -5568,6 +5593,17 @@ mod tests {
     }
 
     #[test]
+    fn operate_composer_invites_ordinary_parallel_tasks() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Operate;
+
+        assert_eq!(
+            composer_empty_hint_text(&app),
+            "Coordinate parallel tasks..."
+        );
+    }
+
+    #[test]
     fn localized_composer_placeholders_render_at_narrow_widths() {
         for locale in [Locale::Ja, Locale::ZhHans, Locale::PtBr] {
             let mut app = create_test_app();
@@ -5597,9 +5633,9 @@ mod tests {
     #[test]
     fn composer_top_padding_uses_clamp() {
         // content_lines=0 is clamped to 1
-        assert_eq!(composer_top_padding(0, 3), 2);
+        assert_eq!(composer_top_padding(0, 3), 1);
         // content_lines=1
-        assert_eq!(composer_top_padding(1, 3), 2);
+        assert_eq!(composer_top_padding(1, 3), 1);
         // content_lines=3 fills the budget
         assert_eq!(composer_top_padding(3, 3), 0);
         // content_lines > budget is clamped
@@ -5785,11 +5821,18 @@ mod tests {
     fn launch_hierarchy_survives_responsive_gate_sizes() {
         for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (140, 40)] {
             let mut app = create_test_app();
+            app.low_motion = false;
+            app.fancy_animations = true;
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    let widget = ChatWidget::new(&mut app, area);
+                    widget.render(area, frame.buffer_mut());
+                })
+                .expect("responsive idle draw");
             let area = Rect::new(0, 0, width, height);
-            let mut buf = Buffer::empty(area);
-
-            ChatWidget::new(&mut app, area).render(area, &mut buf);
-            let rendered = buffer_text(&buf, area);
+            let rendered = buffer_text(terminal.backend().buffer(), area);
 
             assert!(
                 rendered.contains("Fleet") && rendered.contains("/fleet setup"),
@@ -5799,6 +5842,11 @@ mod tests {
                 assert!(
                     !rendered.contains("▗▄▄"),
                     "the decorative whale must yield before the Fleet action at {width}x{height}"
+                );
+            } else if width >= 60 && height >= 16 {
+                assert!(
+                    rendered.contains("▗▄▄"),
+                    "the idle whale should remain visible at {width}x{height}:\n{rendered}"
                 );
             }
         }

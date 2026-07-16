@@ -24,7 +24,9 @@ use ratatui::{
 use crate::deepseek_theme::Theme;
 use crate::palette;
 use crate::tools::plan::StepStatus;
-use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus, agent_worker_status_name};
+use crate::tools::subagent::{
+    AgentWorkerStatus, SubAgentStatus, agent_worker_status_name, localized_whale_display_names,
+};
 use crate::tools::todo::TodoStatus;
 
 use super::app::{
@@ -2605,6 +2607,17 @@ fn foreground_rlm_running(app: &App) -> bool {
 }
 
 fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
+    let cached_ids: std::collections::HashSet<&str> = app
+        .subagent_cache
+        .iter()
+        .map(|agent| agent.agent_id.as_str())
+        .collect();
+    let display_names = localized_whale_display_names(
+        app.subagent_cache
+            .iter()
+            .map(|agent| (agent.agent_id.as_str(), agent.nickname.as_deref())),
+        app.ui_locale.tag(),
+    );
     let mut rows: Vec<SidebarAgentRow> = app
         .subagent_cache
         .iter()
@@ -2620,12 +2633,11 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                         .map(summarize_tool_output)
                         .filter(|summary| !summary.trim().is_empty())
                 });
-            // #3030: Prefer the user-assigned nickname > stable label
-            // ("Agent 1") > raw name. Every spawned agent gets a label-map
-            // entry, so the generated label must not shadow nicknames.
-            let display_name = agent
-                .nickname
-                .clone()
+            // Generated whales are locale-derived from the neutral agent id;
+            // never replay a persisted label from another language.
+            let display_name = display_names
+                .get(&agent.agent_id)
+                .cloned()
                 .or_else(|| app.agent_label_map.get(&agent.agent_id).cloned())
                 .unwrap_or_else(|| agent.name.clone());
             SidebarAgentRow {
@@ -2651,17 +2663,14 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
         })
         .collect();
 
-    let cached_ids: std::collections::HashSet<&str> = app
-        .subagent_cache
-        .iter()
-        .map(|agent| agent.agent_id.as_str())
-        .collect();
     rows.extend(
         app.agent_progress
             .iter()
             .filter(|(id, _)| !cached_ids.contains(id.as_str()))
             .map(|(id, progress)| {
-                // #3030: Prefer stable label for progress-only agents too.
+                // Progress-only rows do not carry a generated whale name yet;
+                // keep their existing stable Agent-N placeholder until the
+                // manager snapshot arrives.
                 let display_name = app
                     .agent_label_map
                     .get(id.as_str())
@@ -7259,6 +7268,7 @@ mod tests {
     #[test]
     fn sidebar_progress_only_rows_parse_status_instead_of_hardcoding_running() {
         let mut app = create_test_app();
+        app.ensure_agent_label("agent_queued");
         app.agent_progress.insert(
             "agent_queued".to_string(),
             "queued for launch permit".to_string(),
@@ -7267,11 +7277,12 @@ mod tests {
         let rows = sidebar_agent_rows(&app);
 
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Agent 1");
         assert_eq!(rows[0].status, "queued");
     }
 
     #[test]
-    fn sidebar_agent_rows_prefer_nickname_over_generated_label() {
+    fn sidebar_agent_rows_preserve_explicit_names_and_derive_whales_from_locale() {
         let mut app = create_test_app();
         let agent_id = "agent_cafe0123";
         app.ensure_agent_label(agent_id);
@@ -7281,13 +7292,47 @@ mod tests {
         let rows = super::sidebar_agent_rows(&app);
         assert_eq!(
             rows[0].name, "doc-fixer",
-            "user nickname must beat the generated Agent-N label"
+            "an explicit custom nickname remains user-owned"
         );
 
-        // Without a nickname the generated label is used.
+        // Without an explicit nickname, display is derived from the neutral id
+        // in the active UI locale rather than from the old Agent-N label.
         app.subagent_cache[0].nickname = None;
         let rows = super::sidebar_agent_rows(&app);
-        assert_eq!(rows[0].name, "Agent 1");
+        assert_eq!(
+            rows[0].name,
+            crate::tools::subagent::whale_name_for_id_in_locale(agent_id, "en")
+        );
+    }
+
+    #[test]
+    fn english_sidebar_relocalizes_mixed_persisted_whale_names() {
+        let mut app = create_test_app();
+        app.ui_locale = Locale::En;
+        for (agent_id, legacy_locale) in [
+            ("agent_locale_a", "zh-Hans"),
+            ("agent_locale_b", "ja"),
+            ("agent_locale_c", "vi"),
+        ] {
+            let legacy_name =
+                crate::tools::subagent::whale_name_for_id_in_locale(agent_id, legacy_locale);
+            app.subagent_cache
+                .push(cached_agent(agent_id, Some(&legacy_name)));
+        }
+
+        let rows = super::sidebar_agent_rows(&app);
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            assert!(
+                row.name.is_ascii(),
+                "English Fleet display leaked a prior-locale whale: {}",
+                row.name
+            );
+            assert_eq!(
+                row.name,
+                crate::tools::subagent::whale_name_for_id_in_locale(&row.id, "en")
+            );
+        }
     }
 
     // --- Unicode / CJK / terminal-width QA (issue #3488) -------------------

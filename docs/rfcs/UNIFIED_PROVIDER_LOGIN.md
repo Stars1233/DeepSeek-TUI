@@ -1,8 +1,8 @@
 # RFC: Unified provider login (`codewhale auth login`)
 
 **Status:** Future RFC — approved direction (maintainer, 2026-07-12);
-implementation targets the next release after v0.8.68.
-**Owner seams verified against:** v0.8.68 candidate tree.
+implementation is deferred beyond v0.9.0.
+**Owner seams verified against:** v0.9.0 candidate tree.
 
 ## Decision
 

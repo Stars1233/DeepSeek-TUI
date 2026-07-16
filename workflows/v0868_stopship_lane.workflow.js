@@ -1,94 +1,141 @@
+// Live acceptance on DeepSeek Flash and GLM-5-Turbo measured the inherited
+// read-only prompt/tool envelope at 17,457 and 17,550 tokens before the first
+// useful tool turn completed. Budget 24k per intended model turn, then pair
+// that token allowance with a small max_steps bound so every role has usable
+// headroom without becoming open-ended. The five role caps total 360k.
 export default workflow({
   "id": "v0868-stopship-lane",
-  "goal": "Fix v0.8.68 release-stopship blockers before any feature work",
-  "description": "Sequential stopship lane: #4090 Ctrl+C regression, release-blockers #4093/#4094, then re-verify dogfood fixes #3986/#3990. Branch all implementation from main (not codex/0868-next).",
-  "nodes": [
+  "goal": "Verify the v0.8.68 Fleet, Workflow, Lane, Runtime, and gate receipt path without changing the workspace",
+  "description": "Read-only release acceptance fixture for #4175, #4177, #4178, and #4179. Every Fleet role inspects checked-in runtime evidence; no step creates branches, edits files, installs dependencies, or publishes anything.",
+  "gates": [
     {
-      "branch": {
-        "id": "scout-stopship",
-        "parallel": true,
-        "children": [
-          {
-            "agent": {
-              "id": "scout-ctrl-c",
-              "prompt": "Investigate GitHub issue #4090 (repeated Ctrl+C re-prompts in PTY/raw-mode). Run: `gh issue view 4090 -R Hmbown/CodeWhale`. Then search `crates/tui/src/` for Ctrl+C handling, raw mode teardown, and exit confirmation paths. Report: repro hypothesis, exact files/functions, whether a regression test or PTY trace exists, minimal fix approach. Read-only.",
-              "agent_type": "explore",
-              "role": "scout",
-              "mode": "read_only",
-              "file_scope": ["crates/tui/src/tui/app.rs", "crates/tui/src/tui/ui.rs", "crates/tui/src/main.rs"],
-              "budget": { "max_steps": 12, "timeout_secs": 600 }
-            }
-          },
-          {
-            "agent": {
-              "id": "scout-fleet-modal",
-              "prompt": "Investigate release-blocker #4093 (Fleet setup modal provider-scoped instead of role/profile roster). Run: `gh issue view 4093 -R Hmbown/CodeWhale`. Inspect `crates/tui/src/tui/views/fleet_setup.rs`, `crates/tui/src/fleet/roster.rs`, and related Fleet UI. Report current vs expected behavior, root cause, files to change, test strategy. Read-only.",
-              "agent_type": "explore",
-              "role": "scout",
-              "mode": "read_only",
-              "file_scope": ["crates/tui/src/tui/views/fleet_setup.rs", "crates/tui/src/fleet/"],
-              "budget": { "max_steps": 12, "timeout_secs": 600 }
-            }
-          },
-          {
-            "agent": {
-              "id": "scout-subagent-panel",
-              "prompt": "Investigate release-blocker #4094 (sub-agent detail panel empty / TUI freeze). Run: `gh issue view 4094 -R Hmbown/CodeWhale`. Inspect sidebar agents panel, sub-agent detail rendering, and redraw paths under load. Report root cause hypothesis, files, whether throttle or empty-state bug, severity. Read-only.",
-              "agent_type": "explore",
-              "role": "scout",
-              "mode": "read_only",
-              "file_scope": ["crates/tui/src/tui/sidebar.rs", "crates/tui/src/tui/widgets/agent_card.rs"],
-              "budget": { "max_steps": 12, "timeout_secs": 600 }
-            }
-          }
-        ]
-      }
+      "id": "scout-evidence",
+      "role": "scout",
+      "on": "role_complete",
+      "gate": "approve",
+      "on_fail": "block",
+      "blocks_role": "implementer",
+      "max_retries": 0,
+      "artifact_kind": "source_evidence",
+      "require_explicit_verdict": true
     },
     {
+      "id": "implementation-plan",
+      "role": "implementer",
+      "on": "role_complete",
+      "gate": "approve",
+      "on_fail": "block",
+      "blocks_role": "reviewer",
+      "max_retries": 0,
+      "artifact_kind": "verification_plan",
+      "require_explicit_verdict": true
+    },
+    {
+      "id": "review-findings",
+      "role": "reviewer",
+      "on": "role_complete",
+      "gate": "review",
+      "on_fail": "block",
+      "blocks_role": "verifier",
+      "max_retries": 0,
+      "artifact_kind": "review_report",
+      "require_explicit_verdict": true
+    },
+    {
+      "id": "verifier-evidence",
+      "role": "verifier",
+      "on": "role_complete",
+      "gate": "verify",
+      "on_fail": "block",
+      "blocks_role": "release_lead",
+      "max_retries": 0,
+      "artifact_kind": "verification_report",
+      "require_explicit_verdict": true
+    }
+  ],
+  "nodes": [
+    {
       "sequence": {
-        "id": "implement-stopship",
+        "id": "acceptance-chain",
         "children": [
           {
             "agent": {
-              "id": "fix-4090",
-              "prompt": "Fix #4090 using scout-ctrl-c findings. Branch from main (git checkout main && git pull && git checkout -b codex/v0868-fix-4090). Implement minimal fix so double Ctrl+C exits cleanly in PTY/raw-mode while preserving cancel/copy behavior. Add regression test or PTY/key-path trace. Run: `cargo test -p codewhale-tui` for touched modules and `cargo clippy -p codewhale-tui -- -D warnings`. Do not close the issue; report files changed and test output.",
-              "agent_type": "implementer",
-              "role": "implementer",
-              "mode": "read_write",
-              "file_scope": ["crates/tui/src/tui/app.rs", "crates/tui/src/tui/ui.rs"],
-              "budget": { "max_steps": 20, "timeout_secs": 1200 }
+              "id": "scout-runtime",
+              "prompt": "Read the checked-in v0.8.68 orchestration path only. Use `grep_files` first for the named symbols, then use `read_file` only on bounded relevant snippets; never read an entire large source file. Inspect workflows/v0868_stopship_lane.workflow.js, fleets/v0868-stopship.toml, crates/cli/src/lib.rs, crates/workflow/src/role_resolve.rs, and crates/tui/src/tools/workflow.rs. The first non-empty line of your response must be exactly APPROVE or exactly BLOCK. Use APPROVE only when every named source owner is found; otherwise use BLOCK. Follow with concise path-and-symbol evidence for: the stopship alias, named Fleet loading, role-to-profile resolution, tmux Lane launch, typed task_started receipts, gate_updated receipts, and terminal workflow receipts. Do not edit files, create branches, run shell commands, access GitHub, or infer success where source evidence is absent.",
+              "agent_type": "explore",
+              "role": "scout",
+              "mode": "read_only",
+              "file_scope": [
+                "workflows/v0868_stopship_lane.workflow.js",
+                "fleets/v0868-stopship.toml",
+                "crates/cli/src/lib.rs",
+                "crates/workflow/src/role_resolve.rs",
+                "crates/tui/src/tools/workflow.rs"
+              ],
+              "budget": { "max_steps": 4, "timeout_secs": 480, "max_tokens": 96000 }
             }
           },
           {
             "agent": {
-              "id": "fix-4093-4094",
-              "prompt": "Using scout findings, fix #4093 and/or #4094 if root causes are clear and independent. Branch from main (separate branches per issue if needed: codex/v0868-fix-4093, codex/v0868-fix-4094). Prefer smallest correct diffs. For #4093: Fleet setup should edit role/profile roster not provider scope. For #4094: sub-agent detail panel must render and not freeze TUI. Add tests where feasible. Run targeted `cargo test -p codewhale-tui fleet sidebar`. Report per-issue status: fixed/partial/blocked.",
+              "id": "plan-verification",
+              "prompt": "Act as the Fleet implementer role for a verification-only acceptance run. Use the promoted scout source_evidence handoff to produce a no-edit verification plan for #4175/#4177/#4178/#4179. If source confirmation is needed, use `grep_files` first and `read_file` only on bounded relevant snippets; never read an entire large source file. The first non-empty line of your response must be exactly APPROVE or exactly BLOCK. Use APPROVE only when the plan names concrete receipt fields for role resolution, gate promotion or blocking, and terminal Lane reconciliation; otherwise use BLOCK. This is deliberately not an implementation task: do not edit files, create branches, run shell commands, or propose fixes unrelated to missing acceptance evidence.",
               "agent_type": "implementer",
               "role": "implementer",
-              "mode": "read_write",
-              "file_scope": ["crates/tui/src/tui/views/fleet_setup.rs", "crates/tui/src/tui/sidebar.rs"],
-              "budget": { "max_steps": 24, "timeout_secs": 1800 }
+              "mode": "read_only",
+              "file_scope": [
+                "crates/cli/src/lib.rs",
+                "crates/lane/src/registry.rs",
+                "crates/tui/src/tools/workflow.rs"
+              ],
+              "budget": { "max_steps": 3, "timeout_secs": 420, "max_tokens": 72000 }
             }
           },
           {
             "agent": {
-              "id": "verify-dogfood",
-              "prompt": "Re-verify dogfood fixes for #3986 (API-key onboarding copy shows CODEWHALE_HOME path) and #3990 (slash autocomplete alias duplication). Read issue bodies via `gh issue view`. Check if fixes exist on current branch; if missing, report them as missing rather than editing. Run verification gate subset: `cargo fmt --all --check`, `cargo test -p codewhale-tui -- onboarding slash`. Report done/partial/missing per issue.",
+              "id": "review-contract",
+              "prompt": "Review the promoted verification_plan handoff against the checked-in runtime. Use `grep_files` first for each claimed owner and `read_file` only on bounded relevant snippets; never read an entire large source file. Look specifically for false-green risks: declared role versus resolved profile, gate state versus prose verdict, tmux process exit versus terminal workflow receipt, and a completed Lane with missing child evidence. The first non-empty line of your response must be exactly APPROVE or exactly BLOCK. Use APPROVE only when each claimed receipt has a concrete source owner; otherwise use BLOCK and list the missing evidence. Remain read-only and do not run shell commands or edit anything.",
+              "agent_type": "review",
+              "role": "reviewer",
+              "mode": "read_only",
+              "file_scope": [
+                "crates/cli/src/lib.rs",
+                "crates/lane/src/registry.rs",
+                "crates/tui/src/tools/workflow.rs"
+              ],
+              "budget": { "max_steps": 3, "timeout_secs": 420, "max_tokens": 72000 }
+            }
+          },
+          {
+            "agent": {
+              "id": "verify-receipts",
+              "prompt": "Statically verify the promoted review_report against existing tests and receipt serialization. Use `grep_files` first for the receipt and test symbols, then use `read_file` only on bounded relevant snippets; never read an entire large source file. Inspect the Workflow and CLI test modules for role-resolved task_started, gate_updated, run_completed, metadata, and Lane exit-receipt assertions. The first non-empty line of your response must be exactly APPROVE or exactly BLOCK. Use APPROVE only when every required receipt has an exact test name or source symbol; otherwise use BLOCK. Follow with a compact evidence matrix. Do not run commands, edit files, or create build artifacts; the host gate interprets the explicit first-line verdict.",
               "agent_type": "verifier",
               "role": "verifier",
               "mode": "read_only",
-              "file_scope": ["crates/tui/src/tui/", "crates/tui/locales/en.json"],
-              "budget": { "max_steps": 16, "timeout_secs": 900 }
+              "file_scope": [
+                "crates/cli/src/lib.rs",
+                "crates/lane/src/registry.rs",
+                "crates/tui/src/tools/workflow.rs"
+              ],
+              "budget": { "max_steps": 3, "timeout_secs": 420, "max_tokens": 72000 }
+            }
+          },
+          {
+            "agent": {
+              "id": "release-receipt",
+              "prompt": "Use the promoted verification_report handoff to produce the final acceptance receipt for #4175/#4177/#4178/#4179. If source confirmation is needed, use `grep_files` first and `read_file` only on bounded relevant snippets; never read an entire large source file. The first non-empty line of your response must be exactly APPROVE or exactly BLOCK. Use APPROVE only when the receipt includes declared Fleet role and resolved profile evidence, every observed gate state, and the required terminal workflow status; otherwise use BLOCK and name the closure blocker. Never claim that source inspection substitutes for a live Lane log. Do not edit, publish, close issues, run shell commands, or mutate the workspace.",
+              "agent_type": "general",
+              "role": "release_lead",
+              "mode": "read_only",
+              "file_scope": [
+                "crates/cli/src/lib.rs",
+                "crates/lane/src/registry.rs",
+                "crates/tui/src/tools/workflow.rs"
+              ],
+              "budget": { "max_steps": 2, "timeout_secs": 300, "max_tokens": 48000 }
             }
           }
         ]
-      }
-    },
-    {
-      "reduce": {
-        "id": "stopship-handoff",
-        "inputs": ["scout-ctrl-c", "scout-fleet-modal", "scout-subagent-panel", "fix-4090", "fix-4093-4094", "verify-dogfood"],
-        "prompt": "Synthesize stopship lane results.\n\n## VERDICT\nstopship-green / partial / blocked\n\n## PER-ISSUE STATUS\n| Issue | Status | Evidence |\n\n## TESTS RUN\n\n## REMAINING BLOCKERS\n\n## NEXT WAVE\nRecommend whether catalog lane (v0868_catalog_lane) is safe to start.\n\nCite only upstream agent evidence. Be decisive."
       }
     }
   ]

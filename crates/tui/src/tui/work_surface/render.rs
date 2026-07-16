@@ -55,12 +55,18 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, classic_shell: bo
     if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
         return 0;
     }
-    match terminal_height {
+    let cap = match terminal_height {
         0..=12 => 3,
         13..=16 => 5,
         17..=23 => 6,
         _ => 8,
-    }
+    };
+    // Reserve only the rows the projection can actually paint, plus the
+    // panel-owned divider. The old fixed cap left three or four empty rows
+    // behind a small/completed Fleet, taking transcript space without adding
+    // any information (especially visible in an 89x50 Cursor terminal).
+    let content_height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+    content_height.saturating_add(1).min(cap)
 }
 
 /// Split the transcript slot for a side rail. Top placement consumes its own
@@ -140,7 +146,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     };
 
     let mut rows = project(app);
-    if body_area.height <= 2 {
+    if body_area.height <= 2 && rows.len() > usize::from(body_area.height) {
         // Compact fallback spends its two content rows on the first actionable
         // Task and To-do/worker objects instead of section chrome.
         let mut compact = Vec::new();

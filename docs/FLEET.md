@@ -52,35 +52,55 @@ then a **model** (`inherit`, or a concrete model from *any configured
 provider*, not only the one the parent session is currently using), then a
 **thinking tier** (`inherit`, `off`, `low`, `medium`, `high`, `max`, or `auto`)
 — and then review the full posture (route, thinking, permissions, tools,
-workspace/org scope, and review policy) before doing anything. Picking a
-concrete model pins its provider explicitly: the saved profile records both
+scope, and review policy) before doing anything. On Review, press **`s`** to
+choose where the profile lives:
+
+- **Project** (default) writes `.codewhale/agents/<role>.toml` and can travel
+  with this repository.
+- **Personal** writes `$CODEWHALE_HOME/agents/<role>.toml` and is available in
+  every repository on this machine. A project profile with the same id still
+  overrides the personal profile for that project.
+
+Profile scope controls where a role definition is reusable; it does not widen
+the authority of a running operation. To coordinate several nearby
+repositories, start Codewhale from their shared parent directory so that parent
+is the workspace. Explicit trusted external paths or Full Access can still
+change what tools may reach; workers inherit the active trust and permission
+posture, never the profile's storage scope.
+
+Picking a concrete model pins its provider explicitly: the saved profile records both
 `model` and `provider` fields, so the route it names doesn't depend on
 whichever provider happens to be active when the profile is later loaded.
 Pressing **Enter** ("start") on the review step previews the exact starter
-profile TOML inline on that same screen; nothing is written until you ratify it.
+profile TOML inline on that same screen; nothing is written until you save it.
 The `provider` field may be a built-in provider id such as `openrouter` or a
 user-named OpenAI-compatible provider configured under `[providers.<name>]`
 such as `lm-studio`; the launch path preserves that id and fails closed if the
 provider is not configured.
 
 When a provider is configured, the review step also offers model-assisted
-drafting behind a ratify gate:
+drafting behind an explicit preview-before-save gate:
 
 - Press **`m`** to have your first configured model draft the profile. The
   draft arrives sanitized and bounded — permissions stay at the **fleet floor**
   (no shell, no trust, approval required) regardless of what the model
   proposes.
-- **Drafting is not ratifying.** The exact rendered TOML preview renders
+- **Drafting is not saving.** The exact rendered TOML preview renders
   inline on the review step (not in a separate scrollable viewer), so nothing
-  is saved until you press **`g`** or **Enter** to ratify (or press `m` again
-  to redraft). Ratifying writes the profile to `.codewhale/agents/<role>`.
+  is saved until you press **`g`** or **Enter** to save (or press `m` again
+  to redraft). Saving writes the profile to the project or personal scope
+  shown in the preview.
 
 ## Naming: Modes, Workflow, and Fleet
 
 These names describe different layers, not competing systems. Plan and Act are
-the everyday work modes; Operate is an explicit preview while its control board
-is still being built. Workflow is an orchestration overlay that can run on top
-of those modes when the task needs a continuous workflow.
+the everyday work modes. Operate accepts ordinary messages and keeps the
+parent's normal tool surface under the same approval, sandbox, shell, ask-rule,
+and repository protections as Act. It prefers background Fleet workers for
+independent, parallel, isolated, or long-running work, but does not require a
+worker for every executable step. Workflow is an optional orchestration overlay
+for work that needs ordering, gates, shared budgets, replay, or deterministic
+fan-in.
 
 - **Workflow** is the repeatable plan and user-facing orchestration
   overlay: a script/IR that decides which phases and agents run next, keeps
@@ -94,10 +114,9 @@ of those modes when the task needs a continuous workflow.
   when a phase needs many workers at once, Workflow dispatches them as a
   Fleet-backed run (durable workers, receipts, goal re-dispatch) rather than
   reviving prompt-only sub-agent fanout.
-- **Fan-in is mandatory:** no fan-out without an owner that waits, aggregates,
-  verifies, and synthesizes one result. The operator should depend on one
-  manager or workflow receipt, not N loose `agent` children scattered across
-  the transcript.
+- **Fan-in is explicit:** when the user needs one combined result, an owner
+  aggregates, verifies, and synthesizes the worker receipts. Independent tasks
+  may finish separately; dispatch is never presented as completion.
 
 UI guidance: keep the main transcript calm. A Workflow run should appear as a
 compact progress card plus Work/Agents sidebar rows with phase names, worker
@@ -175,7 +194,7 @@ next recursive ring rather than trying to show the whole tree at once.
 }
 ```
 
-Workers are optional. If omitted, CodeWhale creates local worker slots up to
+Workers are optional. If omitted, Codewhale creates local worker slots up to
 `--max-workers`.
 
 Task specs are typed in Rust and keep verification data separate from worker
@@ -409,7 +428,7 @@ Choose one typed action:
 Safe Slack or PagerDuty draft:
 
 ```text
-CodeWhale fleet needs attention
+Codewhale fleet needs attention
 Run: <run-id>
 Worker: <worker-id>
 Task: <task-id or unknown>
@@ -467,10 +486,10 @@ Example SSH worker spec:
 Defaults are intentionally conservative:
 
 - no hosted control plane or cloud provisioning is enabled;
-- SSH requires an explicit host, working directory, and CodeWhale binary path;
+- SSH requires an explicit host, working directory, and Codewhale binary path;
 - secret-like environment names such as `TOKEN`, `SECRET`, `PASSWORD`,
   `API_KEY`, and `PRIVATE_KEY` are rejected from adapter allowlists;
-- secrets should remain in CodeWhale config providers or remote host config,
+- secrets should remain in Codewhale config providers or remote host config,
   not in task instructions, argv, or fleet logs.
 
 ## Security and Trust Boundaries

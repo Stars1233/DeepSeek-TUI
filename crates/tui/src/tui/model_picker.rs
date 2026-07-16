@@ -224,7 +224,8 @@ impl ModelPickerView {
         let initial_model = if app.auto_model {
             "auto".to_string()
         } else {
-            picker_visible_model_id(app.api_provider, &app.model).to_string()
+            picker_visible_model_id(app.api_provider, &app.model, app.accepts_custom_model_ids())
+                .to_string()
         };
         let previous_model = if app.auto_model {
             "auto".to_string()
@@ -560,12 +561,14 @@ impl ModelPickerView {
     }
 
     fn build_event(&self) -> ViewEvent {
-        let provider = self
-            .resolved_provider()
-            .filter(|provider| *provider != self.initial_provider);
+        let resolved_provider = self.resolved_provider().unwrap_or(self.initial_provider);
+        let provider = (resolved_provider != self.initial_provider).then_some(resolved_provider);
+        let provider_id = (resolved_provider == ApiProvider::Custom)
+            .then(|| self.route_config.provider_identity_for(resolved_provider));
         ViewEvent::ModelPickerApplied {
             model: self.resolved_model(),
             provider,
+            provider_id,
             effort: self.resolved_effort(),
             previous_model: self.previous_model.clone(),
             previous_effort: self.initial_effort,
@@ -778,13 +781,13 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
         }
         if let Some(model) = app
             .provider_models
-            .get(app.api_provider.as_str())
+            .get(app.provider_identity_for_persistence())
             .map(|model| model.trim())
             .filter(|model| !model.is_empty())
         {
             push_model_id(
                 &mut models,
-                picker_visible_model_id(app.api_provider, model),
+                picker_visible_model_id(app.api_provider, model, app.accepts_custom_model_ids()),
             );
         }
         models
@@ -817,7 +820,14 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
             .map(|model| model.trim())
             .filter(|model| !model.is_empty())
         {
-            push_model_id(&mut model_ids, picker_visible_model_id(provider, model));
+            push_model_id(
+                &mut model_ids,
+                picker_visible_model_id(
+                    provider,
+                    model,
+                    config.model_ids_pass_through_for_provider(provider),
+                ),
+            );
         }
         push_configured_provider_model(&mut model_ids, config, provider);
         push_provider_model_rows(
@@ -892,14 +902,23 @@ fn push_configured_provider_model(
         .map(str::trim)
         .filter(|model| !model.is_empty())
     {
-        push_model_id(models, picker_visible_model_id(provider, model));
+        push_model_id(
+            models,
+            picker_visible_model_id(
+                provider,
+                model,
+                config.model_ids_pass_through_for_provider(provider),
+            ),
+        );
     }
 }
 
 fn provider_catalog_model_ids(provider: ApiProvider) -> Vec<String> {
     let mut models = Vec::new();
     for id in all_catalog_models_for_provider(provider) {
-        push_model_id(&mut models, picker_visible_model_id(provider, &id));
+        // The catalog describes the built-in provider route. A custom route's
+        // endpoint-owned current/configured model is appended separately.
+        push_model_id(&mut models, picker_visible_model_id(provider, &id, false));
     }
     models
 }
@@ -915,20 +934,24 @@ fn provider_scoped_model_ids_for_app(app: &App, include_current_model: bool) -> 
 
     if let Some(model) = app
         .provider_models
-        .get(app.api_provider.as_str())
+        .get(app.provider_identity_for_persistence())
         .map(|model| model.trim())
         .filter(|model| !model.is_empty())
     {
         push_model_id(
             &mut models,
-            picker_visible_model_id(app.api_provider, model),
+            picker_visible_model_id(app.api_provider, model, app.accepts_custom_model_ids()),
         );
     }
 
     if include_current_model && !app.auto_model {
         push_model_id(
             &mut models,
-            picker_visible_model_id(app.api_provider, app.model.trim()),
+            picker_visible_model_id(
+                app.api_provider,
+                app.model.trim(),
+                app.accepts_custom_model_ids(),
+            ),
         );
     }
 
@@ -948,11 +971,19 @@ fn push_model_id(models: &mut Vec<String>, model: &str) {
     }
 }
 
-/// Keep temporary DeepSeek compatibility aliases callable without presenting
-/// them as current model choices. This is deliberately provider-scoped:
-/// `deepseek-reasoner` is a native wire id for providers such as Wanjie Ark.
-fn picker_visible_model_id(provider: ApiProvider, model: &str) -> &str {
-    if provider == ApiProvider::Deepseek
+/// Migrate retired aliases out of first-party DeepSeek model choices. Custom
+/// endpoints and aggregators own their namespaces, where `deepseek-reasoner`
+/// can remain a native wire id.
+fn picker_visible_model_id(
+    provider: ApiProvider,
+    model: &str,
+    preserve_endpoint_model_ids: bool,
+) -> &str {
+    if !preserve_endpoint_model_ids
+        && matches!(
+            provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+        )
         && (model.eq_ignore_ascii_case("deepseek-chat")
             || model.eq_ignore_ascii_case("deepseek-reasoner"))
     {
@@ -1246,12 +1277,17 @@ fn effective_picker_metadata_with_codex(
         .as_ref()
         .and_then(|card| card.context_window)
         .map(|tokens| tokens.min(u64::from(u32::MAX)) as u32);
+    let preserves_unknown_limits = offering.is_some()
+        || (provider == ApiProvider::Together
+            && id.eq_ignore_ascii_case(crate::config::TOGETHER_INKLING_MODEL));
     let context_window = if context_override.is_some() {
         profile.context_window
     } else if provider == ApiProvider::OpenaiCodex {
         codex_metadata.and_then(|metadata| metadata.context_window)
+    } else if preserves_unknown_limits {
+        card_context
     } else {
-        card_context.or(profile.context_window)
+        profile.context_window
     };
     let card_output = card
         .as_ref()
@@ -1262,8 +1298,10 @@ fn effective_picker_metadata_with_codex(
     // so omitting it is more truthful than claiming that API limit for OAuth.
     let max_output = if provider == ApiProvider::OpenaiCodex {
         None
+    } else if preserves_unknown_limits {
+        card_output
     } else {
-        card_output.or(profile.max_output)
+        profile.max_output
     };
     let profile_tool_calls = match profile.native_tool_calls {
         SupportState::Supported => Some(true),
@@ -2527,8 +2565,61 @@ mod tests {
 
     #[test]
     fn stale_deepseek_alias_is_migrated_out_of_picker_choices() {
-        let (mut app, config, _lock) = create_test_app();
+        for provider in [
+            crate::config::ApiProvider::Deepseek,
+            crate::config::ApiProvider::DeepseekCN,
+            crate::config::ApiProvider::DeepseekAnthropic,
+        ] {
+            let (mut app, config, _lock) = create_test_app();
+            app.api_provider = provider;
+            app.model = "deepseek-reasoner".to_string();
+            app.auto_model = false;
+            app.provider_models.insert(
+                provider.as_str().to_string(),
+                "deepseek-reasoner".to_string(),
+            );
+
+            let view = ModelPickerView::new(&app, &config);
+            let ids = view.visible_model_ids();
+            assert!(ids.contains(&"deepseek-v4-flash"), "{provider:?}");
+            assert!(!ids.contains(&"deepseek-chat"), "{provider:?}");
+            assert!(!ids.contains(&"deepseek-reasoner"), "{provider:?}");
+            assert_eq!(view.resolved_model(), "deepseek-v4-flash");
+            assert!(matches!(
+                view.build_event(),
+                ViewEvent::ModelPickerApplied {
+                    model,
+                    previous_model,
+                    ..
+                } if model == "deepseek-v4-flash" && previous_model == "deepseek-reasoner"
+            ));
+
+            let completions = provider_scoped_model_completion_ids(&app);
+            assert!(completions.iter().any(|id| id == "deepseek-v4-flash"));
+            assert!(!completions.iter().any(|id| id == "deepseek-chat"));
+            assert!(!completions.iter().any(|id| id == "deepseek-reasoner"));
+        }
+    }
+
+    #[test]
+    fn provider_native_reasoner_id_is_not_globally_rewritten() {
+        assert_eq!(
+            picker_visible_model_id(
+                crate::config::ApiProvider::WanjieArk,
+                "deepseek-reasoner",
+                false,
+            ),
+            "deepseek-reasoner"
+        );
+    }
+
+    #[test]
+    fn custom_deepseek_endpoint_keeps_provider_owned_alias_in_picker() {
+        let (mut app, mut config, _lock) = create_test_app();
+        config.provider = Some("deepseek".to_string());
+        config.base_url = Some("https://models.example/v1".to_string());
         app.api_provider = crate::config::ApiProvider::Deepseek;
+        app.model_ids_passthrough = config.model_ids_pass_through();
         app.model = "deepseek-reasoner".to_string();
         app.auto_model = false;
         app.provider_models
@@ -2536,31 +2627,15 @@ mod tests {
 
         let view = ModelPickerView::new(&app, &config);
         let ids = view.visible_model_ids();
-        assert!(ids.contains(&"deepseek-v4-flash"));
-        assert!(!ids.contains(&"deepseek-chat"));
-        assert!(!ids.contains(&"deepseek-reasoner"));
-        assert_eq!(view.resolved_model(), "deepseek-v4-flash");
+
+        assert!(ids.contains(&"deepseek-reasoner"), "{ids:?}");
+        assert_eq!(view.resolved_model(), "deepseek-reasoner");
         assert!(matches!(
             view.build_event(),
-            ViewEvent::ModelPickerApplied {
-                model,
-                previous_model,
-                ..
-            } if model == "deepseek-v4-flash" && previous_model == "deepseek-reasoner"
+            ViewEvent::ModelPickerApplied { model, .. } if model == "deepseek-reasoner"
         ));
-
         let completions = provider_scoped_model_completion_ids(&app);
-        assert!(completions.iter().any(|id| id == "deepseek-v4-flash"));
-        assert!(!completions.iter().any(|id| id == "deepseek-chat"));
-        assert!(!completions.iter().any(|id| id == "deepseek-reasoner"));
-    }
-
-    #[test]
-    fn provider_native_reasoner_id_is_not_globally_rewritten() {
-        assert_eq!(
-            picker_visible_model_id(crate::config::ApiProvider::WanjieArk, "deepseek-reasoner"),
-            "deepseek-reasoner"
-        );
+        assert!(completions.iter().any(|id| id == "deepseek-reasoner"));
     }
 
     #[test]
@@ -3060,6 +3135,7 @@ mod tests {
             "deepseek/deepseek-v4-pro",
             "deepseek/deepseek-v4-flash",
             "qwen/qwen3.6-flash",
+            "qwen/qwen3.7-plus",
             "minimax/minimax-m3",
         ] {
             assert!(
@@ -3069,6 +3145,34 @@ mod tests {
         }
         assert!(!view.show_custom_model_row);
         assert_eq!(view.resolved_model(), "minimax/minimax-m3");
+    }
+
+    #[test]
+    fn v090_picker_metadata_preserves_unknown_catalog_limits_and_prices() {
+        let config = Config::default();
+
+        let qwen =
+            effective_picker_metadata(&config, Some(ApiProvider::Openrouter), "qwen/qwen3.7-plus");
+        assert_eq!(qwen.context_window, None);
+        assert_eq!(qwen.max_output, None);
+        assert!(qwen.reasoning);
+        assert!(matches!(qwen.pricing, PickerPricing::Known(_)));
+
+        let trinity = effective_picker_metadata(&config, Some(ApiProvider::Arcee), "trinity-mini");
+        assert_eq!(trinity.context_window, Some(128_000));
+        assert_eq!(trinity.max_output, None);
+        assert!(trinity.reasoning);
+        assert_eq!(trinity.pricing, PickerPricing::Unknown);
+
+        let inkling = effective_picker_metadata(
+            &config,
+            Some(ApiProvider::Together),
+            crate::config::TOGETHER_INKLING_MODEL,
+        );
+        assert_eq!(inkling.context_window, None);
+        assert_eq!(inkling.max_output, None);
+        assert!(inkling.reasoning);
+        assert_eq!(inkling.pricing, PickerPricing::Unknown);
     }
 
     #[test]
@@ -3178,6 +3282,56 @@ mod tests {
             view.resolved_provider(),
             Some(crate::config::ApiProvider::Custom)
         );
+    }
+
+    #[test]
+    fn named_custom_picker_event_keeps_exact_target_identity() {
+        let (mut app, mut config, _lock) = create_test_app();
+        app.set_provider_identity(crate::config::ApiProvider::Custom, "custom-a");
+        app.model_ids_passthrough = true;
+        app.model = "model-a".to_string();
+        app.auto_model = false;
+        let mut custom = std::collections::HashMap::new();
+        for (name, base_url, model) in [
+            ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+            ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+        ] {
+            custom.insert(
+                name.to_string(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    base_url: Some(base_url.to_string()),
+                    model: Some(model.to_string()),
+                    api_key: Some("local-test-key".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        config.provider = Some("custom-b".to_string());
+        config.providers = Some(crate::config::ProvidersConfig {
+            custom,
+            ..Default::default()
+        });
+        let mut view = ModelPickerView::new(&app, &config);
+        view.selected_model_idx = view
+            .visible_model_rows()
+            .iter()
+            .position(|row| row.provider == Some(ApiProvider::Custom) && row.id == "model-b")
+            .expect("custom B row");
+
+        match view.build_event() {
+            ViewEvent::ModelPickerApplied {
+                model,
+                provider,
+                provider_id,
+                ..
+            } => {
+                assert_eq!(model, "model-b");
+                assert_eq!(provider, None, "both routes share the Custom enum");
+                assert_eq!(provider_id.as_deref(), Some("custom-b"));
+            }
+            other => panic!("expected model picker apply event, got {other:?}"),
+        }
     }
 
     #[test]

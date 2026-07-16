@@ -220,7 +220,13 @@ fn move_cursor_line_start_already_at_start() {
 
 #[test]
 fn test_trust_mode_follows_yolo_on_startup() {
-    let app = App::new(test_options(true), &Config::default());
+    let _env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let _config_env = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let mut options = test_options(true);
+    options.config_path = Some(config_path);
+    let app = App::new(options, &Config::default());
     assert!(app.trust_mode);
 }
 
@@ -514,7 +520,7 @@ fn app_new_defaults_auto_compact_on_for_256k_class_models_when_unset() {
     assert!(app.auto_compact);
     assert!(!app.auto_compact_user_configured);
     assert_eq!(app.auto_compact_threshold_percent, 80.0);
-    assert_eq!(app.compact_threshold, 209_715);
+    assert_eq!(app.compact_threshold, 156_467);
 }
 
 #[test]
@@ -531,7 +537,7 @@ fn app_new_defaults_auto_compact_on_for_v4_class_models_when_unset() {
     assert!(app.auto_compact);
     assert!(!app.auto_compact_user_configured);
     assert_eq!(app.auto_compact_threshold_percent, 80.0);
-    assert_eq!(app.compact_threshold, 800_000);
+    assert_eq!(app.compact_threshold, 589_466);
 }
 
 #[test]
@@ -548,7 +554,7 @@ fn app_new_respects_explicit_auto_compact_false_for_256k_class_models() {
 
     assert!(!app.auto_compact);
     assert!(app.auto_compact_user_configured);
-    assert_eq!(app.compact_threshold, 209_715);
+    assert_eq!(app.compact_threshold, 156_467);
 }
 
 #[test]
@@ -565,7 +571,7 @@ fn app_new_respects_explicit_auto_compact_false_for_v4_class_models() {
 
     assert!(!app.auto_compact);
     assert!(app.auto_compact_user_configured);
-    assert_eq!(app.compact_threshold, 800_000);
+    assert_eq!(app.compact_threshold, 589_466);
 }
 
 #[test]
@@ -1619,14 +1625,17 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::Auto.number(), '1');
     assert_eq!(AppMode::Yolo.number(), '1');
     assert_eq!(AppMode::Operate.number(), '3');
-    assert_eq!(AppMode::CYCLE, [AppMode::Plan, AppMode::Agent]);
+    assert_eq!(
+        AppMode::CYCLE,
+        [AppMode::Plan, AppMode::Agent, AppMode::Operate]
+    );
 
     assert_eq!(AppMode::Plan.next(), AppMode::Agent);
-    assert_eq!(AppMode::Agent.next(), AppMode::Plan);
-    assert_eq!(AppMode::Operate.next(), AppMode::Agent);
+    assert_eq!(AppMode::Agent.next(), AppMode::Operate);
+    assert_eq!(AppMode::Operate.next(), AppMode::Plan);
     assert_eq!(AppMode::Auto.next(), AppMode::Agent);
     assert_eq!(AppMode::Yolo.next(), AppMode::Agent);
-    assert_eq!(AppMode::Plan.previous(), AppMode::Agent);
+    assert_eq!(AppMode::Plan.previous(), AppMode::Operate);
     assert_eq!(AppMode::Agent.previous(), AppMode::Plan);
     assert_eq!(AppMode::Operate.previous(), AppMode::Agent);
     assert_eq!(AppMode::Auto.previous(), AppMode::Agent);
@@ -1667,7 +1676,7 @@ fn test_cycle_mode_reverse_transitions() {
 
     app.mode = AppMode::Plan;
     app.cycle_mode_reverse();
-    assert_eq!(app.mode, AppMode::Agent);
+    assert_eq!(app.mode, AppMode::Operate);
 
     app.mode = AppMode::Operate;
     app.cycle_mode_reverse();
@@ -1765,6 +1774,7 @@ fn test_remove_queued_message_invalid_index() {
 #[test]
 fn test_set_mode_updates_state() {
     let mut app = App::new(test_options(false), &Config::default());
+    app.yolo_compat_notified = true;
     app.set_mode(AppMode::Plan);
     assert_eq!(app.mode, AppMode::Plan);
     // The deprecated YOLO alias remaps to Agent (M6 back-compat shim).
@@ -1795,6 +1805,7 @@ fn set_mode_yolo_restores_previous_policies_on_exit() {
     app.allow_shell = false;
     app.trust_mode = false;
     app.approval_mode = ApprovalMode::Never;
+    app.yolo_compat_notified = true;
 
     app.set_mode(AppMode::Yolo);
     assert!(app.allow_shell);
@@ -1836,6 +1847,7 @@ fn set_mode_plan_to_yolo_keeps_yolo_permissions_and_restores_agent_baseline() {
     app.allow_shell = false;
     app.trust_mode = false;
     app.approval_mode = ApprovalMode::Never;
+    app.yolo_compat_notified = true;
 
     app.set_mode(AppMode::Plan);
     app.approval_mode = ApprovalMode::Suggest;
@@ -1886,6 +1898,9 @@ fn base_policy_for_mode_projects_the_mode_permission_table() {
 
     // Operate uses the Agent baseline.
     let operate = base_policy_for_mode(AppMode::Operate, &prefs);
+    assert_eq!(operate.mode, AppMode::Operate);
+    assert_eq!(operate.allow_shell, agent.allow_shell);
+    assert_eq!(operate.trust_mode, agent.trust_mode);
     assert_eq!(operate.approval_mode, ApprovalMode::Never);
 
     // YOLO: full authority is represented by Bypass, not a separate
@@ -1906,6 +1921,10 @@ fn base_policy_for_mode_projects_the_mode_permission_table() {
     assert!(!agent_min.allow_shell);
     assert!(!agent_min.trust_mode);
     assert_eq!(agent_min.approval_mode, ApprovalMode::Suggest);
+    let operate_min = base_policy_for_mode(AppMode::Operate, &minimal);
+    assert!(!operate_min.allow_shell);
+    assert!(!operate_min.trust_mode);
+    assert_eq!(operate_min.approval_mode, ApprovalMode::Suggest);
 }
 
 #[test]
@@ -2175,6 +2194,7 @@ fn set_mode_agent_to_yolo_to_agent_restores_baseline_without_yolo_leak() {
     app.allow_shell = true;
     app.trust_mode = false;
     app.approval_mode = ApprovalMode::Suggest;
+    app.yolo_compat_notified = true;
 
     app.set_mode(AppMode::Yolo);
     assert!(app.allow_shell);
@@ -2208,6 +2228,7 @@ fn set_mode_plan_to_yolo_to_agent_does_not_bleed_yolo_into_agent() {
     app.allow_shell = false;
     app.trust_mode = false;
     app.approval_mode = ApprovalMode::Never;
+    app.yolo_compat_notified = true;
 
     app.set_mode(AppMode::Plan);
     // Plan is read-only regardless of the baseline.
@@ -3834,6 +3855,41 @@ fn status_classifier_does_not_paint_negated_success_green() {
     assert_eq!(level, StatusToastLevel::Warning);
     let (level, _, _) = App::classify_status_text("Turn cancelled");
     assert_eq!(level, StatusToastLevel::Warning);
+}
+
+#[test]
+fn status_toasts_expire_even_behind_a_persistent_entry() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.status_message = None;
+    app.last_status_message_seen = None;
+    app.status_toasts.clear();
+    app.sticky_status = None;
+
+    app.push_status_toast("persistent", StatusToastLevel::Info, None);
+    app.push_status_toast("expired-list", StatusToastLevel::Warning, Some(1));
+    app.status_toasts
+        .back_mut()
+        .expect("temporary toast")
+        .created_at = Instant::now() - std::time::Duration::from_millis(2);
+
+    let visible = app.active_status_toasts(3);
+    assert_eq!(
+        visible
+            .iter()
+            .map(|toast| toast.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["persistent"]
+    );
+
+    app.push_status_toast("expired-single", StatusToastLevel::Warning, Some(1));
+    app.status_toasts
+        .back_mut()
+        .expect("temporary toast")
+        .created_at = Instant::now() - std::time::Duration::from_millis(2);
+
+    let active = app.active_status_toast().expect("persistent toast remains");
+    assert_eq!(active.text, "persistent");
+    assert_eq!(app.status_toasts.len(), 1);
 }
 
 #[test]

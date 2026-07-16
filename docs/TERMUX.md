@@ -1,8 +1,10 @@
 # Termux / Android arm64 Support
 
-CodeWhale runs natively on Android arm64 via [Termux](https://termux.dev).
-This document covers the install path and the platform-specific behavior
-differences you should know about.
+Codewhale provides an Android arm64 build and archive path for
+[Termux](https://termux.dev). Treat v0.9.0 support as a preview until the
+real-device runtime QA tracked in #4236 and #4242 is complete. This document
+covers the install path and the platform-specific behavior differences you
+should know about.
 
 ## Installation
 
@@ -23,46 +25,63 @@ into `$PREFIX/bin`.
 
 ## Platform behavior on Android
 
-CodeWhale's security model has two independent layers:
+Codewhale's security model has three distinct layers on Android:
 
-1. **OS filesystem sandbox** — Seatbelt (macOS), Landlock (Linux), or
-   nothing. This layer restricts what *shell commands* can access at the
-   kernel level.
-2. **CodeWhale's own gates** — workspace trust, approval prompts,
+1. **Android's app sandbox** — Android assigns Termux its own app UID and
+   applies the platform's SELinux and seccomp protections. Commands started by
+   Codewhale inherit that app boundary and any storage or other permissions the
+   user has granted to Termux. See the
+   [Android application sandbox](https://source.android.com/docs/security/app-sandbox)
+   and [Termux filesystem layout](https://github.com/termux/termux-packages/wiki/Termux-file-system-layout).
+2. **Codewhale's per-command sandbox backend** — Seatbelt (macOS) or
+   Landlock/bwrap (Linux) can further narrow what a child command may access.
+   Codewhale does not currently provide that additional layer on Android.
+3. **Codewhale's own gates** — workspace trust, approval prompts,
    `allow_shell`/`disallowed-tools`, and the file-tool permission system.
-   These are application-level and work identically on every platform.
+   These share the cross-platform application code path; their Android
+   behavior still needs the real-device QA tracked below.
 
-### Sandbox: unavailable (type = none)
+### Codewhale sandbox backend: none
 
-Android does not expose Landlock, Seatbelt, or any equivalent mandatory
-access control API that CodeWhale can use. On Android,
-`codewhale doctor` reports **sandbox type: none**.
+Codewhale's existing Seatbelt and Landlock/bwrap integrations do not target
+Android. Consequently, `codewhale doctor --json` reports the sandbox as
+`{"available": false, "kind": null}` on Android. That status describes the
+absence of an additional Codewhale child-process sandbox; it does not mean
+Android or Termux provides no OS isolation.
 
 - `get_platform_sandbox()` returns `None` on Android.
 - No Linux-only sandbox modules (Landlock, bwrap) are compiled into the
   Android build — they are `#[cfg(target_os = "linux")]`-gated and Rust
   treats `android` as a distinct target from `linux`.
-- Shell commands run without OS-level filesystem containment. Rely on
-  CodeWhale's approval gates and workspace trust for safety.
+- Shell commands retain Termux's Android app boundary but receive no
+  Codewhale-specific filesystem narrowing. Treat every location available to
+  Termux, including user-granted shared storage, as potentially available to a
+  command that you approve.
 
 ### Approvals: still apply
 
-CodeWhale's approval system (interactive prompts for risky actions,
-`allow_shell`, `--disallowed-tools`) is entirely application-level. It works
-identically on Android — the absence of an OS sandbox does not weaken it.
+Codewhale's approval system (interactive prompts for risky actions,
+`allow_shell`, `--disallowed-tools`) is implemented at the application layer,
+independently of the OS sandbox. The Android code path is present, but its
+interactive behavior still needs the real-device QA tracked in #4242.
 
 ### Secret storage: file-backed
 
-Android has no OS keyring (no Secret Service / dbus). CodeWhale falls back
-to **file-backed secret storage**: plaintext JSON files under
+Codewhale's Termux/native build has no supported OS keyring backend (the
+desktop Secret Service/dbus integration is unavailable, and Codewhale does not
+yet integrate [Android Keystore](https://developer.android.com/privacy-and-security/keystore)).
+It therefore falls back to **file-backed secret storage**: plaintext JSON files under
 `~/.codewhale/secrets/` (Termux home directory), protected only by `0600`
 file permissions — they are **not encrypted at rest**. On single-user
-Termux this is the same protection level as `~/.ssh` private keys.
+Termux this uses the same Unix permission mode as `~/.ssh` private keys; it is
+not encrypted at rest.
 
-- API keys set via `codewhale setup` or `/provider` land in these
-  permission-protected files; `codewhale auth set` additionally writes the
-  configured key into `config.toml`, so treat both files as sensitive.
-- `codewhale doctor` reports which secret backend is active.
+- Keys saved through setup, `/provider`, or `codewhale auth set` are written to
+  `~/.codewhale/config.toml` and mirrored to
+  `~/.codewhale/secrets/secrets.json`. Treat both as plaintext sensitive
+  files.
+- `codewhale auth status --provider <id>` reports which secret backend is
+  active for a provider.
 
 ### Self-update
 
@@ -75,12 +94,13 @@ skipped entirely on Android (Bionic libc).
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| OS sandbox | ❌ unavailable | No Landlock/bwrap/Seatbelt on Android |
-| OS keyring | ❌ unavailable | Falls back to file-backed secrets |
-| Approvals / gates | ✅ full | Application-level, platform-independent |
-| File tools | ✅ full | Governed by workspace trust |
-| Self-update | ✅ full | Selects Android assets |
-| Shell execution | ⚠️ no containment | Runs without OS sandbox; rely on approvals |
+| Android app sandbox | ✅ inherited | Per-app UID plus Android platform protections |
+| Codewhale command sandbox | ❌ unavailable | No Landlock/bwrap/Seatbelt backend on Android |
+| Codewhale keyring backend | ❌ unavailable | Falls back to file-backed secrets |
+| Approvals / gates | ⚠️ implemented | Device QA pending |
+| File tools | ⚠️ implemented | Device QA pending |
+| Self-update | ⚠️ asset selection implemented | Published-asset and device QA pending |
+| Shell execution | ⚠️ app boundary only | No Codewhale-specific narrowing; runtime QA pending |
 
 ## Related issues
 

@@ -675,8 +675,10 @@ fn format_turn_cache_route(rec: &TurnCacheRecord) -> String {
         return "—".to_string();
     };
     let provider = rec
-        .provider
-        .map(|provider| provider.as_str())
+        .provider_identity
+        .as_deref()
+        .filter(|provider| !provider.trim().is_empty())
+        .or_else(|| rec.provider.map(|provider| provider.as_str()))
         .unwrap_or("?");
     let route = if rec.auto_model {
         format!("auto:{provider}/{model}")
@@ -706,5 +708,28 @@ fn humanize_age(d: std::time::Duration) -> String {
         format!("{}m{:02}s", secs / 60, secs % 60)
     } else {
         format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn cache_route_keeps_exact_named_custom_identity() {
+        let record = TurnCacheRecord {
+            provider: Some(crate::config::ApiProvider::Custom),
+            provider_identity: Some("lm-studio".to_string()),
+            model: Some("local-code-model".to_string()),
+            auto_model: false,
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_hit_tokens: None,
+            cache_miss_tokens: None,
+            reasoning_replay_tokens: None,
+            recorded_at: Instant::now(),
+        };
+
+        assert_eq!(format_turn_cache_route(&record), "lm-studio/local-code-...");
     }
 }

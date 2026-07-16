@@ -6,9 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Package/release version to publish to npm, without the leading v'
+        description: 'Release version, without v; dispatch from the matching existing vX.Y.Z tag ref'
         required: true
         type: string
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -20,10 +24,12 @@ env:
 
 jobs:
   parity:
-    if: github.event_name == 'push'
+    needs: resolve
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -80,7 +86,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.release.outputs.tag }}
-      source_ref: ${{ steps.release.outputs.source_ref }}
       sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
@@ -89,43 +94,75 @@ jobs:
       - name: Resolve release source
         id: release
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
+          set -euo pipefail
+
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            tag="v${{ inputs.version }}"
-            if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
-              sha="$(git rev-list -n 1 "${tag}")"
-              source_ref="${tag}"
-            else
-              # Tag doesn't exist yet — build from HEAD
-              sha="${GITHUB_SHA}"
-              source_ref="${GITHUB_SHA}"
-              echo "Tag ${tag} not found; building from ${source_ref} @ ${sha}"
+            if ! [[ "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Release version '${INPUT_VERSION}' must use X.Y.Z." >&2
+              exit 1
+            fi
+            tag="v${INPUT_VERSION}"
+            if [ "${GITHUB_REF}" != "refs/tags/${tag}" ]; then
+              echo "::error::Dispatch release.yml from --ref ${tag}, not ${GITHUB_REF}." >&2
+              exit 1
             fi
           else
             tag="${GITHUB_REF_NAME}"
-            sha="${GITHUB_SHA}"
-            source_ref="${GITHUB_REF_NAME}"
           fi
 
-          if [ -z "${sha}" ]; then
-            echo "Unable to resolve release source for ${tag}" >&2
+          if ! [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag '${tag}' must use vX.Y.Z." >&2
+            exit 1
+          fi
+          if ! git rev-parse --verify "refs/tags/${tag}^{commit}" >/dev/null 2>&1; then
+            echo "::error::Release tag ${tag} does not exist. Create it from the frozen main commit before dispatching." >&2
+            exit 1
+          fi
+
+          sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          event_sha="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if [ "${event_sha}" != "${sha}" ]; then
+            echo "::error::Trigger SHA ${event_sha} does not match ${tag} at ${sha}; the tag moved after this run was created." >&2
             exit 1
           fi
 
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "source_ref=${source_ref}" >> "$GITHUB_OUTPUT"
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+      - name: Validate tagged release metadata
+        shell: bash
+        env:
+          SHA: ${{ steps.release.outputs.sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "${SHA}"
+          expected="${TAG#v}"
+          workspace_version="$(grep -E '^version = "' Cargo.toml | head -n1 | sed -E 's/^version = "([^"]+)".*/\1/')"
+          npm_version="$(node -p "require('./npm/codewhale/package.json').version")"
+          binary_version="$(node -p "require('./npm/codewhale/package.json').codewhaleBinaryVersion")"
+          for pair in \
+            "workspace:${workspace_version}" \
+            "npm:${npm_version}" \
+            "npm binary:${binary_version}"; do
+            label="${pair%%:*}"
+            actual="${pair#*:}"
+            if [ "${actual}" != "${expected}" ]; then
+              echo "::error::${label} version ${actual} does not match tag ${TAG}." >&2
+              exit 1
+            fi
+          done
+          ./scripts/release/check-versions.sh
       - name: Require release source on main
         run: ./scripts/release/ensure-release-on-main.sh "${{ steps.release.outputs.sha }}"
 
   build:
     needs: [parity, resolve]
-    # `parity` is gated to tag-push events. On manual `workflow_dispatch`,
-    # parity is skipped, so let `build` proceed when resolve succeeded and
-    # parity either succeeded or was skipped — but never when parity actually
-    # failed or the run was cancelled. Operators using dispatch are expected
-    # to have already run the same gates locally / via ci.yml on `main`.
-    if: ${{ !cancelled() && needs.resolve.result == 'success' && (needs.parity.result == 'success' || needs.parity.result == 'skipped') }}
+    # Tag pushes and exact-tag recovery dispatches both prove the same source
+    # through the full parity gate before any release binary is built.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.parity.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -188,7 +225,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve.outputs.source_ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -334,7 +371,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve.outputs.source_ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -343,8 +380,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p bundles/checksums
-          MANIFEST="bundles/checksums/codewhale-bundles-sha256.txt"
+          mkdir -p bundles
+          # Keep the manifest at the same depth as the archives. The release
+          # upload glob only publishes artifacts/*/*, so nesting this under a
+          # checksums directory silently omits it from the GitHub Release.
+          MANIFEST="bundles/codewhale-bundles-sha256.txt"
           : > "$MANIFEST"
 
           bundle() {
@@ -391,7 +431,12 @@ jobs:
             fi
 
             local archive="codewhale-${platform}${variant:+-}${variant}.${ext}"
-            sha256sum "bundles/${archive}" | awk '{printf "%s  %s\n", $1, $2}' >> "$MANIFEST"
+            local checksum
+            checksum="$(sha256sum "bundles/${archive}" | awk '{print $1}')"
+            # Release users download the archive and manifest into one
+            # directory, so manifest rows must contain the public basename,
+            # not the workflow-internal bundles/ path.
+            printf '%s  %s\n' "$checksum" "$archive" >> "$MANIFEST"
             echo "  Created bundles/${archive}"
           }
 
@@ -439,7 +484,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve.outputs.source_ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -486,11 +531,12 @@ jobs:
       - name: Checkout release source
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve.outputs.source_ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
           path: source
       - name: Checkout release infrastructure
         uses: actions/checkout@v7
         with:
+          ref: ${{ needs.resolve.outputs.sha }}
           path: infra
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -523,6 +569,15 @@ jobs:
             type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=raw,value=v${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=raw,value=latest
+      - name: Revalidate release tag before container publish
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.sha }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          ./infra/scripts/release/verify-remote-tag.sh \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "${TAG}" \
+            "${EXPECTED_SHA}"
       - name: Build and push
         uses: docker/build-push-action@v7
         env:
@@ -542,10 +597,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Smoke published container entrypoints
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}"
+          docker run --rm --entrypoint codewhale "${IMAGE}" --version
+          docker run --rm --entrypoint codew "${IMAGE}" --version
+          docker run --rm --entrypoint codewhale-tui "${IMAGE}" --version
 
   release:
     needs: [build, bundle, windows-installer, docker, resolve]
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.bundle.result == 'success' && needs.windows-installer.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.bundle.result == 'success' && needs.windows-installer.result == 'success' && needs.docker.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -554,7 +619,7 @@ jobs:
       # artifacts; used for the release-body generator and the CHANGELOG.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.sha }}
           path: repo
       - uses: actions/download-artifact@v8
         with:
@@ -570,7 +635,7 @@ jobs:
             printf 'where wt >nul 2>nul\r\n'
             printf 'set NO_ANIMATIONS=1\r\n'
             printf 'if "%%ERRORLEVEL%%"=="0" (\r\n'
-            printf '    wt --title CodeWhale cmd /k "%%~dp0codewhale-windows-x64.exe"\r\n'
+            printf '    wt --title Codewhale cmd /k "%%~dp0codewhale-windows-x64.exe"\r\n'
             printf ') else (\r\n'
             printf '    "%%~dp0codewhale-windows-x64.exe"\r\n'
             printf ')\r\n'
@@ -585,17 +650,32 @@ jobs:
           # Canonical manifest used by codewhale's `codewhale update` flow.
           manifest="artifacts/checksums/codewhale-artifacts-sha256.txt"
           : > "${manifest}"
+          # softprops/action-gh-release uploads artifacts/*/*. Hash that exact
+          # public file set rather than unpacked bundle internals that never
+          # become release assets.
           while IFS= read -r -d '' file; do
             hash="$(sha256sum "${file}" | awk '{print $1}')"
             base="$(basename "${file}")"
             printf '%s  %s\n' "${hash}" "${base}" >> "${manifest}"
-          done < <(find artifacts -type f ! -path 'artifacts/checksums/*' -print0 | sort -z)
+          done < <(
+            find artifacts -mindepth 2 -maxdepth 2 -type f \
+              ! -path 'artifacts/checksums/*' -print0 | sort -z
+          )
           cat "${manifest}"
       - name: Generate release body from CHANGELOG
         shell: bash
         run: |
           ./repo/scripts/release/generate-release-body.sh \
             "${{ needs.resolve.outputs.tag }}" repo/CHANGELOG.md > release-body.md
+      - name: Revalidate release tag before GitHub Release write
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.sha }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          ./repo/scripts/release/verify-remote-tag.sh \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "${TAG}" \
+            "${EXPECTED_SHA}"
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
@@ -621,12 +701,11 @@ jobs:
           else
             echo "available=true" >> "${GITHUB_OUTPUT}"
           fi
-      # Checkout main (not the tag) so the release-infra script is always
-      # available, even for tags created before this workflow was added.
+      # Use the same immutable source as every other release job.
       - uses: actions/checkout@v7
         if: steps.homebrew-token.outputs.available == 'true'
         with:
-          ref: main
+          ref: ${{ needs.resolve.outputs.sha }}
       - name: Download checksum manifest
         if: steps.homebrew-token.outputs.available == 'true'
         env:
@@ -636,6 +715,16 @@ jobs:
             --repo ${{ github.repository }} \
             --pattern 'codewhale-artifacts-sha256.txt' \
             --dir /tmp
+      - name: Revalidate release tag before Homebrew tap write
+        if: steps.homebrew-token.outputs.available == 'true'
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.sha }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          ./scripts/release/verify-remote-tag.sh \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "${TAG}" \
+            "${EXPECTED_SHA}"
       - name: Update Homebrew tap
         if: steps.homebrew-token.outputs.available == 'true'
         env:
@@ -648,5 +737,5 @@ jobs:
 # npm publish is intentionally not automated. The npm account requires 2FA OTP
 # on every publish, and a granular automation token that bypasses 2FA has not
 # been provisioned. Release the npm wrapper manually from a developer machine
-# after the GitHub Release has been created — see CLAUDE.md "Releases" for the
-# exact commands.
+# after the GitHub Release has been created — see the "npm Wrapper Release"
+# section of docs/RELEASE_RUNBOOK.md for the exact commands.

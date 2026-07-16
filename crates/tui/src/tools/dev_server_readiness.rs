@@ -441,7 +441,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpSocket};
     use tokio::task::JoinHandle;
 
     fn ctx() -> ToolContext {
@@ -459,6 +459,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         (listener, port)
+    }
+
+    fn reserve_unlistened_tcp_port() -> (TcpSocket, u16) {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = socket.local_addr().unwrap().port();
+        (socket, port)
     }
 
     fn spawn_http_server(status: &'static str) -> (u16, JoinHandle<()>) {
@@ -551,8 +558,9 @@ mod tests {
 
     #[tokio::test]
     async fn reports_timeout_for_refused_tcp_port() {
-        let (listener, port) = bind_tcp_listener().await;
-        drop(listener);
+        // Keep the port reserved without listening. Dropping a listener first
+        // lets a parallel test or process claim the port before this probe.
+        let (_reservation, port) = reserve_unlistened_tcp_port();
 
         let (result, payload) = run_tool(json!({
             "host": "127.0.0.1",

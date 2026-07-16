@@ -27,7 +27,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use crate::config::ApiProvider;
+use crate::config::{ApiProvider, wire_model_for_provider_route};
 use crate::llm_client::StreamEventBox;
 use crate::logging;
 use crate::models::{ContentBlock, MessageRequest, MessageResponse, StreamEvent, Usage};
@@ -41,8 +41,10 @@ const MAX_CACHE_BREAKPOINTS: usize = 4;
 impl DeepSeekClient {
     /// Build the native Messages API request body from a [`MessageRequest`].
     pub(super) fn build_anthropic_body(&self, request: &MessageRequest, stream: bool) -> Value {
+        let model =
+            wire_model_for_provider_route(self.api_provider, &self.base_url, &request.model);
         let mut body = json!({
-            "model": request.model,
+            "model": model,
             "max_tokens": request.max_tokens,
             "stream": stream,
         });
@@ -120,14 +122,17 @@ impl DeepSeekClient {
         // Thinking + effort shaping. MiniMax supports adaptive/disabled but
         // not Anthropic's output_config effort field; native Anthropic routes
         // keep the existing effort mapping.
-        let thinking_capable = crate::models::model_supports_reasoning(&request.model);
+        let thinking_capable = crate::models::model_supports_reasoning(&model);
         let is_minimax = self.api_provider == ApiProvider::MinimaxAnthropic;
+        let is_deepseek = self.api_provider == ApiProvider::DeepseekAnthropic;
         let effort = request
             .reasoning_effort
             .as_deref()
             .map(|raw| raw.trim().to_ascii_lowercase());
         match effort.as_deref() {
-            Some("off" | "disabled" | "none" | "false") if is_minimax && thinking_capable => {
+            Some("off" | "disabled" | "none" | "false")
+                if (is_minimax || is_deepseek) && thinking_capable =>
+            {
                 body["thinking"] = json!({ "type": "disabled" });
             }
             Some("off" | "disabled" | "none" | "false") => {}
@@ -643,6 +648,23 @@ mod tests {
         DeepSeekClient::new(&config).expect("MiniMax Messages client constructs")
     }
 
+    fn deepseek_test_client(base_url: &str) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = crate::config::Config {
+            provider: Some("deepseek-anthropic".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek_anthropic: crate::config::ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    base_url: Some(base_url.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        DeepSeekClient::new(&config).expect("DeepSeek Messages client constructs")
+    }
+
     #[test]
     fn body_keeps_native_cache_control_on_system_and_tools() {
         let client = test_client();
@@ -727,6 +749,108 @@ mod tests {
         );
         assert!(body.get("thinking").is_none(), "{body}");
         assert!(body.get("output_config").is_none(), "{body}");
+    }
+
+    #[test]
+    fn deepseek_messages_body_retires_aliases_and_keeps_thinking_control() {
+        let client = deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL);
+
+        let chat = client.build_anthropic_body(
+            &request_with("deepseek-chat", Some("off"), None, None),
+            true,
+        );
+        assert_eq!(
+            chat.get("model").and_then(Value::as_str),
+            Some(crate::config::DEEPSEEK_ALIAS_REPLACEMENT)
+        );
+        assert_eq!(
+            chat.pointer("/thinking/type").and_then(Value::as_str),
+            Some("disabled")
+        );
+
+        let reasoner = client.build_anthropic_body(
+            &request_with("deepseek-reasoner", Some("high"), None, None),
+            true,
+        );
+        assert_eq!(
+            reasoner.get("model").and_then(Value::as_str),
+            Some(crate::config::DEEPSEEK_ALIAS_REPLACEMENT)
+        );
+        assert_eq!(
+            reasoner.pointer("/thinking/type").and_then(Value::as_str),
+            Some("adaptive")
+        );
+        assert_eq!(
+            reasoner
+                .pointer("/output_config/effort")
+                .and_then(Value::as_str),
+            Some("high")
+        );
+
+        let custom = deepseek_test_client("https://messages.example/v1");
+        let custom_body = custom.build_anthropic_body(
+            &request_with("deepseek-reasoner", Some("high"), None, None),
+            true,
+        );
+        assert_eq!(
+            custom_body.get("model").and_then(Value::as_str),
+            Some("deepseek-reasoner")
+        );
+    }
+
+    #[test]
+    fn omitted_alias_effort_is_migrated_into_deepseek_messages_body() {
+        for (alias, expected_effort, expected_thinking) in [
+            ("deepseek-chat", "off", "disabled"),
+            ("deepseek-reasoner", "high", "adaptive"),
+        ] {
+            let mut config = crate::config::Config {
+                provider: Some("deepseek-anthropic".to_string()),
+                providers: Some(crate::config::ProvidersConfig {
+                    deepseek_anthropic: crate::config::ProviderConfig {
+                        api_key: Some("test-key".to_string()),
+                        model: Some(alias.to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(
+                config.reasoning_effort().is_none(),
+                "fixture must omit effort"
+            );
+
+            crate::config::normalize_model_config_for_test(&mut config);
+            let client = DeepSeekClient::new(&config).expect("DeepSeek Messages client");
+            let model = config.default_model();
+            let body = client.build_anthropic_body(
+                &request_with(&model, config.reasoning_effort(), None, None),
+                true,
+            );
+
+            assert_eq!(
+                body.get("model").and_then(Value::as_str),
+                Some(crate::config::DEEPSEEK_ALIAS_REPLACEMENT),
+                "{alias}: {body}"
+            );
+            assert_eq!(config.reasoning_effort(), Some(expected_effort));
+            assert_eq!(
+                body.pointer("/thinking/type").and_then(Value::as_str),
+                Some(expected_thinking),
+                "{alias}: {body}"
+            );
+            if alias == "deepseek-reasoner" {
+                assert_eq!(
+                    body.pointer("/output_config/effort")
+                        .and_then(Value::as_str),
+                    Some("high"),
+                    "{body}"
+                );
+            } else {
+                assert!(body.get("output_config").is_none(), "{body}");
+            }
+        }
     }
 
     #[test]

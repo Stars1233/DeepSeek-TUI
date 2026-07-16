@@ -51,7 +51,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
             Style::default().fg(palette::TEXT_MUTED),
         ),
         Span::styled(
-            "Enter/1/Y",
+            "1/Y",
             Style::default()
                 .fg(palette::TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),

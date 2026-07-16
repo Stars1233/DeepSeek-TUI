@@ -30,16 +30,32 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
           # Prefer PAT so the resulting tag push triggers release.yml.
           # Falls back to GITHUB_TOKEN, which will tag but NOT trigger.
           token: ${{ secrets.RELEASE_TAG_PAT || github.token }}
 
       - name: Require main dispatch
+        id: source
         run: |
+          set -euo pipefail
           if [ "${GITHUB_REF_NAME}" != "main" ]; then
             echo "::error::Create release tags from main only; rerun this workflow with ref 'main'." >&2
             exit 1
           fi
+          intended_sha="$(git rev-parse 'HEAD^{commit}')"
+          event_sha="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if [ "${intended_sha}" != "${event_sha}" ]; then
+            echo "::error::Checkout ${intended_sha} does not match dispatch SHA ${event_sha}." >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          live_main="$(git rev-parse 'refs/remotes/origin/main^{commit}')"
+          if [ "${intended_sha}" != "${live_main}" ]; then
+            echo "::error::Dispatch SHA ${intended_sha} is stale; live origin/main is ${live_main}. Rerun from the current main ref." >&2
+            exit 1
+          fi
+          echo "sha=${intended_sha}" >> "${GITHUB_OUTPUT}"
 
       - name: Read workspace version
         id: ver
@@ -60,13 +76,21 @@ jobs:
       - name: Check whether tag already exists
         id: check
         env:
+          EXPECTED_SHA: ${{ steps.source.outputs.sha }}
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
-          git fetch --tags --quiet
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null \
-             || git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+          set -euo pipefail
+          remote_tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}^{}" | awk 'NR == 1 {print $1}')"
+          if [ -z "${remote_tag_sha}" ]; then
+            remote_tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk 'NR == 1 {print $1}')"
+          fi
+          if [ -n "${remote_tag_sha}" ]; then
+            if [ "${remote_tag_sha}" != "${EXPECTED_SHA}" ]; then
+              echo "::error::Tag ${TAG} already exists at ${remote_tag_sha}, expected ${EXPECTED_SHA}." >&2
+              exit 1
+            fi
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag ${TAG} already exists; nothing to do."
+            echo "Tag ${TAG} already exists at the intended SHA; nothing to do."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "Tag ${TAG} does not exist; will create."
@@ -84,18 +108,32 @@ jobs:
         id: create
         if: steps.check.outputs.exists == 'false'
         env:
+          EXPECTED_SHA: ${{ steps.source.outputs.sha }}
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch --tags --quiet
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null \
-             || git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          live_main="$(git rev-parse 'refs/remotes/origin/main^{commit}')"
+          if [ "${live_main}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::origin/main advanced to ${live_main}; refusing to tag stale ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+          remote_tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}^{}" | awk 'NR == 1 {print $1}')"
+          if [ -z "${remote_tag_sha}" ]; then
+            remote_tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk 'NR == 1 {print $1}')"
+          fi
+          if [ -n "${remote_tag_sha}" ]; then
+            if [ "${remote_tag_sha}" != "${EXPECTED_SHA}" ]; then
+              echo "::error::Tag ${TAG} appeared at ${remote_tag_sha}, expected ${EXPECTED_SHA}." >&2
+              exit 1
+            fi
             echo "pushed=false" >> "$GITHUB_OUTPUT"
-            echo "Tag ${TAG} already exists after refresh; nothing to do."
+            echo "Tag ${TAG} already exists at the intended SHA after refresh; nothing to do."
             exit 0
           fi
-          git tag "${TAG}"
+          git tag -f "${TAG}" "${EXPECTED_SHA}"
           max_retries=3
           retry_count=0
           while [ "${retry_count}" -lt "${max_retries}" ]; do
@@ -104,9 +142,17 @@ jobs:
               echo "Pushed ${TAG}. release.yml should now run (requires RELEASE_TAG_PAT for trigger)."
               exit 0
             fi
-            if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+            remote_tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}^{}" | awk 'NR == 1 {print $1}')"
+            if [ -z "${remote_tag_sha}" ]; then
+              remote_tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk 'NR == 1 {print $1}')"
+            fi
+            if [ -n "${remote_tag_sha}" ]; then
+              if [ "${remote_tag_sha}" != "${EXPECTED_SHA}" ]; then
+                echo "::error::Tag ${TAG} appeared during push at ${remote_tag_sha}, expected ${EXPECTED_SHA}." >&2
+                exit 1
+              fi
               echo "pushed=false" >> "$GITHUB_OUTPUT"
-              echo "Tag ${TAG} appeared during push; treating as already handled."
+              echo "Tag ${TAG} appeared at the intended SHA during push; treating as already handled."
               exit 0
             fi
             retry_count=$((retry_count + 1))
@@ -125,5 +171,5 @@ jobs:
           HAS_PAT: ${{ secrets.RELEASE_TAG_PAT != '' }}
         run: |
           if [ "${HAS_PAT}" != "true" ]; then
-            echo "::warning::RELEASE_TAG_PAT secret is not set. The tag was pushed using GITHUB_TOKEN, which does NOT trigger release.yml. Run 'gh workflow run release.yml --ref main -f version=${{ steps.ver.outputs.version }}' after confirming the tag points at the intended main commit."
+            echo "::warning::RELEASE_TAG_PAT secret is not set. The tag was pushed using GITHUB_TOKEN, which does NOT trigger release.yml. First confirm no tag-triggered Release run is queued or active, then run 'gh workflow run release.yml --ref ${{ steps.ver.outputs.tag }} -f version=${{ steps.ver.outputs.version }}'."
           fi

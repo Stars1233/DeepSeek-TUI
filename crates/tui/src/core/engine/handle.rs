@@ -9,11 +9,20 @@
 //! so the agent loop's mailbox API is reviewable on its own.
 
 use anyhow::Result;
+use tokio::sync::mpsc;
 
 use super::approval::{ApprovalDecision, UserInputDecision};
 use super::{CancelReason, EngineHandle, Op, UserInputResponse};
 
 impl EngineHandle {
+    /// True when the caller must preflight a concrete provider client before
+    /// committing UI/runtime turn state. Test and embedding handles with an
+    /// injected model client return false because that client owns model I/O.
+    #[must_use]
+    pub(crate) fn client_preflight_required(&self) -> bool {
+        self.client_preflight_required
+    }
+
     /// Send an operation to the engine
     pub async fn send(&self, op: Op) -> Result<()> {
         self.tx_op.send(op).await?;
@@ -28,6 +37,13 @@ impl EngineHandle {
     pub fn try_send(&self, op: Op) -> Result<()> {
         self.tx_op.try_send(op)?;
         Ok(())
+    }
+
+    /// Reserve capacity for a runtime steer before it mutates durable state.
+    /// The owned permit lets the caller persist and dispatch synchronously,
+    /// without a cancellation point between those two operations.
+    pub(crate) async fn reserve_steer(&self) -> Result<mpsc::OwnedPermit<String>> {
+        Ok(self.tx_steer.clone().reserve_owned().await?)
     }
 
     /// Cancel the current request (user-initiated path — keeps the

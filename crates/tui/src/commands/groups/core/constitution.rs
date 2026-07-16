@@ -547,14 +547,14 @@ fn help_text(locale: Locale) -> String {
 用法：/constitution [status|preview|bundled|edit|review|repair|repo|explain|posture|help]
 
 常用命令：
-- /constitution：打开宪法管理器和当前层级。
-- /constitution preview：显示会注入模型的确切用户全局宪法块；缺失、空、无效或不可读时显示修复说明。
-- /constitution edit：打开 /setup 的引导式宪法步骤；用 1-6 调整，按 G 预览，再按 G 保存。
+- /constitution：打开协作准则管理器和当前层级。
+- /constitution preview：显示会注入模型的确切用户全局协作准则块；缺失、空、无效或不可读时显示修复说明。
+- /constitution edit：打开 /setup 的引导式协作准则步骤；用 1-6 调整，按 G 预览，再按 G 保存。
 - /constitution repair：说明当前文件状态，然后打开同一个引导式修复步骤。
 - /constitution bundled：记录使用内置/默认准则，不创建自定义文件。
 - /constitution repo：查看 .codewhale/constitution.json 仓库本地准则。
-- /constitution explain：解释 Constitution、用户全局宪法、仓库宪法、AGENTS.md、记忆和交接的区别。
-- /constitution posture：打开运行时姿态；宪法只提供模型指导，不会更改批准、沙盒、Shell、网络、信任或 MCP 权限。",
+- /constitution explain：解释内置基础准则、用户全局协作准则、仓库协作准则、AGENTS.md、记忆和交接的区别。
+- /constitution posture：打开运行时姿态；协作准则只提供模型指导，不会更改批准、沙盒、Shell、网络、信任或 MCP 权限。",
         _ => "\
 Usage: /constitution [status|preview|bundled|edit|review|repair|repo|explain|posture|help]
 
@@ -588,14 +588,14 @@ fn repair_text(locale: Locale) -> String {
     match locale {
         Locale::ZhHans => format!(
             "\
-用户全局宪法修复
+用户全局协作准则修复
 
 当前文件：{file}
 当前状态：{status}
 记录选择：{choice}
 有效性：{validity}
 
-接下来将打开 /setup 的宪法步骤。安全修复路径：
+接下来将打开 /setup 的协作准则步骤。安全修复路径：
 - 用 1-6 调整引导式草稿，按 G 预览，再按 G 保存新的结构化 constitution.json。
 - 按 U 或运行 /constitution bundled 记录使用内置/默认准则；现有无效/空/不可读文件不会被注入。
 - 用 /constitution preview 查看当前错误或渲染结果。
@@ -623,42 +623,42 @@ This only repairs the user-global constitution.json. Runtime approval, sandbox, 
 
 fn manager_title(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhHans => "宪法",
+        Locale::ZhHans => "协作准则",
         _ => "Constitution",
     }
 }
 
 fn review_title(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhHans => "宪法检查",
+        Locale::ZhHans => "协作准则检查",
         _ => "Constitution Review",
     }
 }
 
 fn rendered_title(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhHans => "渲染后的用户宪法",
+        Locale::ZhHans => "渲染后的用户协作准则",
         _ => "Rendered User Constitution",
     }
 }
 
 fn repo_title(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhHans => "仓库本地宪法",
+        Locale::ZhHans => "仓库本地协作准则",
         _ => "Repo-Local Constitution",
     }
 }
 
 fn explanation_title(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhHans => "AGENTS.md 与宪法",
+        Locale::ZhHans => "AGENTS.md 与协作准则",
         _ => "AGENTS.md vs Constitution",
     }
 }
 
 fn no_repo_law_text(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhHans => "此工作区未找到仓库本地宪法 .codewhale/constitution.json。",
+        Locale::ZhHans => "此工作区未找到仓库本地协作准则 .codewhale/constitution.json。",
         _ => "No repo-local constitution found at .codewhale/constitution.json for this workspace.",
     }
 }
@@ -672,7 +672,7 @@ fn inactive_preview_text(locale: Locale) -> &'static str {
 
 fn structured_empty_text(locale: Locale) -> &'static str {
     match locale {
-        Locale::ZhHans => "结构化宪法为空。",
+        Locale::ZhHans => "结构化协作准则为空。",
         _ => "The structured constitution is empty.",
     }
 }
@@ -680,7 +680,7 @@ fn structured_empty_text(locale: Locale) -> &'static str {
 fn missing_preview_text(locale: Locale, path: &std::path::Path) -> String {
     match locale {
         Locale::ZhHans => format!(
-            "未在 {} 找到结构化用户全局宪法。\n\n当前使用内置准则。使用 /constitution edit 创建引导式长期偏好，或使用 /constitution bundled 明确记录内置/默认。",
+            "未在 {} 找到结构化用户全局协作准则。\n\n当前使用内置准则。使用 /constitution edit 创建引导式长期偏好，或使用 /constitution bundled 明确记录内置/默认。",
             path.display()
         ),
         _ => format!(
@@ -693,7 +693,7 @@ fn missing_preview_text(locale: Locale, path: &std::path::Path) -> String {
 fn empty_preview_text(locale: Locale, path: &std::path::Path) -> String {
     match locale {
         Locale::ZhHans => format!(
-            "{} 的结构化用户全局宪法为空。使用 /constitution repair 返回引导式宪法步骤。",
+            "{} 的结构化用户全局协作准则为空。使用 /constitution repair 返回引导式协作准则步骤。",
             path.display()
         ),
         _ => format!(
@@ -706,7 +706,7 @@ fn empty_preview_text(locale: Locale, path: &std::path::Path) -> String {
 fn invalid_preview_text(locale: Locale, path: &std::path::Path, error: &str) -> String {
     match locale {
         Locale::ZhHans => format!(
-            "{} 的结构化用户全局宪法无效，且不会注入。\n\n{error}\n\n使用 /constitution repair 返回引导式宪法步骤。",
+            "{} 的结构化用户全局协作准则无效，且不会注入。\n\n{error}\n\n使用 /constitution repair 返回引导式协作准则步骤。",
             path.display()
         ),
         _ => format!(
@@ -719,7 +719,7 @@ fn invalid_preview_text(locale: Locale, path: &std::path::Path, error: &str) -> 
 fn unreadable_preview_text(locale: Locale, path: &std::path::Path, error: &str) -> String {
     match locale {
         Locale::ZhHans => format!(
-            "无法读取 {} 的结构化用户全局宪法，且不会注入。\n\n{error}\n\n使用 /constitution repair 返回引导式宪法步骤。",
+            "无法读取 {} 的结构化用户全局协作准则，且不会注入。\n\n{error}\n\n使用 /constitution repair 返回引导式协作准则步骤。",
             path.display()
         ),
         _ => format!(
@@ -731,7 +731,7 @@ fn unreadable_preview_text(locale: Locale, path: &std::path::Path, error: &str) 
 
 fn path_error_preview_text(locale: Locale, error: &str) -> String {
     match locale {
-        Locale::ZhHans => format!("无法为用户全局宪法解析 CODEWHALE_HOME：\n\n{error}"),
+        Locale::ZhHans => format!("无法为用户全局协作准则解析 CODEWHALE_HOME：\n\n{error}"),
         _ => {
             format!("Could not resolve CODEWHALE_HOME for the user-global constitution:\n\n{error}")
         }
@@ -742,19 +742,19 @@ fn agents_explanation(locale: Locale) -> &'static str {
     match locale {
         Locale::ZhHans => {
             "\
-AGENTS.md 与宪法
+AGENTS.md 与协作准则
 
-内置 Constitution 是精简的全局判断契约：身份、事实、验证、克制和优先级顺序。
+内置基础准则是精简的全局判断约定：身份、事实、验证、克制和优先级顺序。
 
-用户全局宪法是个人长期偏好。它是结构化数据，确定性渲染，并低于当前用户请求和内置 Constitution。
+用户全局协作准则是个人长期偏好。它是结构化数据，确定性渲染，并低于当前用户请求和内置基础准则。
 
-.codewhale/constitution.json 是仓库本地准则。它属于某个工作区，并作为独立仓库宪法块渲染。
+.codewhale/constitution.json 是仓库本地协作准则。它属于某个工作区，并作为独立的仓库协作准则块渲染。
 
-AGENTS.md 和项目说明是项目法律/实现指导。它们可以描述构建命令、仓库规范和本地流程；按“Whose word wins”层级，它们低于当前用户请求和内置 Constitution，高于用户全局长期偏好、记忆和交接。
+AGENTS.md 和项目说明是项目规则/实现指导。它们可以描述构建命令、仓库规范和本地流程；按优先级顺序，它们低于当前用户请求和内置基础准则，高于用户全局长期偏好、记忆和交接。
 
-WHALE.md 已忽略。将普通项目说明迁移到 AGENTS.md，将 CodeWhale 专属权限策略迁移到 .codewhale/constitution.json。
+WHALE.md 已忽略。将普通项目说明迁移到 AGENTS.md，将 Codewhale 专属权限策略迁移到 .codewhale/constitution.json。
 
-运行时姿态是独立设置。宪法可以建议主动性，但不会改变批准策略、沙盒、Shell、网络、信任、MCP 权限或默认模式。使用 /constitution posture 查看这些控制。"
+运行时姿态是独立设置。协作准则可以建议主动性，但不会改变批准策略、沙盒、Shell、网络、信任、MCP 权限或默认模式。使用 /constitution posture 查看这些控制。"
         }
         _ => {
             "\
@@ -768,7 +768,7 @@ The user-global constitution is personal standing preference law. It is structur
 
 AGENTS.md and project instructions are project law / implementation guidance. They can describe build commands, repository norms, and local workflows. Under “Whose word wins,” they sit below the current user request and bundled Constitution, and above user-global standing preferences, memory, and handoff.
 
-WHALE.md is ignored. Move ordinary project instructions to AGENTS.md and CodeWhale-specific authority policy to .codewhale/constitution.json.
+WHALE.md is ignored. Move ordinary project instructions to AGENTS.md and Codewhale-specific authority policy to .codewhale/constitution.json.
 
 Runtime posture is separate. A constitution can recommend autonomy, but it does not change approval policy, sandbox, shell, network, trust, MCP permissions, or default mode. Use /constitution posture to review those controls."
         }
@@ -815,17 +815,17 @@ impl ConstitutionManagerCopy {
     fn for_locale(locale: Locale) -> Self {
         match locale {
             Locale::ZhHans => Self {
-                manager_header: "宪法管理器",
+                manager_header: "协作准则管理器",
                 active_stack_header: "生效层级",
-                bundled_active: "内置 Constitution：始终生效的基础准则",
-                user_global_label: "用户全局宪法",
-                repo_local_label: "仓库本地宪法",
+                bundled_active: "内置基础准则：始终生效",
+                user_global_label: "用户全局协作准则",
+                repo_local_label: "仓库本地协作准则",
                 agents_label: "AGENTS/项目说明",
                 legacy_whale_label: "旧版 WHALE.md",
                 memory_handoff_label: "记忆/交接",
                 memory_label: "记忆",
                 handoff_label: "交接",
-                user_global_header: "用户全局宪法",
+                user_global_header: "用户全局协作准则",
                 choice_label: "选择",
                 source_label: "来源",
                 file_label: "文件",
@@ -839,13 +839,13 @@ impl ConstitutionManagerCopy {
                 repo_action: "/constitution repo 会在存在时显示 .codewhale/constitution.json 本地准则。",
                 maintenance_header: "维护",
                 maintenance_actions: &[
-                    "编辑引导式宪法：/constitution edit",
-                    "预览渲染后的宪法：/constitution preview",
+                    "编辑引导式协作准则：/constitution edit",
+                    "预览渲染后的协作准则：/constitution preview",
                     "使用内置/默认：/constitution bundled",
                     "查看现有内容：/constitution review",
                     "修复无效/空/不可读文件：/constitution repair",
                     "显示仓库本地准则：/constitution repo",
-                    "解释 AGENTS.md 与宪法：/constitution explain",
+                    "解释 AGENTS.md 与协作准则：/constitution explain",
                     "打开运行时姿态：/constitution posture",
                 ],
                 present: "存在",
@@ -906,7 +906,7 @@ impl ConstitutionManagerCopy {
     }
 
     fn location_count_unit(&self, count: usize) -> &'static str {
-        if self.manager_header == "宪法管理器" {
+        if self.manager_header == "协作准则管理器" {
             "处"
         } else if count == 1 {
             "location"
@@ -916,7 +916,7 @@ impl ConstitutionManagerCopy {
     }
 
     fn completed_for(&self, version: &str) -> String {
-        if self.manager_header == "宪法管理器" {
+        if self.manager_header == "协作准则管理器" {
             format!("已完成 {version}")
         } else {
             format!("completed for {version}")
@@ -1102,10 +1102,11 @@ mod tests {
 
         assert!(result.message.is_none());
         let body = pop_pager_body(&mut app);
-        assert!(body.contains("宪法管理器"));
+        assert!(body.contains("协作准则管理器"));
         assert!(body.contains("生效层级"));
-        assert!(body.contains("用户全局宪法"));
+        assert!(body.contains("用户全局协作准则"));
         assert!(body.contains("/constitution preview 会"));
+        assert!(!body.contains("宪法"));
         assert!(!body.contains("Constitution Manager"));
     }
 
@@ -1125,6 +1126,8 @@ mod tests {
         let body = pop_pager_body(&mut app);
         assert!(body.contains("未在"));
         assert!(body.contains("当前使用内置准则"));
+        assert!(body.contains("/constitution edit"));
+        assert!(!body.contains("宪法"));
         assert!(!body.contains("No structured user-global constitution"));
     }
 
@@ -1137,8 +1140,11 @@ mod tests {
 
         assert!(result.message.is_none());
         let body = pop_pager_body(&mut app);
-        assert!(body.contains("AGENTS.md 与宪法"));
+        assert!(body.contains("AGENTS.md 与协作准则"));
+        assert!(body.contains(".codewhale/constitution.json"));
         assert!(body.contains("运行时姿态是独立设置"));
+        assert!(!body.contains("宪法"));
+        assert!(!body.contains("项目法律"));
         assert!(!body.contains("Runtime posture is separate"));
     }
 }

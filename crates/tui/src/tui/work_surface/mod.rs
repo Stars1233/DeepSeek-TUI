@@ -92,6 +92,22 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_workflow_panel_is_not_duplicated_into_work() {
+        let mut app = app();
+        app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
+            "workflow_owner",
+            "single workflow owner",
+            0,
+        ));
+
+        let projection = super::live_projection::LiveWorkProjection::from_app(&app);
+
+        assert!(projection.rows.is_empty());
+        assert_eq!(projection.counts.active, 0);
+        assert!(super::model::project(&mut app).is_empty());
+    }
+
+    #[test]
     fn overflow_has_panel_owned_scroll_and_stable_selection() {
         let mut app = app();
         for id in ["one", "two", "three", "four"] {
@@ -244,6 +260,42 @@ mod tests {
     }
 
     #[test]
+    fn completed_fleet_strip_spends_only_rows_it_can_render() {
+        let mut app = app();
+        for id in ["reef", "harbor", "current"] {
+            add_task(&mut app, id);
+        }
+        for task in &mut app.task_panel {
+            task.status = "completed".to_string();
+        }
+
+        let height = super::height(&mut app, 89, 50, false);
+        assert_eq!(height, 5, "section + three receipts + divider");
+
+        let backend = TestBackend::new(89, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, frame.area(), &mut app))
+            .expect("draw");
+        let rows = (0..height)
+            .map(|y| {
+                (0..89)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(rows[0].contains("Active 0"), "{rows:?}");
+        assert!(rows[1].contains("task current"), "{rows:?}");
+        assert!(rows[2].contains("task harbor"), "{rows:?}");
+        assert!(rows[3].contains("task reef"), "{rows:?}");
+        assert!(rows[4].contains('─'), "divider missing: {rows:?}");
+        assert!(
+            rows.iter().all(|row| !row.trim().is_empty()),
+            "content-sized strip must not reserve blank rows: {rows:?}"
+        );
+    }
+
+    #[test]
     fn disappearing_work_clears_owned_mouse_state() {
         let mut app = app();
         add_task(&mut app, "gone");
@@ -372,7 +424,7 @@ mod tests {
         add_task(&mut app, "top");
         app.work_surface.placement = super::WorkSurfacePlacement::Right;
 
-        assert_eq!(super::height(&mut app, 100, 24, true), 8);
+        assert_eq!(super::height(&mut app, 100, 24, true), 3);
         let area = ratatui::layout::Rect::new(0, 0, 100, 12);
         let (chat, rail) = super::split_chat(&mut app, area, true);
         assert_eq!(chat, area);
@@ -383,7 +435,7 @@ mod tests {
             "Classic fallback must not overwrite the saved Ocean preference"
         );
 
-        assert_eq!(super::height(&mut app, 60, 16, false), 5);
+        assert_eq!(super::height(&mut app, 60, 16, false), 3);
         let narrow = ratatui::layout::Rect::new(0, 0, 60, 8);
         let (chat, rail) = super::split_chat(&mut app, narrow, false);
         assert_eq!(chat, narrow);

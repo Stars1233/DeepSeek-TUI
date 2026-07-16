@@ -14,6 +14,11 @@ case "${mode}" in
     ;;
 esac
 
+if [[ "${mode}" == "publish" ]]; then
+  "${script_dir}/require-release-tag-checkout.sh"
+  "${script_dir}/verify-release-assets.sh"
+fi
+
 packages=("${release_crates[@]}")
 crates_user_agent="CodeWhale release publish check (https://github.com/Hmbown/CodeWhale)"
 

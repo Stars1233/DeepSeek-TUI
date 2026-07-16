@@ -2,14 +2,105 @@ use codewhale_config::route::{
     LogicalModelRef, ReadyRouteCandidate, RouteLimits, RouteRequest, RouteResolver, WireModelId,
 };
 
+use crate::client::DeepSeekClient;
 use crate::codex_model_cache::{CodexModelCacheFreshness, model_roster};
-use crate::config::{ApiProvider, Config, DEFAULT_NVIDIA_NIM_BASE_URL};
+use crate::config::{ApiProvider, Config, DEFAULT_NVIDIA_NIM_BASE_URL, ProviderIdentity};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ResolvedRuntimeRoute {
+    pub(crate) identity: ProviderIdentity,
     pub(crate) candidate: ReadyRouteCandidate,
-    pub(crate) config: Config,
+    pub(crate) config: Box<Config>,
     pub(crate) model: String,
+    preflighted_client: Option<DeepSeekClient>,
+}
+
+impl std::fmt::Debug for ResolvedRuntimeRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedRuntimeRoute")
+            .field("provider_identity", &self.identity.key)
+            .field("provider", &self.identity.provider)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One exact provider route, fully resolved and client-preflighted before a
+/// host mutates session/runtime state. The config and client may contain
+/// credentials, so diagnostics intentionally expose only non-secret receipt
+/// fields.
+#[derive(Clone)]
+pub(crate) struct ValidatedRuntimeRoute {
+    pub(crate) identity: ProviderIdentity,
+    pub(crate) candidate: ReadyRouteCandidate,
+    pub(crate) config: Box<Config>,
+    pub(crate) model: String,
+    pub(crate) client: DeepSeekClient,
+}
+
+impl std::fmt::Debug for ValidatedRuntimeRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatedRuntimeRoute")
+            .field("provider_identity", &self.identity.key)
+            .field("provider", &self.identity.provider)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResolvedRuntimeRoute {
+    pub(crate) fn preflight(mut self) -> Result<Self, String> {
+        if self.preflighted_client.is_none() {
+            self.preflighted_client = Some(
+                DeepSeekClient::from_candidate(&self.config, &self.candidate).map_err(|err| {
+                    format!(
+                        "Failed to configure provider route {} / {}: {err}",
+                        self.identity.key, self.model
+                    )
+                })?,
+            );
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn validate(mut self) -> Result<ValidatedRuntimeRoute, String> {
+        let client = match self.preflighted_client.take() {
+            Some(client) => client,
+            None => {
+                DeepSeekClient::from_candidate(&self.config, &self.candidate).map_err(|err| {
+                    format!(
+                        "Failed to configure provider route {} / {}: {err}",
+                        self.identity.key, self.model
+                    )
+                })?
+            }
+        };
+        Ok(ValidatedRuntimeRoute {
+            identity: self.identity,
+            candidate: self.candidate,
+            config: self.config,
+            model: self.model,
+            client,
+        })
+    }
+
+    pub(crate) fn take_preflighted_client(&mut self) -> Option<DeepSeekClient> {
+        self.preflighted_client.take()
+    }
+}
+
+impl ValidatedRuntimeRoute {
+    /// Preserve the preflighted client with the exact resolved route receipt
+    /// so the engine does not repeat environment-sensitive client discovery.
+    pub(crate) fn into_resolved(self) -> ResolvedRuntimeRoute {
+        ResolvedRuntimeRoute {
+            identity: self.identity,
+            candidate: self.candidate,
+            config: self.config,
+            model: self.model,
+            preflighted_client: Some(self.client),
+        }
+    }
 }
 
 pub(crate) fn resolve_route_candidate(
@@ -63,10 +154,30 @@ pub(crate) fn resolve_runtime_route(
     provider: ApiProvider,
     model_selector: Option<&str>,
 ) -> Result<ResolvedRuntimeRoute, String> {
-    let mut route_config = prepared_route_config(config, provider, model_selector);
-    let saved_provider_model = route_config
-        .provider_config_for(provider)
-        .and_then(|provider| provider.model.as_deref());
+    let identity = if provider == ApiProvider::Custom {
+        config.active_provider_identity(provider)?
+    } else {
+        config
+            .resolve_persisted_provider_identity(Some(provider.as_str()), Some(provider.as_str()))?
+    };
+    resolve_runtime_route_for_identity(config, &identity, model_selector)
+}
+
+/// Resolve one persisted/live identity into a scoped runtime config and route
+/// candidate. Identity is revalidated against the live registry before any
+/// endpoint, model, credential, or client material is read.
+pub(crate) fn resolve_runtime_route_for_identity(
+    config: &Config,
+    identity: &ProviderIdentity,
+    model_selector: Option<&str>,
+) -> Result<ResolvedRuntimeRoute, String> {
+    let identity = config.resolve_persisted_provider_identity(
+        Some(identity.provider.as_str()),
+        identity.persisted_id(),
+    )?;
+    let provider = identity.provider;
+    let mut route_config = prepared_route_config(config, &identity, model_selector);
+    let saved_provider_model = configured_model_for_route(&route_config, provider);
     let candidate = resolve_route_candidate(
         provider,
         model_selector,
@@ -75,29 +186,25 @@ pub(crate) fn resolve_runtime_route(
         route_config.context_window_for_provider_config(provider),
     )?;
     let model = candidate.wire_model_id.as_str().to_string();
-    route_config.provider_config_for_mut(provider).model = Some(model.clone());
+    set_model_for_route(&mut route_config, provider, &model);
 
     Ok(ResolvedRuntimeRoute {
+        identity,
         candidate,
-        config: route_config,
+        config: Box::new(route_config),
         model,
+        preflighted_client: None,
     })
 }
 
 fn prepared_route_config(
     config: &Config,
-    provider: ApiProvider,
+    identity: &ProviderIdentity,
     model_selector: Option<&str>,
 ) -> Config {
     let mut route_config = config.clone();
-    // For built-in providers, stamp the canonical provider id. For the dynamic
-    // custom identity (#1519) the original `provider = "<name>"` IS the lookup
-    // key into the `[providers.<name>]` flatten map, so it must be preserved —
-    // overwriting it with the literal "custom" id would break base_url/model
-    // resolution and silently misroute.
-    if provider != ApiProvider::Custom {
-        route_config.provider = Some(provider.as_str().to_string());
-    }
+    route_config.scope_to_provider_identity(identity);
+    let provider = identity.provider;
     if matches!(provider, ApiProvider::NvidiaNim)
         && route_config
             .base_url
@@ -117,9 +224,22 @@ fn prepared_route_config(
         route_config.base_url = None;
     }
     if let Some(model) = model_selector {
-        route_config.provider_config_for_mut(provider).model = Some(model.to_string());
+        set_model_for_route(&mut route_config, provider, model);
     }
     route_config
+}
+
+fn configured_model_for_route(config: &Config, provider: ApiProvider) -> Option<&str> {
+    if provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route() {
+        return config.default_text_model.as_deref();
+    }
+    config
+        .provider_config_for(provider)
+        .and_then(|provider| provider.model.as_deref())
+}
+
+fn set_model_for_route(config: &mut Config, provider: ApiProvider, model: &str) {
+    config.set_provider_model_override(provider, Some(model.to_string()));
 }
 
 fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
@@ -147,6 +267,18 @@ fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::{DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL, ProviderConfig, ProvidersConfig};
+
+    #[test]
+    fn resolved_runtime_route_keeps_large_config_off_async_stacks() {
+        assert!(
+            std::mem::size_of::<ResolvedRuntimeRoute>() <= 1024,
+            "resolved routes cross several async boundaries and must keep Config boxed"
+        );
+        assert!(
+            std::mem::size_of::<ResolvedRuntimeRoute>() < std::mem::size_of::<Config>(),
+            "resolved routes must remain smaller than their scoped Config payload"
+        );
+    }
 
     #[test]
     fn codex_route_uses_fresh_account_context_and_drops_api_only_limits() {

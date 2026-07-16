@@ -37,7 +37,7 @@ from typing import Any
 
 DEFAULT_MODELS_DEV_URL = "https://models.dev/catalog.json"
 DEFAULT_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
-USER_AGENT = "CodeWhale-catalog-automation/0.8.68 (+https://github.com/Hmbown/CodeWhale)"
+USER_AGENT = "CodeWhale-catalog-automation/0.9.0 (+https://github.com/Hmbown/CodeWhale)"
 FETCH_TIMEOUT_SECS = 60
 
 

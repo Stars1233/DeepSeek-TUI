@@ -138,7 +138,9 @@ pub(super) async fn resume_session_thread(
         .runtime_threads
         .create_thread(CreateThreadRequest {
             model: Some(model),
-            workspace: Some(state.workspace.clone()),
+            model_provider: Some(session.metadata.model_provider.clone()),
+            model_provider_id: session.metadata.model_provider_id.clone(),
+            workspace: Some(session.metadata.workspace.clone()),
             mode: Some(mode),
             allow_shell: None,
             trust_mode: None,
@@ -149,7 +151,7 @@ pub(super) async fn resume_session_thread(
             ..Default::default()
         })
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to create thread: {e}")))?;
+        .map_err(map_resume_thread_create_err)?;
 
     let msg_count = session.messages.len();
     state
@@ -234,6 +236,16 @@ pub(super) async fn create_session_from_thread(
         None,
         Some(&detail.thread.mode),
     );
+    {
+        let config = state.runtime_threads.read_config();
+        stamp_session_provider_from_thread(&config, &detail, &mut session.metadata).map_err(
+            |reason| {
+            ApiError::bad_request(format!(
+                    "Thread {thread_id} provider route is unavailable; session export will not fall back: {reason}"
+            ))
+            },
+        )?;
+    }
     session.system_prompt = detail.thread.system_prompt.clone();
 
     if let Some(title) =
@@ -273,6 +285,46 @@ pub(super) async fn create_session_from_thread(
             title,
         }),
     ))
+}
+
+pub(super) fn stamp_session_provider_from_thread(
+    config: &crate::config::Config,
+    detail: &ThreadDetail,
+    metadata: &mut crate::session_manager::SessionMetadata,
+) -> Result<(), String> {
+    let thread_has_route = detail
+        .thread
+        .model_provider
+        .as_deref()
+        .is_some_and(|provider| !provider.trim().is_empty())
+        || detail.thread.model_provider_id.is_some();
+    let provider_identity = if thread_has_route {
+        config.resolve_persisted_provider_identity(
+            detail.thread.model_provider.as_deref(),
+            detail.thread.model_provider_id.as_deref(),
+        )?
+    } else if let Some(turn) = detail.turns.iter().rev().find(|turn| {
+        turn.effective_provider
+            .as_deref()
+            .is_some_and(|provider| !provider.trim().is_empty())
+            || turn.effective_provider_id.is_some()
+    }) {
+        config.resolve_persisted_provider_identity(
+            turn.effective_provider.as_deref(),
+            turn.effective_provider_id.as_deref(),
+        )?
+    } else {
+        let key = config
+            .provider
+            .as_deref()
+            .unwrap_or(crate::config::ApiProvider::Deepseek.as_str());
+        config.resolve_provider_identity(key)?
+    };
+    metadata.set_model_provider_route(
+        provider_identity.provider.as_str(),
+        provider_identity.persisted_id(),
+    );
+    Ok(())
 }
 
 fn thread_detail_has_live_work(detail: &ThreadDetail) -> bool {
@@ -472,7 +524,10 @@ pub(super) async fn save_current_session(
                     snapshot.system_prompt.as_ref(),
                 );
                 updated.metadata.model = snapshot.model.clone();
-                updated.metadata.model_provider = snapshot.model_provider.clone();
+                updated.metadata.set_model_provider_route(
+                    &snapshot.model_provider,
+                    snapshot.model_provider_id.as_deref(),
+                );
                 updated.metadata.mode = Some(snapshot.mode.clone());
                 updated
             }
@@ -487,7 +542,10 @@ pub(super) async fn save_current_session(
                         snapshot.system_prompt.as_ref(),
                         Some(snapshot.mode.as_str()),
                     );
-                    session.metadata.model_provider = snapshot.model_provider.clone();
+                    session.metadata.set_model_provider_route(
+                        &snapshot.model_provider,
+                        snapshot.model_provider_id.as_deref(),
+                    );
                     session
                 } else {
                     return Err(ApiError::internal(format!(
@@ -505,7 +563,10 @@ pub(super) async fn save_current_session(
             snapshot.system_prompt.as_ref(),
             Some(snapshot.mode.as_str()),
         );
-        session.metadata.model_provider = snapshot.model_provider.clone();
+        session.metadata.set_model_provider_route(
+            &snapshot.model_provider,
+            snapshot.model_provider_id.as_deref(),
+        );
         session
     };
 
@@ -664,5 +725,39 @@ fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
             ApiError::bad_request(format!("Invalid session id '{id}'"))
         }
         _ => ApiError::internal(format!("Failed to {action} session '{id}': {err}")),
+    }
+}
+
+fn map_resume_thread_create_err(err: anyhow::Error) -> ApiError {
+    let reason = err.to_string();
+    let message = format!("Failed to create thread: {reason}");
+    if reason.starts_with("saved session has an empty provider identity")
+        || reason.starts_with("saved session requires custom provider")
+        || reason.starts_with("legacy session records only the generic `custom` provider kind")
+        || reason.starts_with("legacy `provider = \"custom\"`")
+    {
+        ApiError::bad_request(message)
+    } else {
+        // Thread-store writes, event persistence, and other runtime failures
+        // are server-side faults; never disguise them as a client config error.
+        ApiError::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod resume_thread_error_tests {
+    use super::*;
+
+    #[test]
+    fn provider_config_errors_are_client_errors_but_storage_errors_stay_internal() {
+        let provider = map_resume_thread_create_err(anyhow::anyhow!(
+            "saved session requires custom provider 'lm-studio', but `[providers.lm-studio]` is missing"
+        ));
+        assert_eq!(provider.status, StatusCode::BAD_REQUEST);
+
+        let storage = map_resume_thread_create_err(anyhow::anyhow!(
+            "Failed to save runtime thread: permission denied"
+        ));
+        assert_eq!(storage.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

@@ -2,6 +2,7 @@
 name = "codewhale-tui"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Terminal UI for open-source and open-weight coding models"
@@ -23,15 +24,15 @@ path = "src/main.rs"
 [dependencies]
 ahash = "0.8"
 anyhow.workspace = true
-codewhale-config = { path = "../config", version = "0.8.68" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.8.68" }
-codewhale-lane = { path = "../lane", version = "0.8.68" }
-codewhale-protocol = { path = "../protocol", version = "0.8.68" }
-codewhale-release = { path = "../release", version = "0.8.68" }
-codewhale-secrets = { path = "../secrets", version = "0.8.68" }
-codewhale-tools = { path = "../tools", version = "0.8.68" }
-codewhale-workflow = { path = "../workflow", version = "0.8.68" }
-codewhale-workflow-js = { path = "../workflow-js", version = "0.8.68" }
+codewhale-config = { path = "../config", version = "0.9.0" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.0" }
+codewhale-lane = { path = "../lane", version = "0.9.0" }
+codewhale-protocol = { path = "../protocol", version = "0.9.0" }
+codewhale-release = { path = "../release", version = "0.9.0" }
+codewhale-secrets = { path = "../secrets", version = "0.9.0" }
+codewhale-tools = { path = "../tools", version = "0.9.0" }
+codewhale-workflow = { path = "../workflow", version = "0.9.0" }
+codewhale-workflow-js = { path = "../workflow-js", version = "0.9.0" }
 schemaui = { version = "0.12.0", default-features = false, optional = true }
 async-stream = "0.3.6"
 async-trait.workspace = true
@@ -42,6 +43,7 @@ clap_complete.workspace = true
 colored = "3.0.0"
 crossterm = "0.29"
 dotenvy = "0.15.7"
+fd-lock = "4.0.4"
 dirs.workspace = true
 futures-util = "0.3.31"
 oauth2 = "5"
@@ -89,7 +91,7 @@ shell-words = "1.1.1"
 mimalloc.workspace = true
 
 [build-dependencies]
-codewhale-build-support = { path = "../build-support", version = "0.8.68" }
+codewhale-build-support = { path = "../build-support", version = "0.9.0" }
 
 [dev-dependencies]
 cucumber = "0.23.0"

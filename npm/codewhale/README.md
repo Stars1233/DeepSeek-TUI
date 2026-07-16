@@ -2,16 +2,16 @@
 
 > The terminal coding agent for any model — open models first.
 
-CodeWhale is a Rust TUI and CLI for many model providers — DeepSeek,
+Codewhale is a Rust TUI and CLI for many model providers — DeepSeek,
 OpenRouter, Hugging Face, and local vLLM/SGLang/Ollama are first-class routes,
 and it speaks natively to Anthropic Claude and OpenAI when that's what you have
 — with approval-gated tools, OS sandboxing, side-git snapshots, and `/restore`
 rollback.
 
 This npm package is a small launcher: it downloads the matching native
-CodeWhale binaries for your platform, verifies them against the release
+Codewhale binaries for your platform, verifies them against the release
 SHA-256 manifest, and installs the `codewhale`, `codew`, and `codewhale-tui`
-commands. The application state and credentials still live in CodeWhale's
+commands. The application state and credentials still live in Codewhale's
 normal config files, not inside `node_modules`.
 
 > Previously published as `deepseek-tui`. See
@@ -65,6 +65,7 @@ Prebuilt binaries for the GitHub release are downloaded automatically:
 
 - Linux x64
 - Linux arm64
+- Android arm64 (Termux)
 - macOS x64 / arm64
 - Windows x64
 
@@ -72,9 +73,9 @@ HarmonyOS PC (`openharmony`) is treated as `linux`, so it gets the Linux
 binaries matching your CPU architecture (x64 or arm64). Linux riscv64 prebuilts
 are temporarily paused while the locked `rquickjs-sys` dependency lacks
 `riscv64gc-unknown-linux-gnu` bindings. Other platform/architecture combinations
-(musl, FreeBSD, …) aren't shipped as prebuilts. Unsupported platforms, checksum
-failures, and glibc compatibility problems still fail with a clear error pointing
-you at the full
+(FreeBSD, Linux riscv64, …) aren't shipped as prebuilts. Unsupported platforms,
+checksum failures, and glibc compatibility problems still fail with a clear
+error pointing you at the full
 [docs/INSTALL.md](https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md)
 guide.
 
@@ -84,7 +85,7 @@ guide.
 | --- | --- |
 | `codewhaleBinaryVersion` in `package.json` | Default native binary version. `deepseekBinaryVersion` is still read as a backward-compat fallback. |
 | `CODEWHALE_RELEASE_BASE_URL` | Canonical override: use an internal or mirrored release-asset directory when GitHub Releases is unavailable. The directory must contain `codewhale-artifacts-sha256.txt` and the platform binaries. `DEEPSEEK_TUI_RELEASE_BASE_URL` and `DEEPSEEK_RELEASE_BASE_URL` are the implemented legacy fallbacks. |
-| `CODEWHALE_USE_CNB_MIRROR=1` | Download release assets from the CNB (China-friendly) mirror instead of GitHub. |
+| `CODEWHALE_USE_CNB_MIRROR=1` | Download from the CNB (China-friendly) mirror on Linux x64 and OpenHarmony x64. Other targets fail with a clear unsupported-mirror error; use GitHub or a complete `CODEWHALE_RELEASE_BASE_URL` mirror there. |
 | `DEEPSEEK_TUI_VERSION` or `DEEPSEEK_VERSION` | Override the GitHub release version to download. |
 | `DEEPSEEK_TUI_GITHUB_REPO` or `DEEPSEEK_GITHUB_REPO` | Override the source repo. Defaults to `Hmbown/CodeWhale`. |
 | `DEEPSEEK_TUI_FORCE_DOWNLOAD=1` | Force download even when the cached binary is already present. |
@@ -101,12 +102,13 @@ offline installs, set `DEEPSEEK_TUI_DISABLE_INSTALL=1` or point
 
 ## Release integrity
 
-- `npm publish` runs a release-asset check to ensure all required binary assets
-  exist for the target GitHub release before publishing.
+- `npm publish` runs a release-asset check to ensure the required binaries,
+  archives, Windows installer, and checksum manifests exist for the target
+  GitHub release before publishing.
 - For the default GitHub Release source, `npm run release:check` also verifies
-  that the npm-facing assets were updated by a successful `release.yml` run for
+  that those release assets were updated by a successful `release.yml` run for
   the tag commit. When `CODEWHALE_RELEASE_BASE_URL` or a legacy mirror override
-  is set, it checks the mirror asset URLs and checksum manifest instead.
+  is set, it checks the mirror asset URLs and checksum manifests instead.
 - Install-time downloads are verified against the release checksum manifest before
   the wrapper marks them executable.
 

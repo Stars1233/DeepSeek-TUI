@@ -86,7 +86,7 @@ jobs:
               scripts/release/npm-wrapper-smoke.js|scripts/mobile-smoke.sh|scripts/check-provider-registry.py)
                 heavy=true
                 ;;
-              docs/*|*.md|.github/PULL_REQUEST_TEMPLATE.md|.github/ISSUE_TEMPLATE/*|.github/workflows/auto-tag.yml|.github/workflows/stale.yml|.github/workflows/triage.yml|scripts/v0867-setup-qa.sh|scripts/release/check-versions.sh|scripts/release/check-ohos-deps.sh|scripts/check-coauthor-trailers.py)
+              docs/*|*.md|.github/PULL_REQUEST_TEMPLATE.md|.github/ISSUE_TEMPLATE/*|.github/scripts/agent-task-metadata.test.sh|.github/workflows/agent-task-labels.yml|.github/workflows/auto-tag.yml|.github/workflows/stale.yml|.github/workflows/triage.yml|scripts/v0867-setup-qa.sh|scripts/release/check-versions.sh|scripts/release/check-ohos-deps.sh|scripts/release/prepare-release.sh|scripts/release/prepare-release.test.sh|scripts/check-coauthor-trailers.py)
                 ;;
               *)
                 heavy=true
@@ -139,6 +139,14 @@ jobs:
         run: ./scripts/release/check-versions.sh
       - name: Check OHOS dependency graph
         run: ./scripts/release/check-ohos-deps.sh
+      - name: Check release helper contracts
+        run: |
+          bash .github/scripts/agent-task-metadata.test.sh
+          bash scripts/release/generate-release-body.test.sh
+          bash scripts/release/prepare-release.test.sh
+          bash scripts/release/require-release-tag-checkout.test.sh
+          bash scripts/release/verify-remote-tag.test.sh
+          bash .github/scripts/update-homebrew-tap.test.sh
 
   lint:
     name: Lint
@@ -266,6 +274,9 @@ jobs:
     # runs-on can never evaluate to empty.
     runs-on: ${{ needs.changes.outputs.heavy == 'true' && matrix.os || 'ubuntu-latest' }}
     strategy:
+      # A failure on one desktop platform must not erase evidence from the
+      # other one. We need both conclusions to diagnose and release safely.
+      fail-fast: false
       matrix:
         # Linux workspace tests moved to CNB; GitHub keeps the platform
         # coverage CNB cannot provide.

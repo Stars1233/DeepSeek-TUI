@@ -310,7 +310,11 @@ impl SetupRuntimeFacts {
                 crate::provider_readiness::ResolvedProviderReadiness::SavedLastCheckFailed { .. }
             );
         let model = app.model_display_label();
-        let provider = app.api_provider.display_name().to_string();
+        let provider = if app.api_provider == crate::config::ApiProvider::Custom {
+            app.provider_identity_for_persistence().to_string()
+        } else {
+            app.api_provider.display_name().to_string()
+        };
         let auth = readiness.label().into_owned();
         let health = if provider_ready {
             format!("{}; route can be attempted", readiness.label())
@@ -331,7 +335,7 @@ impl SetupRuntimeFacts {
         };
         let provider_result = format!(
             "provider={}, model={}, auth={}, health={}",
-            app.api_provider.as_str(),
+            app.provider_identity_for_persistence(),
             model,
             readiness.label(),
             if provider_ready {
@@ -750,7 +754,7 @@ impl GuidedConstitutionDraft {
                     bounded_freeform_note(note, MAX_NOTES_LEN)
                 ),
                 Locale::ZhHans => format!(
-                    "\n用户自由原则：{}",
+                    "\n用户自定义准则：{}",
                     bounded_freeform_note(note, MAX_NOTES_LEN)
                 ),
                 Locale::ZhHant => format!(
@@ -1322,13 +1326,13 @@ impl GuidedPrinciples {
                 "自由原則：影響の大きい操作の前に、可逆手順、チェックポイント、ロールバック説明を選ぶ。"
             }
             (Locale::ZhHans, Self::ScopedChanges) => {
-                "自由原则：优先采用小范围、可审查的改动；除非明确要求，不做无关重构。"
+                "自定义准则：优先采用小范围、可审查的改动；除非明确要求，不做无关重构。"
             }
             (Locale::ZhHans, Self::UserVoice) => {
-                "自由原则：保留用户的语气、品牌和约束；不把偏好推断成权限扩大。"
+                "自定义准则：保留用户的语气、品牌和约束；不把偏好推断成权限扩大。"
             }
             (Locale::ZhHans, Self::ReversibleOps) => {
-                "自由原则：先选择可逆步骤、检查点和回滚说明，再进行高影响操作。"
+                "自定义准则：先选择可逆步骤、检查点和回滚说明，再进行高影响操作。"
             }
             (Locale::ZhHant, Self::ScopedChanges) => {
                 "自由原則：優先採用小範圍、可審查的改動；除非明確要求，不做無關重構。"
@@ -1568,11 +1572,13 @@ fn freeform_note_line(locale: Locale, note: &str, editing: bool) -> Line<'static
         (Locale::Ja, false, true) => "F 自由原則：F で有界の原則を入力または貼り付け".to_string(),
         (Locale::Ja, false, false) => format!("F 自由原則：{preview}"),
         (Locale::ZhHans, true, true) => {
-            "F 自由原则：正在编辑 - 输入或粘贴有界原则，Enter 完成".to_string()
+            "F 自定义准则：正在编辑 - 输入或粘贴明确的准则，Enter 完成".to_string()
         }
-        (Locale::ZhHans, true, false) => format!("F 自由原则：正在编辑 - {preview}"),
-        (Locale::ZhHans, false, true) => "F 自由原则：按 F 输入或粘贴自己的有界原则".to_string(),
-        (Locale::ZhHans, false, false) => format!("F 自由原则：{preview}"),
+        (Locale::ZhHans, true, false) => format!("F 自定义准则：正在编辑 - {preview}"),
+        (Locale::ZhHans, false, true) => {
+            "F 自定义准则：按 F 输入或粘贴自己的明确准则".to_string()
+        }
+        (Locale::ZhHans, false, false) => format!("F 自定义准则：{preview}"),
         (Locale::ZhHant, true, true) => {
             "F 自由原則：正在編輯 - 輸入或貼上有界原則，Enter 完成".to_string()
         }
@@ -3250,7 +3256,7 @@ fn guided_constitution_template(locale: Locale) -> UserConstitution {
 enum DraftProvenance {
     /// Rendered deterministically from the guided answers.
     Guided,
-    /// Drafted by the named model, then sanitized and bounded by CodeWhale.
+    /// Drafted by the named model, then sanitized and bounded by Codewhale.
     Model(String),
     /// The user's existing `constitution.json`, shown unchanged for the
     /// keep-existing checkpoint completion (#3794).
@@ -3260,7 +3266,7 @@ enum DraftProvenance {
 fn ratification_preview_title(locale: Locale) -> &'static str {
     match locale {
         Locale::Ja => "ユーザー憲法 - 批准前の草案",
-        Locale::ZhHans => "用户宪法 — 批准前草案",
+        Locale::ZhHans => "用户协作准则 — 确认前草案",
         Locale::ZhHant => "使用者憲法 - 批准前草案",
         Locale::PtBr => "Constituição do Usuário - Rascunho para Ratificação",
         Locale::Es419 => "Constitución del Usuario - Borrador para Ratificación",
@@ -3285,7 +3291,7 @@ fn constitution_ratification_text(
         .render_block(None)
         .unwrap_or_else(|| match locale {
             Locale::Ja => "構造化された憲法は空です。".to_string(),
-            Locale::ZhHans => "结构化宪法为空。".to_string(),
+            Locale::ZhHans => "结构化协作准则为空。".to_string(),
             Locale::ZhHant => "結構化憲法為空。".to_string(),
             Locale::PtBr => "A constituição estruturada está vazia.".to_string(),
             Locale::Es419 => "La constitución estructurada está vacía.".to_string(),
@@ -3299,7 +3305,7 @@ fn constitution_ratification_text(
         Locale::Ja => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
-                    "{label} があなたのガイド回答から起草し、CodeWhale が構造検証と境界制限を適用しました。"
+                    "{label} があなたのガイド回答から起草し、Codewhale が構造検証と境界制限を適用しました。"
                 ),
                 DraftProvenance::Guided => {
                     "あなたのガイド回答から決定的に生成されました。".to_string()
@@ -3321,7 +3327,7 @@ fn constitution_ratification_text(
             };
             format!(
                 "CODEWHALE · ユーザー憲法\n{RULE}\n\n{drafted_by}\n\n\
-                 これは CodeWhale があなたと協働するための常設の基準です。優れた憲法のように、使えるほど短く、\
+                 これは Codewhale があなたと協働するための常設の基準です。優れた憲法のように、使えるほど短く、\
                  網羅的な規則ではなく持続する原則で構成され、あなたの変化に合わせて修正できます。\
                  すべての個別判断を裁くのではなく権限と境界を定め、セッションを越えて協働を継続させます。\
                  ただしこれは記憶ではありません。履歴ではなく原則を保持します。\n\n\
@@ -3339,40 +3345,41 @@ fn constitution_ratification_text(
         Locale::ZhHans => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
-                    "由 {label} 根据你的引导式答案起草，并已由 CodeWhale 完成结构校验与边界限制。"
+                    "由 {label} 根据你的引导式答案起草，并已由 Codewhale 完成结构校验与边界限制。"
                 ),
                 DraftProvenance::Guided => "由你的引导式答案确定性生成。".to_string(),
                 DraftProvenance::Existing => {
-                    "你现有的宪法，读取自 constitution.json——原样展示，未做任何修改。".to_string()
+                    "你现有的协作准则，读取自 constitution.json——原样展示，未做任何修改。"
+                        .to_string()
                 }
             };
             let ratify_how = match provenance {
                 DraftProvenance::Existing => {
-                    "这已是你现行的准则。关闭此预览后按 K 保留并完成检查点——文件不会被修改。\
-                     之后可随时用 /constitution 或 /setup 修订。"
+                    "这已是你当前使用的协作准则。关闭此预览后按 K 保留并完成检查点——文件不会被修改。\
+                     之后可随时用 /constitution 或 /setup 修改。"
                 }
                 _ => {
-                    "未经你确认，任何内容都不会成为准则。关闭此预览后按 G 批准并保存；\
-                     之后可随时用 /constitution 或 /setup 修订。"
+                    "未经你确认，任何内容都不会成为协作准则。关闭此预览后按 G 确认并保存；\
+                     之后可随时用 /constitution 或 /setup 修改。"
                 }
             };
             format!(
-                "CODEWHALE · 用户宪法\n{RULE}\n\n{drafted_by}\n\n\
-                 这是 CodeWhale 与你协作的长期准则。像优秀的宪法一样：足够简短因而可用，由持久原则而非详尽规则构成，并且可以随你修订。\
-                 它界定权力与边界，而非裁决每个具体决定；它让协作跨会话延续——但它不是记忆，它承载的是原则，而非历史。\n\n\
+                "CODEWHALE · 用户协作准则\n{RULE}\n\n{drafted_by}\n\n\
+                 这是 Codewhale 与你协作时长期遵循的偏好和规则。内容应保持简短、便于执行，以持久原则为主，并可随时调整。\
+                 它界定协作方式与行为边界，而不是替你决定每一种情况；它让协作跨会话延续——但它不是记忆，只保留原则，不保留历史。\n\n\
                  {rendered}\n\n\
                  权限层级\n{layer_order}\n你的直接指令始终高于本文件。\n\n\
                  它不能做什么\n\
                  它只提供行为指导，不能授予或更改审批策略、沙箱、Shell、网络、信任、MCP 权限、默认模式、发布或支出权限——这些始终由你在运行时掌控。\n\n\
-                 精简核心与可选模块\n\
-                 内置核心始终生效。本草案只保存你的用户全局长期偏好。执行/编排等重型教义位于模式提示词或未来的可选模块中；此预览不会启用模块或更改其配置。\n\n\
-                 批准\n{ratify_how}"
+                 精简核心与可选策略\n\
+                 内置核心始终生效。本草案只保存你的用户全局长期偏好。执行与编排等高级策略仍由模式提示词或未来的可选规则包管理；此预览不会启用任何策略或更改配置。\n\n\
+                 确认\n{ratify_how}"
             )
         }
         Locale::ZhHant => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
-                    "由 {label} 根據你的引導式答案起草，並已由 CodeWhale 完成結構驗證與邊界限制。"
+                    "由 {label} 根據你的引導式答案起草，並已由 Codewhale 完成結構驗證與邊界限制。"
                 ),
                 DraftProvenance::Guided => "由你的引導式答案確定性生成。".to_string(),
                 DraftProvenance::Existing => {
@@ -3391,7 +3398,7 @@ fn constitution_ratification_text(
             };
             format!(
                 "CODEWHALE · 使用者憲法\n{RULE}\n\n{drafted_by}\n\n\
-                 這是 CodeWhale 與你協作的長期準則。像優秀的憲法一樣：足夠簡短因而可用，由持久原則而非詳盡規則構成，並且可以隨你修訂。\
+                 這是 Codewhale 與你協作的長期準則。像優秀的憲法一樣：足夠簡短因而可用，由持久原則而非詳盡規則構成，並且可以隨你修訂。\
                  它界定權力與邊界，而非裁決每個具體決定；它讓協作跨會話延續，但它不是記憶，它承載的是原則，而非歷史。\n\n\
                  {rendered}\n\n\
                  權限層級\n{layer_order}\n你的直接指令始終高於本文件。\n\n\
@@ -3405,7 +3412,7 @@ fn constitution_ratification_text(
         Locale::PtBr => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
-                    "Rascunhado por {label} a partir das suas respostas guiadas, depois validado por schema e limitado pelo CodeWhale."
+                    "Rascunhado por {label} a partir das suas respostas guiadas, depois validado por schema e limitado pelo Codewhale."
                 ),
                 DraftProvenance::Guided => {
                     "Renderizado deterministicamente a partir das suas respostas guiadas.".to_string()
@@ -3427,7 +3434,7 @@ fn constitution_ratification_text(
             };
             format!(
                 "CODEWHALE · CONSTITUIÇÃO DO USUÁRIO\n{RULE}\n\n{drafted_by}\n\n\
-                 Esta é a regra permanente de como o CodeWhale trabalha com você. Como boas constituições, \
+                 Esta é a regra permanente de como o Codewhale trabalha com você. Como boas constituições, \
                  ela é curta o bastante para ser usada, formada por princípios duráveis em vez de regras exaustivas, \
                  e pode ser emendada conforme você muda. Ela define poderes e limites em vez de decidir cada caso, \
                  e dá continuidade à colaboração entre sessões. Mas ela não é memória: carrega princípios, não histórico.\n\n\
@@ -3445,7 +3452,7 @@ fn constitution_ratification_text(
         Locale::Es419 => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
-                    "Redactado por {label} desde tus respuestas guiadas, luego validado por schema y acotado por CodeWhale."
+                    "Redactado por {label} desde tus respuestas guiadas, luego validado por schema y acotado por Codewhale."
                 ),
                 DraftProvenance::Guided => {
                     "Renderizado de forma determinística desde tus respuestas guiadas.".to_string()
@@ -3467,7 +3474,7 @@ fn constitution_ratification_text(
             };
             format!(
                 "CODEWHALE · CONSTITUCIÓN DEL USUARIO\n{RULE}\n\n{drafted_by}\n\n\
-                 Esta es la regla permanente de cómo CodeWhale trabaja contigo. Como las buenas constituciones, \
+                 Esta es la regla permanente de cómo Codewhale trabaja contigo. Como las buenas constituciones, \
                  es lo bastante breve para usarse, hecha de principios duraderos en vez de reglas exhaustivas, \
                  y enmendable a medida que cambias. Define poderes y límites en vez de decidir cada caso, \
                  y da continuidad a la colaboración entre sesiones. Pero no es memoria: lleva principios, no historial.\n\n\
@@ -3485,7 +3492,7 @@ fn constitution_ratification_text(
         Locale::Vi => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
-                    "Được {label} soạn từ câu trả lời hướng dẫn của bạn, rồi được CodeWhale kiểm tra schema và giới hạn biên."
+                    "Được {label} soạn từ câu trả lời hướng dẫn của bạn, rồi được Codewhale kiểm tra schema và giới hạn biên."
                 ),
                 DraftProvenance::Guided => {
                     "Được kết xuất xác định từ câu trả lời hướng dẫn của bạn.".to_string()
@@ -3507,7 +3514,7 @@ fn constitution_ratification_text(
             };
             format!(
                 "CODEWHALE · HIẾN PHÁP NGƯỜI DÙNG\n{RULE}\n\n{drafted_by}\n\n\
-                 Đây là luật thường trực cho cách CodeWhale làm việc với bạn. Giống các hiến pháp tốt, \
+                 Đây là luật thường trực cho cách Codewhale làm việc với bạn. Giống các hiến pháp tốt, \
                  nó đủ ngắn để dùng, gồm các nguyên tắc bền vững thay vì luật lệ cạn kiệt, \
                  và có thể sửa khi bạn thay đổi. Nó định khung quyền hạn và giới hạn thay vì quyết định từng trường hợp, \
                  đồng thời giữ sự liên tục giữa các phiên. Nhưng nó không phải bộ nhớ: nó mang nguyên tắc, không mang lịch sử.\n\n\
@@ -3525,7 +3532,7 @@ fn constitution_ratification_text(
         Locale::Ko => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
-                    "{label}이(가) 당신의 가이드 답변을 바탕으로 초안을 작성했고, CodeWhale이 구조를 검증하고 범위를 제한했습니다."
+                    "{label}이(가) 당신의 가이드 답변을 바탕으로 초안을 작성했고, Codewhale이 구조를 검증하고 범위를 제한했습니다."
                 ),
                 DraftProvenance::Guided => {
                     "당신의 가이드 답변으로부터 결정적으로 생성되었습니다.".to_string()
@@ -3547,7 +3554,7 @@ fn constitution_ratification_text(
             };
             format!(
                 "CODEWHALE · 사용자 헌법\n{RULE}\n\n{drafted_by}\n\n\
-                 이것은 CodeWhale이 당신과 함께 일하는 방식에 대한 상시 규칙입니다. 훌륭한 헌법이 그렇듯, \
+                 이것은 Codewhale이 당신과 함께 일하는 방식에 대한 상시 규칙입니다. 훌륭한 헌법이 그렇듯, \
                  사용할 수 있을 만큼 짧고, 소모적인 규칙이 아닌 지속적인 원칙으로 이루어져 있으며, 당신이 변화함에 따라 수정할 수 있습니다. \
                  이는 모든 개별 사례를 판단하는 대신 권한과 한계를 규정하며, 세션을 넘어 협업의 연속성을 부여합니다. \
                  다만 이것은 기억이 아닙니다: 이력이 아니라 원칙을 담습니다.\n\n\
@@ -3565,7 +3572,7 @@ fn constitution_ratification_text(
         _ => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
-                    "Drafted by {label} from your guided answers, then schema-checked and bounded by CodeWhale."
+                    "Drafted by {label} from your guided answers, then schema-checked and bounded by Codewhale."
                 ),
                 DraftProvenance::Guided => {
                     "Rendered deterministically from your guided answers.".to_string()
@@ -3588,7 +3595,7 @@ fn constitution_ratification_text(
             };
             format!(
                 "CODEWHALE · USER CONSTITUTION\n{RULE}\n\n{drafted_by}\n\n\
-                 This is the standing law for how CodeWhale works with you. Like the best \
+                 This is the standing law for how Codewhale works with you. Like the best \
                  constitutions, it is short enough to use, made of durable principles rather \
                  than exhaustive rules, and amendable as you change. It frames powers and \
                  limits rather than deciding every case, and it gives your collaboration \
@@ -3618,7 +3625,7 @@ fn model_draft_invitation_line(locale: Locale, model_label: &str) -> String {
             format!("A {model_label} が起草し、あなたが批准します。確認するまで保存しません。")
         }
         Locale::ZhHans => {
-            format!("A {model_label} 起草，你批准。未经确认不会保存。")
+            format!("A {model_label} 生成草案，由你确认。未经确认不会保存。")
         }
         Locale::ZhHant => {
             format!("A {model_label} 起草，你批准。未經確認不會保存。")
@@ -3645,7 +3652,7 @@ fn model_draft_invitation_line(locale: Locale, model_label: &str) -> String {
 fn keep_existing_invitation_line(locale: Locale) -> &'static str {
     match locale {
         Locale::Ja => "K 既存の憲法を保持 - 確認して保持、ファイルは変更しません。",
-        Locale::ZhHans => "K 保留现有宪法——先查看，再保留，文件不变。",
+        Locale::ZhHans => "K 保留现有协作准则——先查看，再保留，文件不变。",
         Locale::ZhHant => "K 保留現有憲法 - 先查看，再保留，檔案不變。",
         Locale::PtBr => "K Manter constituição existente - revise, mantenha, arquivo inalterado.",
         Locale::Es419 => {
@@ -3666,7 +3673,7 @@ fn model_draft_ready_line(locale: Locale, model_label: &str) -> String {
             )
         }
         Locale::ZhHans => {
-            format!("{model_label} 的草案待批准——按 G 查看并批准；按 1-6 会丢弃草案。")
+            format!("{model_label} 的草案待确认——按 G 查看并确认；按 1-6 会丢弃草案。")
         }
         Locale::ZhHant => {
             format!("{model_label} 的草案待批准 - 按 G 查看並批准；按 1-6 會丟棄草案。")
@@ -3703,7 +3710,9 @@ pub(crate) fn model_draft_ready_message(locale: Locale, model_label: &str) -> St
         Locale::Ja => format!(
             "{model_label} があなたの憲法を起草しました。プレビューを確認してから G で批准してください。"
         ),
-        Locale::ZhHans => format!("{model_label} 已起草你的宪法。请查看预览，然后按 G 批准。"),
+        Locale::ZhHans => {
+            format!("{model_label} 已生成你的协作准则草案。请查看预览，然后按 G 确认。")
+        }
         Locale::ZhHant => format!("{model_label} 已起草你的憲法。請查看預覽，然後按 G 批准。"),
         Locale::PtBr => format!(
             "{model_label} rascunhou sua constituição. Revise a prévia e pressione G para ratificar."
@@ -3737,7 +3746,7 @@ pub(crate) fn model_draft_failed_message(
             )
         }
         Locale::ZhHans => {
-            format!("{model_label} 未能完成起草（{reason}）。引导式草案仍然有效——按 G 预览并批准。")
+            format!("{model_label} 未能生成草案（{reason}）。引导式草案仍可使用——按 G 预览并确认。")
         }
         Locale::ZhHant => {
             format!("{model_label} 未能完成起草（{reason}）。引導式草案仍然有效；按 G 預覽並批准。")
@@ -4133,6 +4142,39 @@ mod tests {
     }
 
     #[test]
+    fn zh_hans_constitution_surfaces_use_functional_terminology() {
+        let constitution = GuidedConstitutionDraft::default().to_constitution(Locale::ZhHans);
+        let samples = [
+            ratification_preview_title(Locale::ZhHans).to_string(),
+            constitution_ratification_text(
+                Locale::ZhHans,
+                &constitution,
+                &DraftProvenance::Existing,
+            ),
+            lines_to_text(vec![freeform_note_line(Locale::ZhHans, "", false)]),
+            keep_existing_invitation_line(Locale::ZhHans).to_string(),
+            model_draft_invitation_line(Locale::ZhHans, "GLM-5.2"),
+            model_draft_ready_line(Locale::ZhHans, "GLM-5.2"),
+            model_draft_ready_message(Locale::ZhHans, "GLM-5.2"),
+            model_draft_failed_message(Locale::ZhHans, "GLM-5.2", "超时"),
+        ];
+        let visible_copy = samples.join("\n");
+
+        for literal_metaphor in ["宪法", "教义", "自由原则", "起草"] {
+            assert!(
+                !visible_copy.contains(literal_metaphor),
+                "Simplified Chinese setup copy should avoid {literal_metaphor}: {visible_copy}"
+            );
+        }
+        assert!(visible_copy.contains("协作准则"));
+        assert!(visible_copy.contains("自定义准则"));
+        assert!(visible_copy.contains("可选策略"));
+        assert!(visible_copy.contains("Codewhale"));
+        assert!(visible_copy.contains("/constitution"));
+        assert!(visible_copy.contains("constitution.json"));
+    }
+
+    #[test]
     fn guided_constitution_requires_preview_before_save() {
         let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
 
@@ -4193,8 +4235,8 @@ mod tests {
                     ),
                     Locale::ZhHans => (
                         "精简核心",
-                        "模块",
-                        "不会启用",
+                        "可选策略",
+                        "不会启用任何策略",
                         "不能授予或更改审批策略、沙箱、Shell、网络、信任、MCP 权限",
                         "发布或支出权限",
                     ),
@@ -4526,6 +4568,45 @@ mod tests {
             content.contains("`--apply` remains unimplemented"),
             "{content}"
         );
+    }
+
+    #[test]
+    fn remote_runtime_on_ramp_never_substitutes_deepseek_for_named_custom_route() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let codewhale_home = tmp.path().join(".codewhale");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", tmp.path());
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", tmp.path());
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        let mut custom = std::collections::HashMap::new();
+        custom.insert(
+            "lm-studio".to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+                model: Some("local-code-model".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = Config {
+            provider: Some("lm-studio".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom,
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let app = App::new(setup_test_options(workspace), &config);
+        let facts = SetupRuntimeFacts::from_app_config(&app, &config);
+
+        let content = remote_runtime_on_ramp_text(Locale::En, &facts);
+
+        assert!(content.contains("active route lm-studio"), "{content}");
+        assert!(content.contains("--provider lm-studio"), "{content}");
+        assert!(!content.contains("--provider deepseek"), "{content}");
     }
 
     #[test]
@@ -5009,7 +5090,7 @@ mod tests {
                 locale.tag()
             );
             assert!(
-                !body.contains("A CodeWhale user who wants"),
+                !body.contains("A Codewhale user who wants"),
                 "locale {} reused English purpose copy",
                 locale.tag()
             );
@@ -5047,14 +5128,14 @@ mod tests {
         assert!(english.contains("powers and limits rather than deciding every case"));
         assert!(english.contains("but it is not memory"));
         assert!(zh_hans.contains("<codewhale_user_constitution"));
-        assert!(zh_hans.contains("按 G 批准并保存"));
-        assert!(zh_hans.contains("它界定权力与边界"));
+        assert!(zh_hans.contains("按 G 确认并保存"));
+        assert!(zh_hans.contains("它界定协作方式与行为边界"));
         assert!(zh_hans.contains("但它不是记忆"));
         assert_ne!(english, zh_hans);
 
         let localized_markers = [
             (Locale::Ja, "権限の階層"),
-            (Locale::ZhHans, "精简核心与可选模块"),
+            (Locale::ZhHans, "精简核心与可选策略"),
             (Locale::ZhHant, "精簡核心與可選模組"),
             (Locale::PtBr, "NÚCLEO REDUZIDO E MÓDULOS OPT-IN"),
             (Locale::Es419, "NÚCLEO REDUCIDO Y MÓDULOS OPT-IN"),
@@ -5114,7 +5195,7 @@ mod tests {
             &DraftProvenance::Model("GLM-5.2".to_string()),
         );
         assert!(drafted.contains("Drafted by GLM-5.2"));
-        assert!(drafted.contains("schema-checked and bounded by CodeWhale"));
+        assert!(drafted.contains("schema-checked and bounded by Codewhale"));
 
         let zh = constitution_ratification_text(
             Locale::ZhHans,

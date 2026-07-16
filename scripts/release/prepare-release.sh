@@ -5,8 +5,8 @@
 #
 # Touches: Cargo.toml (workspace version), crates/*/Cargo.toml (internal
 # codewhale-* dependency pins), npm/codewhale/package.json (version +
-# codewhaleBinaryVersion), README*.md install-tag examples, Cargo.lock,
-# crates/tui/CHANGELOG.md (via sync-changelog.sh) and
+# codewhaleBinaryVersion), README*.md install-tag examples when present,
+# Cargo.lock, crates/tui/CHANGELOG.md (via sync-changelog.sh), and
 # web/lib/facts.generated.ts (via derive-facts.mjs).
 #
 # It does NOT write the CHANGELOG entry — add the `## [X.Y.Z] - YYYY-MM-DD`
@@ -39,6 +39,13 @@ import os, pathlib, re, sys
 
 old, new = os.environ["OLD_VERSION"], os.environ["NEW_VERSION"]
 old_re = re.escape(old)
+readmes = [
+    "README.md",
+    "README.zh-CN.md",
+    "README.ja-JP.md",
+    "README.vi.md",
+    "README.ko-KR.md",
+]
 
 def bump(path, pattern, repl, minimum):
     p = pathlib.Path(path)
@@ -48,6 +55,19 @@ def bump(path, pattern, repl, minimum):
         sys.exit(f"error: expected >= {minimum} replacement(s) in {path}, made {n}")
     p.write_text(out)
     print(f"  {path}: {n} replacement(s)")
+
+# Validate every versioned README install tag before writing any file. A README
+# with no pinned tag is valid; if a tag exists, it must match the workspace so
+# the release helper cannot silently preserve stale public install instructions.
+release_tag_pattern = re.compile(r"--tag v([0-9]+\.[0-9]+\.[0-9]+)\b")
+for readme in readmes:
+    versions = sorted(set(release_tag_pattern.findall(pathlib.Path(readme).read_text())))
+    stale = [version for version in versions if version != old]
+    if stale:
+        found = ", ".join(stale)
+        sys.exit(
+            f"error: {readme} has release tag version(s) {found}; expected {old}"
+        )
 
 # 1) Workspace version.
 bump("Cargo.toml", rf'^version = "{old_re}"$', f'version = "{new}"', 1)
@@ -76,9 +96,16 @@ bump(
     2,
 )
 
-# 4) README install-tag examples (all translations).
-for readme in ["README.md", "README.zh-CN.md", "README.ja-JP.md", "README.vi.md", "README.ko-KR.md"]:
-    bump(readme, rf"--tag v{old_re}\b", f"--tag v{new}", 1)
+# 4) README install-tag examples (all translations, when present).
+for readme in readmes:
+    p = pathlib.Path(readme)
+    text = p.read_text()
+    out, n = re.subn(rf"--tag v{old_re}\b", f"--tag v{new}", text)
+    if n:
+        p.write_text(out)
+        print(f"  {readme}: {n} install-tag replacement(s)")
+    else:
+        print(f"  {readme}: no versioned install-tag example; skipped")
 
 # 5) Public install/version snippets in README*.md and docs/INSTALL.md.
 #    These are the user-facing "verify your install" lines and the npm wrapper

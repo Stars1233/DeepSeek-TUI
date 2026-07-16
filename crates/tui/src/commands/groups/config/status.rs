@@ -21,7 +21,11 @@ fn format_status(app: &App) -> String {
     let _ = writeln!(out, "===================");
     let _ = writeln!(out);
     push_row(&mut out, "Version:", env!("CARGO_PKG_VERSION"));
-    push_row(&mut out, "Provider:", app.api_provider.as_str());
+    push_row(
+        &mut out,
+        "Provider:",
+        app.provider_identity_for_persistence(),
+    );
     push_row(
         &mut out,
         "Model:",
@@ -282,6 +286,22 @@ mod tests {
         assert!(msg.contains("Cache hit/miss:"));
         assert!(msg.contains("70 hit / 30 miss"));
         assert!(msg.contains("Use /statusline to configure footer items."));
+    }
+
+    #[test]
+    fn status_report_keeps_exact_named_custom_provider() {
+        let tmpdir = TempDir::new().expect("temp dir");
+        let mut app = create_test_app(tmpdir.path().to_path_buf());
+        app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+
+        let msg = status(&mut app).message.expect("status message");
+
+        let provider_row = msg
+            .lines()
+            .find(|line| line.trim_start().starts_with("Provider:"))
+            .expect("provider row");
+        assert_eq!(provider_row.split_whitespace().last(), Some("lm-studio"));
+        assert_ne!(provider_row.split_whitespace().last(), Some("custom"));
     }
 
     #[test]

@@ -191,6 +191,9 @@ pub struct TurnCacheRecord {
     /// API provider used for the turn. This is recorded so cache misses can be
     /// correlated with provider/model route changes.
     pub provider: Option<ApiProvider>,
+    /// Exact non-secret configured route key. This distinguishes named custom
+    /// providers which all share [`ApiProvider::Custom`].
+    pub provider_identity: Option<String>,
     /// Concrete model used for the turn. For auto-model turns this is the
     /// routed model, not the literal `auto` setting.
     pub model: Option<String>,
@@ -983,15 +986,14 @@ const MAX_COMPOSER_DISPLAY_CHARS: usize = 4_000;
 const MAX_DRAFT_HISTORY: usize = 50;
 
 impl AppMode {
-    /// Productive keyboard cycle: Plan -> Act -> Plan.
+    /// Productive keyboard cycle: Plan -> Act -> Operate -> Plan.
     ///
     /// `Auto` remains an internal variant while the real implementation is
     /// redesigned; do not expose it through user-facing mode selection (#3733).
     /// `Yolo` is kept for parse/back-compat only and is not in the Tab cycle.
-    /// Operate remains parseable for restored sessions and compatibility, but
-    /// user-facing selection must not offer a fail-closed mode whose control
-    /// board and host-enforced workflow receipts are not shipped yet.
-    pub const CYCLE: [Self; 2] = [Self::Plan, Self::Agent];
+    /// Operate joins the visible cycle because ordinary messages can now
+    /// coordinate background workers without requiring a Workflow definition.
+    pub const CYCLE: [Self; 3] = [Self::Plan, Self::Agent, Self::Operate];
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
@@ -1109,7 +1111,7 @@ impl AppMode {
             }
             AppMode::Yolo => "Act mode with Full Access (legacy compatibility setting)",
             AppMode::Plan => "Plan mode - research and design before implementing",
-            AppMode::Operate => "Operate mode - coordinate a Fleet for multi-step work",
+            AppMode::Operate => "Operate mode - send tasks while Fleet workers run in parallel",
         }
     }
 
@@ -1298,22 +1300,6 @@ pub struct MentionCompletionCache {
     pub entries: Vec<String>,
 }
 
-/// Cached full candidate walk for @-mention completions. One workspace walk
-/// serves every subsequent keystroke of the same mention token — the
-/// per-keystroke synchronous re-walk was the dominant composer latency on
-/// large repos (#3757). Path-like partials (containing `/` or starting with
-/// `.`) bypass this cache because local path-reference completions are
-/// needle-dependent.
-#[derive(Debug, Clone)]
-pub struct MentionCandidateCache {
-    pub workspace: PathBuf,
-    pub cwd: Option<PathBuf>,
-    pub walk_depth: usize,
-    pub follow_links: bool,
-    pub collected_at: std::time::Instant,
-    pub candidates: Vec<String>,
-}
-
 /// Composer input state — grouped fields for the text input area.
 pub struct ComposerState {
     /// Current composer text content.
@@ -1345,9 +1331,12 @@ pub struct ComposerState {
     /// Cached @-mention completions to avoid re-walking the filesystem when
     /// the cursor moves inside the same mention token.
     pub mention_completion_cache: Option<MentionCompletionCache>,
-    /// Cached full candidate list so successive keystrokes inside one mention
-    /// token filter in memory instead of re-walking the workspace (#3757).
-    pub mention_candidate_cache: Option<MentionCandidateCache>,
+    /// Serialized background discovery and its bounded candidate cache. All
+    /// filesystem traversal for composer completions lives behind this owner.
+    pub(crate) mention_discovery: crate::tui::mention_completion::MentionDiscovery,
+    /// Launch directory captured once so rendering a completion popup never
+    /// needs to call `getcwd` on the UI thread.
+    pub(crate) mention_cwd: Option<PathBuf>,
     /// Whether vim modal editing is enabled for this composer.
     /// Sourced from `Settings::composer_vim_mode` at startup.
     pub vim_enabled: bool,
@@ -1384,7 +1373,8 @@ impl Default for ComposerState {
             mention_menu_selected: 0,
             mention_menu_hidden: false,
             mention_completion_cache: None,
-            mention_candidate_cache: None,
+            mention_discovery: crate::tui::mention_completion::MentionDiscovery::default(),
+            mention_cwd: std::env::current_dir().ok(),
             vim_enabled: false,
             vim_mode: VimMode::Normal,
             vim_pending_d: false,
@@ -1404,6 +1394,9 @@ pub struct ViewportState {
     pub transcript_scrollbar_dragging: bool,
     pub last_transcript_area: Option<Rect>,
     pub last_composer_area: Option<Rect>,
+    /// Painted band occupied by the active inline approval. Stored so wheel
+    /// routing can prefer the visible card over side surfaces underneath it.
+    pub last_approval_area: Option<Rect>,
     /// Outer rect of the right-hand sidebar (when visible), stored at render
     /// time so mouse hit-testing can keep scroll events over the sidebar from
     /// leaking into the transcript viewport.
@@ -1439,6 +1432,7 @@ impl Default for ViewportState {
             transcript_scrollbar_dragging: false,
             last_transcript_area: None,
             last_composer_area: None,
+            last_approval_area: None,
             last_sidebar_area: None,
             last_workflow_panel_area: None,
             last_workflow_cancel_area: None,
@@ -1786,6 +1780,13 @@ pub struct App {
     /// Updated by `/provider` switches so the UI/commands can read the
     /// active backend without re-deriving it from the live config.
     pub api_provider: ApiProvider,
+    /// Exact configured provider key for persistence and route restoration.
+    /// Built-ins use their canonical slug; named custom providers retain the
+    /// user-owned key instead of collapsing to `custom`.
+    pub(crate) provider_identity: String,
+    /// Additive exact configured id for persistence. `None` preserves the
+    /// legacy root-level custom route even when a same-key table appears.
+    pub(crate) provider_exact_id: Option<String>,
     /// Primary provider plus configured fallback providers for this session.
     pub provider_chain: Option<ProviderChain>,
     /// Per-provider auth/local readiness snapshot for the fallback chain (#2574).
@@ -1816,6 +1817,9 @@ pub struct App {
     /// Current reasoning-effort tier for DeepSeek thinking mode.
     /// Cycled via Shift+Tab; initialized from config at startup.
     pub reasoning_effort: ReasoningEffort,
+    /// Whether the current effort came from an explicit user setting rather
+    /// than compatibility inference from a retiring model alias.
+    pub(crate) reasoning_effort_explicit: bool,
     /// Last concrete thinking tier chosen while `reasoning_effort` is auto.
     pub last_effective_reasoning_effort: Option<ReasoningEffort>,
     pub workspace: PathBuf,
@@ -2664,18 +2668,34 @@ impl App {
         // Let settings preserve runtime switches only when config/CLI did not
         // explicitly select a provider. A configured provider must not be
         // pushed back to a stale saved setting on restart.
-        if config
+        let config_explicitly_selects_provider = config
             .provider
             .as_deref()
-            .and_then(ApiProvider::parse)
-            .is_none()
+            .is_some_and(|provider| !provider.trim().is_empty());
+        let mut provider_identity_record = config
+            .active_provider_identity(provider)
+            .unwrap_or_else(|_| {
+                let key = config.provider_identity_for(provider);
+                let exact_id = (!(provider == ApiProvider::Custom
+                    && config.uses_legacy_literal_custom_route()))
+                .then(|| key.clone());
+                crate::config::ProviderIdentity {
+                    provider,
+                    key,
+                    exact_id,
+                }
+            });
+        if !config_explicitly_selects_provider
             && let Some(ref provider_str) = settings.default_provider
-            && let Some(parsed) = ApiProvider::parse(provider_str)
+            && let Ok(resolved) = config.resolve_provider_identity(provider_str)
         {
-            provider = parsed;
+            provider = resolved.provider;
+            provider_identity_record = resolved;
         }
+        let provider_identity = provider_identity_record.key;
+        let provider_exact_id = provider_identity_record.exact_id;
         let mut effective_auth_config = config.clone();
-        effective_auth_config.provider = Some(provider.as_str().to_string());
+        effective_auth_config.provider = Some(provider_identity.clone());
         let model_ids_passthrough = effective_auth_config.model_ids_pass_through();
         let provider_chain = provider
             .kind()
@@ -2752,7 +2772,7 @@ impl App {
         }
         let provider_models = settings.provider_models.clone().unwrap_or_default();
         let model = provider_models
-            .get(provider.as_str())
+            .get(&provider_identity)
             .cloned()
             .or_else(|| {
                 // default_model is a DeepSeek-centric setting; other providers
@@ -2785,6 +2805,8 @@ impl App {
             .ok()
             .and_then(|candidate| crate::route_budget::known_route_limits(candidate.limits))
         };
+        let reasoning_effort_explicit =
+            settings.reasoning_effort.is_some() || config.reasoning_effort_is_explicit();
         let configured_reasoning_effort = settings
             .reasoning_effort
             .as_deref()
@@ -2809,13 +2831,23 @@ impl App {
                 active_route_limits,
             )
         };
-        let reasoning_effort = if auto_model {
+        let mut reasoning_effort = if auto_model {
             ReasoningEffort::Auto
         } else {
             configured_reasoning_effort.map_or_else(ReasoningEffort::default, |s| {
                 ReasoningEffort::from_setting_for_provider(s, provider)
             })
         };
+        if !auto_model
+            && !reasoning_effort_explicit
+            && let Some(effort) = crate::config::legacy_deepseek_alias_effort_for_route(
+                provider,
+                &effective_auth_config.deepseek_base_url(),
+                &model,
+            )
+        {
+            reasoning_effort = ReasoningEffort::from_setting_for_provider(effort, provider);
+        }
 
         // Resolve the saved mode separately from the permission posture.
         let preferred_mode = AppMode::from_setting(&settings.default_mode);
@@ -2901,6 +2933,7 @@ impl App {
             Self::discover_cached_skills(&workspace, &skills_dir, skills_scan_codewhale_only);
 
         let input_history = crate::composer_history::load_history();
+        let mention_cwd = std::env::current_dir().ok();
         let (initial_input_text, initial_input_cursor, auto_submit_initial_input) =
             match initial_input {
                 // #451: pre-populate the composer when invoked via
@@ -2952,7 +2985,8 @@ impl App {
                 mention_menu_selected: 0,
                 mention_menu_hidden: false,
                 mention_completion_cache: None,
-                mention_candidate_cache: None,
+                mention_discovery: crate::tui::mention_completion::MentionDiscovery::default(),
+                mention_cwd,
                 vim_enabled: composer_vim_enabled,
                 vim_mode: VimMode::Normal,
                 vim_pending_d: false,
@@ -2994,6 +3028,8 @@ impl App {
             pending_turn_route: None,
             active_turn: None,
             api_provider: provider,
+            provider_identity,
+            provider_exact_id,
             provider_chain,
             provider_readiness,
             provider_health: crate::provider_readiness::ProviderReadinessSnapshot::default(),
@@ -3003,6 +3039,7 @@ impl App {
             active_context_window_override,
             pending_provider_switch: None,
             reasoning_effort,
+            reasoning_effort_explicit,
             last_effective_reasoning_effort: None,
             workspace,
             config_path,
@@ -3466,7 +3503,7 @@ impl App {
         }
     }
 
-    /// Cycle through productive modes: Plan → Act → Plan.
+    /// Cycle through productive modes: Plan → Act → Operate → Plan.
     pub fn cycle_mode(&mut self) {
         if self.reject_setting_change_while_busy("Mode") {
             return;
@@ -3493,6 +3530,7 @@ impl App {
         self.reasoning_effort = self
             .reasoning_effort
             .cycle_next_for_provider(self.api_provider);
+        self.reasoning_effort_explicit = true;
         self.last_effective_reasoning_effort = None;
         self.needs_redraw = true;
         // Effort chip in the header is canonical — no duplicate toast.
@@ -4696,30 +4734,31 @@ impl App {
         }
     }
 
+    fn prune_expired_status_toasts(&mut self, now: Instant) {
+        let queued_before = self.status_toasts.len();
+        self.status_toasts.retain(|toast| !toast.is_expired(now));
+        let queued_removed = self.status_toasts.len() != queued_before;
+        let sticky_removed = self
+            .sticky_status
+            .as_ref()
+            .is_some_and(|toast| toast.is_expired(now));
+        if sticky_removed {
+            self.sticky_status = None;
+        }
+        if queued_removed || sticky_removed {
+            self.needs_redraw = true;
+        }
+    }
+
     /// Up to `limit` currently-active toasts, most recent last (so a stacked
     /// renderer iterating top-to-bottom shows the freshest message at the
-    /// bottom, like a chat log). Drains expired toasts off the front as a
-    /// side effect — same cleanup as `active_status_toast` so callers see a
-    /// consistent queue. Whalescale#439.
+    /// bottom, like a chat log). Prunes expired toasts throughout the queue as
+    /// a side effect — the same cleanup as `active_status_toast` so callers see
+    /// a consistent queue. Whalescale#439.
     pub fn active_status_toasts(&mut self, limit: usize) -> Vec<StatusToast> {
         self.sync_status_message_to_toasts();
         let now = Instant::now();
-        while self
-            .status_toasts
-            .front()
-            .is_some_and(|toast| toast.is_expired(now))
-        {
-            self.status_toasts.pop_front();
-            self.needs_redraw = true;
-        }
-        if self
-            .sticky_status
-            .as_ref()
-            .is_some_and(|toast| toast.is_expired(now))
-        {
-            self.sticky_status = None;
-            self.needs_redraw = true;
-        }
+        self.prune_expired_status_toasts(now);
 
         let mut out: Vec<StatusToast> = Vec::with_capacity(limit);
         if let Some(sticky) = self.sticky_status.clone() {
@@ -4744,29 +4783,7 @@ impl App {
     pub fn active_status_toast(&mut self) -> Option<StatusToast> {
         self.sync_status_message_to_toasts();
         let now = Instant::now();
-        let mut removed = false;
-
-        while self
-            .status_toasts
-            .front()
-            .is_some_and(|toast| toast.is_expired(now))
-        {
-            self.status_toasts.pop_front();
-            removed = true;
-        }
-
-        if self
-            .sticky_status
-            .as_ref()
-            .is_some_and(|toast| toast.is_expired(now))
-        {
-            self.sticky_status = None;
-            removed = true;
-        }
-
-        if removed {
-            self.needs_redraw = true;
-        }
+        self.prune_expired_status_toasts(now);
 
         self.sticky_status
             .clone()
@@ -4798,6 +4815,7 @@ impl App {
         self.viewport.transcript_selection.clear();
 
         self.viewport.last_transcript_area = None;
+        self.viewport.last_approval_area = None;
         self.viewport.last_transcript_top = 0;
         // Seed visible height from the resize event so paging keys use a
         // useful page size immediately, before the next render updates it.
@@ -6476,9 +6494,64 @@ impl App {
         }
     }
 
+    #[must_use]
+    pub(crate) fn provider_identity_for_persistence(&self) -> &str {
+        if self.api_provider == ApiProvider::Custom {
+            &self.provider_identity
+        } else {
+            self.api_provider.as_str()
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn provider_id_for_persistence(&self) -> Option<&str> {
+        self.provider_exact_id.as_deref()
+    }
+
+    pub(crate) fn set_provider_identity(
+        &mut self,
+        provider: ApiProvider,
+        identity: impl Into<String>,
+    ) {
+        let identity = identity.into();
+        self.api_provider = provider;
+        self.provider_exact_id = (!(provider == ApiProvider::Custom
+            && identity.eq_ignore_ascii_case(ApiProvider::Custom.as_str())))
+        .then(|| identity.clone());
+        self.provider_identity = identity;
+    }
+
+    pub(crate) fn set_provider_identity_record(
+        &mut self,
+        identity: crate::config::ProviderIdentity,
+    ) {
+        self.api_provider = identity.provider;
+        self.provider_identity = identity.key;
+        self.provider_exact_id = identity.exact_id;
+    }
+
     pub fn accepts_custom_model_ids(&self) -> bool {
         self.model_ids_passthrough
             || crate::config::provider_passes_model_through(self.api_provider)
+    }
+
+    pub(crate) fn apply_provider_switch_reasoning_effort(
+        &mut self,
+        provider: ApiProvider,
+        base_url: &str,
+        model_override: Option<&str>,
+    ) {
+        let inferred = model_override.and_then(|model| {
+            crate::config::legacy_deepseek_alias_effort_for_route(provider, base_url, model)
+        });
+        self.reasoning_effort = if self.reasoning_effort_explicit {
+            self.reasoning_effort.normalize_for_provider(provider)
+        } else if let Some(effort) = inferred {
+            ReasoningEffort::from_setting_for_provider(effort, provider)
+        } else {
+            self.reasoning_effort.normalize_for_provider(provider)
+        };
+        self.last_effective_reasoning_effort = None;
     }
 
     pub fn effective_model_for_budget(&self) -> &str {
@@ -6522,6 +6595,18 @@ impl App {
         (self.api_provider, self.model_display_label())
     }
 
+    /// Exact non-secret route label for user-visible status surfaces.
+    #[must_use]
+    pub fn effective_route_identity_display(&self) -> (String, String) {
+        let (provider, model) = self.effective_route_display();
+        let identity = if provider == ApiProvider::Custom {
+            self.provider_identity_for_persistence()
+        } else {
+            provider.display_name()
+        };
+        (identity.to_string(), model)
+    }
+
     pub fn reasoning_effort_display_label(&self) -> String {
         if self.auto_model || self.reasoning_effort == ReasoningEffort::Auto {
             if let Some(effective) = self.last_effective_reasoning_effort {
@@ -6538,14 +6623,48 @@ impl App {
     }
 
     pub fn compaction_config(&self) -> CompactionConfig {
+        let mut config = self.compaction_config_for_route(
+            self.api_provider,
+            self.effective_model_for_budget(),
+            self.active_route_limits,
+        );
+        // These cached fields are the active-route compatibility authority and
+        // are updated together by `update_model_compaction_budget`. Commands
+        // and embedders may also adjust them directly between route updates.
+        config.enabled = self.auto_compact;
+        config.token_threshold = self.compact_threshold;
+        config
+    }
+
+    /// Build compaction policy from one already-resolved provider route.
+    ///
+    /// Auto routing can select a provider/model whose context limits differ
+    /// from the route currently displayed by the app. Callers dispatching that
+    /// turn must derive every compaction input from the selected descriptor,
+    /// not from the previous route cached in `App`.
+    pub(crate) fn compaction_config_for_route(
+        &self,
+        provider: ApiProvider,
+        model: &str,
+        route_limits: Option<RouteLimits>,
+    ) -> CompactionConfig {
         CompactionConfig {
-            enabled: self.auto_compact,
-            token_threshold: self.compact_threshold,
-            model: self.effective_model_for_budget().to_string(),
+            enabled: if self.auto_compact_user_configured {
+                self.auto_compact
+            } else {
+                crate::route_budget::auto_compact_default_for_route(provider, model, route_limits)
+            },
+            token_threshold: crate::route_budget::compaction_threshold_for_route_at_percent(
+                provider,
+                model,
+                route_limits,
+                self.auto_compact_threshold_percent,
+            ),
+            model: model.to_string(),
             effective_context_window: Some(crate::route_budget::route_context_window_tokens(
-                self.api_provider,
-                self.effective_model_for_budget(),
-                self.active_route_limits,
+                provider,
+                model,
+                route_limits,
             )),
             ..Default::default()
         }
@@ -6657,7 +6776,7 @@ impl App {
             return None;
         };
 
-        self.api_provider = next_provider;
+        self.set_provider_identity(next_provider, next_provider.as_str());
         self.last_fallback_reason = Some(format!(
             "Fell back to {} after recoverable provider error: {reason}{skipped}",
             next_provider.as_str()
@@ -6798,6 +6917,8 @@ pub enum AppAction {
         api_timeout_secs: u64,
         heartbeat_timeout_secs: u64,
     },
+    /// Open the live transcript overlay through a terminal-safe command path.
+    OpenLiveTranscript,
     OpenContextInspector,
     CompactContext,
     PurgeContext,

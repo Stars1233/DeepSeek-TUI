@@ -74,6 +74,8 @@ async fn task_round_trip_carries_all_options_and_normalizes_profile() {
             allowedTools: ["read", "grep"],
             maxDepth: 2,
             tokenBudget: 5000,
+            maxSteps: 4,
+            wallTimeSecs: 90,
             label: "L1",
             phase: "P1",
         });
@@ -100,6 +102,8 @@ async fn task_round_trip_carries_all_options_and_normalizes_profile() {
     );
     assert_eq!(request.max_depth, Some(2));
     assert_eq!(request.token_budget, Some(5000));
+    assert_eq!(request.max_steps, Some(4));
+    assert_eq!(request.wall_time_secs, Some(90));
     assert_eq!(request.response_schema, None);
     assert_eq!(request.label.as_deref(), Some("L1"));
     assert_eq!(request.phase.as_deref(), Some("P1"));

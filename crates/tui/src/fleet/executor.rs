@@ -7,8 +7,8 @@
 //!
 //! This module is the bridge:
 //! - [`build_worker_exec_command`] turns a `FleetTaskSpec` + `FleetExecConfig`
-//!   into the `codewhale exec --output-format stream-json …` argv that a host
-//!   adapter ([`super::host`]) launches locally or over SSH.
+//!   into the `codewhale [route flags] exec --output-format stream-json …`
+//!   argv that a host adapter ([`super::host`]) launches locally or over SSH.
 //! - [`map_exec_stream_line`] maps one stream-json line emitted by that worker
 //!   into a [`FleetWorkerEventPayload`] for the durable ledger, so the ledger
 //!   persists the worker's own event vocabulary instead of a simulated one.
@@ -30,6 +30,18 @@ use super::worker_runtime::{
     fleet_task_prompt, fleet_task_prompt_with_profiles, fleet_worker_launch_reasoning_effort,
     fleet_worker_launch_route,
 };
+
+/// Resolve the executable used for Fleet worker subprocesses.
+///
+/// Kept here so every long-lived surface (CLI and Runtime API) launches the
+/// same configured worker binary instead of silently diverging.
+pub fn configured_codewhale_binary() -> String {
+    std::env::var("CODEWHALE_FLEET_CODEWHALE_BINARY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "codewhale".to_string())
+}
 
 /// Build the `codewhale exec` argv that runs a fleet task headlessly.
 ///
@@ -100,13 +112,12 @@ fn build_worker_exec_command_from_prompt(
     provider: Option<&str>,
     reasoning_effort: Option<&str>,
 ) -> FleetWorkerCommand {
-    let mut args: Vec<String> = vec![
-        "exec".to_string(),
-        "--auto".to_string(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-    ];
+    let mut args: Vec<String> = Vec::new();
 
+    // The canonical `codewhale` dispatcher owns these route overrides as
+    // global flags and deliberately rejects them after `exec`. Keep them in
+    // front of the subcommand so Fleet commands work through the installed
+    // dispatcher as well as when a host points directly at `codewhale-tui`.
     if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
         args.push("--model".to_string());
         args.push(model.to_string());
@@ -120,6 +131,13 @@ fn build_worker_exec_command_from_prompt(
         args.push("--provider".to_string());
         args.push(provider.to_string());
     }
+
+    args.extend([
+        "exec".to_string(),
+        "--auto".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+    ]);
 
     // Non-secret thinking tier only (#4137). This is profile metadata and
     // follows the same explicit-only policy as provider: omit it when the
@@ -198,6 +216,69 @@ pub fn map_exec_stream_line(line: &str) -> Option<FleetWorkerEventPayload> {
     }
 }
 
+#[derive(Debug)]
+enum ParsedTerminalRoute {
+    NotTerminal,
+    Valid(FleetWorkerReportedRoute),
+    Invalid,
+}
+
+/// Parse one allowlisted, secret-free route identity from terminal exec
+/// metadata. Once a line declares itself as a terminal receipt, malformed
+/// route fields are distinct from ordinary non-terminal stream noise so a
+/// prior valid record cannot survive contradictory evidence.
+fn parse_exec_terminal_route(line: &str) -> ParsedTerminalRoute {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return ParsedTerminalRoute::NotTerminal;
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("metadata") {
+        return ParsedTerminalRoute::NotTerminal;
+    }
+    let Some(meta) = value.get("meta").and_then(serde_json::Value::as_object) else {
+        return ParsedTerminalRoute::NotTerminal;
+    };
+    if meta.get("receipt_kind").and_then(serde_json::Value::as_str) != Some("terminal") {
+        return ParsedTerminalRoute::NotTerminal;
+    }
+
+    let route = (|| {
+        let provider = meta.get("provider")?.as_str()?.trim();
+        let model = meta.get("model")?.as_str()?.trim();
+        if provider.is_empty() || model.is_empty() {
+            return None;
+        }
+        let provider_kind = crate::config::ApiProvider::parse(provider)?;
+        let provider_exact_id = match meta.get("provider_id") {
+            None => None,
+            Some(value) => {
+                let id = value.as_str()?.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                Some(id.to_string())
+            }
+        };
+        if provider_exact_id.is_some() && provider_kind != crate::config::ApiProvider::Custom {
+            return None;
+        }
+        Some(FleetWorkerReportedRoute {
+            provider: provider.to_string(),
+            provider_exact_id,
+            model: model.to_string(),
+        })
+    })();
+
+    route.map_or(ParsedTerminalRoute::Invalid, ParsedTerminalRoute::Valid)
+}
+
+#[cfg(test)]
+fn map_exec_terminal_route(line: &str) -> Option<FleetWorkerReportedRoute> {
+    match parse_exec_terminal_route(line) {
+        ParsedTerminalRoute::Valid(route) => Some(route),
+        ParsedTerminalRoute::NotTerminal | ParsedTerminalRoute::Invalid => None,
+    }
+}
+
 /// Classify a worker process exit into a terminal fleet event.
 ///
 /// `stopped` means the operator stopped the worker (cancellation), which takes
@@ -238,12 +319,74 @@ pub struct FleetExecutor {
     streams: std::collections::BTreeMap<String, WorkerStream>,
 }
 
+/// Durable lease identity owned by one concrete host process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetExecutorAttempt {
+    pub run_id: codewhale_protocol::fleet::FleetRunId,
+    pub task_id: String,
+    pub attempt: u32,
+}
+
 struct WorkerStream {
     log_path: std::path::PathBuf,
     host: WorkerStreamHost,
+    attempt: Option<FleetExecutorAttempt>,
     offset: u64,
-    pending: String,
+    // Keep incomplete stream frames as bytes. Decoding each read separately
+    // corrupts valid UTF-8 when a multibyte code point crosses a read boundary.
+    pending: Vec<u8>,
     terminal: bool,
+    terminal_route: TerminalRouteEvidence,
+}
+
+#[derive(Debug, Clone, Default)]
+enum TerminalRouteEvidence {
+    #[default]
+    Missing,
+    Valid(FleetWorkerReportedRoute),
+    InvalidOrAmbiguous,
+}
+
+impl TerminalRouteEvidence {
+    fn observe(&mut self, parsed: ParsedTerminalRoute) {
+        match parsed {
+            ParsedTerminalRoute::NotTerminal => {}
+            ParsedTerminalRoute::Invalid => *self = Self::InvalidOrAmbiguous,
+            ParsedTerminalRoute::Valid(route) => {
+                *self = if matches!(&*self, Self::Missing) {
+                    Self::Valid(route)
+                } else {
+                    // The stream contract emits exactly one terminal receipt.
+                    // Any second record, even an identical one, is ambiguous
+                    // provenance and must permanently fail closed.
+                    Self::InvalidOrAmbiguous
+                };
+            }
+        }
+    }
+
+    fn reported_route(&self) -> Option<&FleetWorkerReportedRoute> {
+        match self {
+            Self::Valid(route) => Some(route),
+            Self::Missing | Self::InvalidOrAmbiguous => None,
+        }
+    }
+}
+
+fn observe_worker_stream_line(
+    terminal_route: &mut TerminalRouteEvidence,
+    line: &[u8],
+) -> Option<FleetWorkerEventPayload> {
+    let Ok(line) = std::str::from_utf8(line) else {
+        // stream-json is a UTF-8 contract. Never accept a lossy-decoded route
+        // receipt: replacement characters could turn corrupt provider/model
+        // bytes into apparently valid provenance.
+        terminal_route.observe(ParsedTerminalRoute::Invalid);
+        return None;
+    };
+    let line = line.trim_end();
+    terminal_route.observe(parse_exec_terminal_route(line));
+    map_exec_stream_line(line)
 }
 
 enum WorkerStreamHost {
@@ -252,9 +395,23 @@ enum WorkerStreamHost {
 }
 
 #[derive(Debug, Clone)]
+pub struct FleetWorkerReportedRoute {
+    pub provider: String,
+    pub provider_exact_id: Option<String>,
+    pub model: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct FleetWorkerTerminalEvent {
     pub payload: FleetWorkerEventPayload,
     pub exit_code: Option<i32>,
+    /// Non-terminal payloads discovered by the mandatory post-exit drain.
+    pub tail_payloads: Vec<FleetWorkerEventPayload>,
+    pub reported_route: Option<FleetWorkerReportedRoute>,
+    /// A real headless exec process must report its actual route. Callers use
+    /// this bit to distinguish a missing/invalid report (fail closed) from
+    /// pre-launch or simulated paths that only have declared route intent.
+    pub requires_reported_route: bool,
 }
 
 impl FleetExecutor {
@@ -286,6 +443,29 @@ impl FleetExecutor {
         command: FleetWorkerCommand,
         cwd: Option<std::path::PathBuf>,
     ) -> super::host::FleetHostResult<super::host::FleetWorkerHandle> {
+        self.start_worker_on_host_inner(worker_id, host, command, cwd, None)
+    }
+
+    /// Start the concrete process for one exact durable Fleet lease.
+    pub fn start_worker_attempt_on_host(
+        &mut self,
+        worker_id: &str,
+        host: &FleetHostSpec,
+        command: FleetWorkerCommand,
+        cwd: Option<std::path::PathBuf>,
+        attempt: FleetExecutorAttempt,
+    ) -> super::host::FleetHostResult<super::host::FleetWorkerHandle> {
+        self.start_worker_on_host_inner(worker_id, host, command, cwd, Some(attempt))
+    }
+
+    fn start_worker_on_host_inner(
+        &mut self,
+        worker_id: &str,
+        host: &FleetHostSpec,
+        command: FleetWorkerCommand,
+        cwd: Option<std::path::PathBuf>,
+        attempt: Option<FleetExecutorAttempt>,
+    ) -> super::host::FleetHostResult<super::host::FleetWorkerHandle> {
         let mut request = super::host::FleetWorkerStartRequest::new(worker_id, command);
         request.cwd = cwd;
         let (handle, host) = match host {
@@ -314,9 +494,11 @@ impl FleetExecutor {
             WorkerStream {
                 log_path: handle.log_path.clone(),
                 host,
+                attempt,
                 offset: 0,
-                pending: String::new(),
+                pending: Vec::new(),
                 terminal: false,
+                terminal_route: TerminalRouteEvidence::default(),
             },
         );
         Ok(handle)
@@ -328,6 +510,36 @@ impl FleetExecutor {
 
     pub fn worker_ids(&self) -> Vec<String> {
         self.streams.keys().cloned().collect()
+    }
+
+    pub fn tracked_attempt(&self, worker_id: &str) -> Option<FleetExecutorAttempt> {
+        self.streams
+            .get(worker_id)
+            .and_then(|stream| stream.attempt.clone())
+    }
+
+    /// Stop a tracked worker at the host boundary.
+    ///
+    /// Operator controls run in a separate process from the foreground Fleet
+    /// manager, so they communicate cancellation through the durable ledger.
+    /// The manager calls this method after observing that terminal state; the
+    /// executor is the only owner that can reliably reach the live local/SSH
+    /// adapter handle.
+    pub fn stop_worker(&mut self, worker_id: &str) -> Result<()> {
+        let ssh_key = match self.streams.get(worker_id).map(|stream| &stream.host) {
+            Some(WorkerStreamHost::Local) => None,
+            Some(WorkerStreamHost::Ssh(key)) => Some(key.clone()),
+            None => return Ok(()),
+        };
+        if let Some(key) = ssh_key {
+            let adapter = self.ssh_adapters.get_mut(&key).ok_or_else(|| {
+                anyhow::anyhow!("tracked SSH Fleet worker {worker_id} has no host adapter")
+            })?;
+            adapter.stop_worker(worker_id)?;
+        } else {
+            self.adapter.stop_worker(worker_id)?;
+        }
+        Ok(())
     }
 
     /// Stop tracking a terminal worker so the scheduler can reuse the same
@@ -367,10 +579,10 @@ impl FleetExecutor {
         let mut buf = Vec::new();
         if let Ok(read) = file.read_to_end(&mut buf) {
             stream.offset += read as u64;
-            stream.pending.push_str(&String::from_utf8_lossy(&buf));
-            while let Some(idx) = stream.pending.find('\n') {
-                let line: String = stream.pending.drain(..=idx).collect();
-                if let Some(event) = map_exec_stream_line(line.trim_end()) {
+            stream.pending.extend_from_slice(&buf);
+            while let Some(idx) = stream.pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = stream.pending.drain(..=idx).collect();
+                if let Some(event) = observe_worker_stream_line(&mut stream.terminal_route, &line) {
                     events.push(event);
                 }
             }
@@ -413,12 +625,32 @@ impl FleetExecutor {
                 classify_worker_exit(status.exit_code, false)
             }
         };
+        // Once status is terminal the worker can no longer append. Drain one
+        // final time before snapshotting route evidence so metadata written
+        // between the scheduler's ordinary drain and this status poll cannot
+        // be lost when the worker is forgotten.
+        let mut tail_payloads = self.drain_events(worker_id);
+        if let Some(stream) = self.streams.get_mut(worker_id) {
+            let trailing_line = std::mem::take(&mut stream.pending);
+            if trailing_line.iter().any(|byte| !byte.is_ascii_whitespace())
+                && let Some(payload) =
+                    observe_worker_stream_line(&mut stream.terminal_route, &trailing_line)
+            {
+                tail_payloads.push(payload);
+            }
+        }
         if let Some(stream) = self.streams.get_mut(worker_id) {
             stream.terminal = true;
         }
         Some(FleetWorkerTerminalEvent {
             payload: terminal,
             exit_code: status.exit_code,
+            tail_payloads,
+            reported_route: self
+                .streams
+                .get(worker_id)
+                .and_then(|stream| stream.terminal_route.reported_route().cloned()),
+            requires_reported_route: true,
         })
     }
 
@@ -493,6 +725,36 @@ mod tests {
         }
     }
 
+    fn track_test_stream(
+        executor: &mut FleetExecutor,
+        worker_id: &str,
+        log_path: std::path::PathBuf,
+    ) {
+        executor.streams.insert(
+            worker_id.to_string(),
+            WorkerStream {
+                log_path,
+                host: WorkerStreamHost::Local,
+                attempt: None,
+                offset: 0,
+                pending: Vec::new(),
+                terminal: false,
+                terminal_route: TerminalRouteEvidence::default(),
+            },
+        );
+    }
+
+    fn append_test_stream(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write as _;
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
     #[test]
     fn worker_command_is_a_headless_codewhale_exec_run() {
         let exec = FleetExecConfig::default();
@@ -517,6 +779,21 @@ mod tests {
             ..FleetExecConfig::default()
         };
         let cmd = build_worker_exec_command("codewhale", &task("audit"), &exec, Some("glm-5.1"));
+        let exec_idx = cmd
+            .args
+            .iter()
+            .position(|arg| arg == "exec")
+            .expect("worker command must contain exec");
+        let model_idx = cmd
+            .args
+            .iter()
+            .position(|arg| arg == "--model")
+            .expect("worker command must contain --model");
+        assert!(
+            model_idx < exec_idx,
+            "global --model must precede exec: {:?}",
+            cmd.args
+        );
         let joined = cmd.args.join(" ");
         assert!(joined.contains("--model glm-5.1"));
         assert!(joined.contains("--allowed-tools read_file,grep_files"));
@@ -581,10 +858,20 @@ mod tests {
             .iter()
             .position(|a| a == "--provider")
             .expect("--provider must be threaded for a provider-pinned worker");
+        let exec_idx = cmd
+            .args
+            .iter()
+            .position(|a| a == "exec")
+            .expect("worker command must contain exec");
         assert_eq!(
             cmd.args.get(provider_idx + 1).map(String::as_str),
             Some("openrouter"),
             "{:?}",
+            cmd.args
+        );
+        assert!(
+            provider_idx < exec_idx,
+            "global --provider must precede exec: {:?}",
             cmd.args
         );
         let model_idx = cmd
@@ -598,6 +885,11 @@ mod tests {
             "{:?}",
             cmd.args
         );
+        assert!(
+            model_idx < exec_idx,
+            "global --model must precede exec: {:?}",
+            cmd.args
+        );
         let reasoning_idx = cmd
             .args
             .iter()
@@ -607,6 +899,24 @@ mod tests {
             cmd.args.get(reasoning_idx + 1).map(String::as_str),
             Some("max"),
             "{:?}",
+            cmd.args
+        );
+        assert!(
+            reasoning_idx > exec_idx,
+            "exec-only --reasoning-effort must follow exec: {:?}",
+            cmd.args
+        );
+
+        assert_eq!(
+            &cmd.args[..exec_idx],
+            ["--model", "glm-5.2", "--provider", "openrouter"],
+            "route flags must form the complete global prefix: {:?}",
+            cmd.args
+        );
+        assert_eq!(
+            &cmd.args[exec_idx..exec_idx + 4],
+            ["exec", "--auto", "--output-format", "stream-json"],
+            "exec flags must remain behind the subcommand: {:?}",
             cmd.args
         );
 
@@ -647,6 +957,16 @@ mod tests {
             "{:?}",
             cmd.args
         );
+        let exec_idx = cmd
+            .args
+            .iter()
+            .position(|a| a == "exec")
+            .expect("worker command must contain exec");
+        assert!(
+            provider_idx < exec_idx,
+            "global --provider must precede exec: {:?}",
+            cmd.args
+        );
         let model_idx = cmd
             .args
             .iter()
@@ -656,6 +976,11 @@ mod tests {
             cmd.args.get(model_idx + 1).map(String::as_str),
             Some("qwen-2.5-7b"),
             "{:?}",
+            cmd.args
+        );
+        assert!(
+            model_idx < exec_idx,
+            "global --model must precede exec: {:?}",
             cmd.args
         );
     }
@@ -693,6 +1018,16 @@ mod tests {
             cmd.args.get(model_idx + 1).map(String::as_str),
             Some("deepseek-v4-pro"),
             "{:?}",
+            cmd.args
+        );
+        let exec_idx = cmd
+            .args
+            .iter()
+            .position(|a| a == "exec")
+            .expect("worker command must contain exec");
+        assert!(
+            model_idx < exec_idx,
+            "global --model must precede exec: {:?}",
             cmd.args
         );
     }
@@ -749,6 +1084,89 @@ mod tests {
         assert!(map_exec_stream_line(r#"{"type":"session_capture","content":"x"}"#).is_none());
         assert!(map_exec_stream_line("not json").is_none());
         assert!(map_exec_stream_line("").is_none());
+    }
+
+    #[test]
+    fn terminal_route_keeps_exact_literal_custom_distinct_from_idless_root_and_redacts() {
+        let exact = map_exec_terminal_route(
+            r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"custom","model":"literal-model","base_url":"https://must-not-cross.invalid/v1","api_key":"sk-must-not-cross"}}"#,
+        )
+        .expect("literal custom terminal route");
+        assert_eq!(exact.provider, "custom");
+        assert_eq!(exact.provider_exact_id.as_deref(), Some("custom"));
+        assert_eq!(exact.model, "literal-model");
+
+        let root = map_exec_terminal_route(
+            r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","model":"root-model"}}"#,
+        )
+        .expect("idless root custom terminal route");
+        assert_eq!(root.provider, "custom");
+        assert_eq!(root.provider_exact_id, None);
+        assert_eq!(root.model, "root-model");
+
+        let named = map_exec_terminal_route(
+            r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"lm-studio","model":"local-model"}}"#,
+        )
+        .expect("named custom terminal route");
+        assert_eq!(named.provider, "custom");
+        assert_eq!(named.provider_exact_id.as_deref(), Some("lm-studio"));
+        assert_eq!(named.model, "local-model");
+
+        let reported = format!("{exact:?}").to_ascii_lowercase();
+        for forbidden in ["base_url", "https://", "api_key", "sk-must-not-cross"] {
+            assert!(
+                !reported.contains(forbidden),
+                "allowlisted terminal route leaked {forbidden:?}: {reported}"
+            );
+        }
+
+        for malformed in [
+            r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"","model":"root-model"}}"#,
+            r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"   ","model":"root-model"}}"#,
+            r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":7,"model":"root-model"}}"#,
+            r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"deepseek","provider_id":"custom-x","model":"deepseek-v4-pro"}}"#,
+            r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"unknown-kind","model":"unknown-model"}}"#,
+        ] {
+            assert!(
+                map_exec_terminal_route(malformed).is_none(),
+                "malformed present exact id must not collapse to idless root: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_route_evidence_requires_exactly_one_valid_envelope() {
+        let route_x = r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"remote-x","model":"worker-model-x"}}"#;
+        let route_y = r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"remote-y","model":"worker-model-y"}}"#;
+        let malformed = r#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"","model":"worker-model-x"}}"#;
+        let noise = r#"{"type":"content","delta":"progress"}"#;
+
+        let observe = |lines: &[&str]| {
+            let mut evidence = TerminalRouteEvidence::default();
+            for line in lines {
+                evidence.observe(parse_exec_terminal_route(line));
+            }
+            evidence.reported_route().cloned()
+        };
+
+        let only = observe(&[noise, route_x]).expect("one valid route");
+        assert_eq!(only.provider_exact_id.as_deref(), Some("remote-x"));
+        assert!(
+            observe(&[route_x, malformed]).is_none(),
+            "valid then malformed must invalidate stale evidence"
+        );
+        assert!(
+            observe(&[malformed, route_x]).is_none(),
+            "malformed then valid must remain invalid"
+        );
+        assert!(
+            observe(&[route_x, route_y]).is_none(),
+            "conflicting valid routes must be ambiguous"
+        );
+        assert!(
+            observe(&[route_x, route_x]).is_none(),
+            "even identical duplicates violate the exactly-one contract"
+        );
     }
 
     #[test]
@@ -815,6 +1233,54 @@ mod tests {
         assert!(exec.all_terminal());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn terminal_poll_final_drains_route_metadata_and_tail_payloads() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut exec = FleetExecutor::new(tmp.path());
+        let script = r#"printf '%s\n' '{"type":"content","delta":"tail progress"}'; printf '%s' '{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"remote-x","model":"worker-model-x"}}'"#;
+        let command = FleetWorkerCommand::new("sh", vec!["-c".to_string(), script.to_string()]);
+        exec.start_worker("tail-worker", command, None).unwrap();
+
+        // Deliberately do not call the ordinary event drain. Poll only after
+        // exit, reproducing the scheduler gap where the previous poll saw EOF
+        // just before the worker wrote its terminal tail.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let terminal = exec
+            .poll_terminal_with_status("tail-worker")
+            .expect("terminal worker");
+        let route = terminal.reported_route.expect("final-drained route");
+        assert_eq!(route.provider, "custom");
+        assert_eq!(route.provider_exact_id.as_deref(), Some("remote-x"));
+        assert_eq!(route.model, "worker-model-x");
+        assert!(
+            terminal
+                .tail_payloads
+                .iter()
+                .any(|payload| matches!(payload, FleetWorkerEventPayload::Running))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_poll_trailing_malformed_route_invalidates_prior_valid_route() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut exec = FleetExecutor::new(tmp.path());
+        let script = r#"printf '%s\n' '{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"remote-x","model":"worker-model-x"}}'; printf '%s' '{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"","model":"worker-model-x"}}'"#;
+        let command = FleetWorkerCommand::new("sh", vec!["-c".to_string(), script.to_string()]);
+        exec.start_worker("ambiguous-tail-worker", command, None)
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let terminal = exec
+            .poll_terminal_with_status("ambiguous-tail-worker")
+            .expect("terminal worker");
+        assert!(
+            terminal.reported_route.is_none(),
+            "malformed trailing terminal evidence must invalidate the prior valid route"
+        );
+    }
+
     /// Dogfood smoke (#3166): several concurrent exec-style workers with one
     /// injected failure. Proves the executor drives a small fleet to terminal
     /// outcomes and that a failing worker is classified distinctly from the
@@ -874,6 +1340,100 @@ mod tests {
             matches!(terminals["w-fail"], FleetWorkerEventPayload::Failed { .. }),
             "injected-failure worker should fail, got {:?}",
             terminals["w-fail"]
+        );
+    }
+
+    #[test]
+    fn terminal_route_preserves_multibyte_identity_across_read_boundaries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log_path = tmp.path().join("split-utf8.jsonl");
+        std::fs::write(&log_path, []).unwrap();
+        let mut executor = FleetExecutor::new(tmp.path());
+        track_test_stream(&mut executor, "split-utf8", log_path.clone());
+
+        let provider_id = "深海鲸-供应商";
+        let model = "深潜-模型";
+        let line = format!(
+            "{{\"type\":\"metadata\",\"meta\":{{\"receipt_kind\":\"terminal\",\"provider\":\"custom\",\"provider_id\":\"{provider_id}\",\"model\":\"{model}\"}}}}\n"
+        );
+        let bytes = line.as_bytes();
+        let provider_start = bytes
+            .windows("鲸".len())
+            .position(|window| window == "鲸".as_bytes())
+            .unwrap();
+        let model_start = bytes
+            .windows("潜".len())
+            .position(|window| window == "潜".as_bytes())
+            .unwrap();
+        let provider_split = provider_start + 1;
+        let model_split = model_start + 2;
+
+        append_test_stream(&log_path, &bytes[..provider_split]);
+        assert!(executor.drain_events("split-utf8").is_empty());
+        append_test_stream(&log_path, &bytes[provider_split..model_split]);
+        assert!(executor.drain_events("split-utf8").is_empty());
+        append_test_stream(&log_path, &bytes[model_split..]);
+        assert!(executor.drain_events("split-utf8").is_empty());
+
+        let route = executor
+            .streams
+            .get("split-utf8")
+            .and_then(|stream| stream.terminal_route.reported_route())
+            .expect("one exact terminal route");
+        assert_eq!(route.provider, "custom");
+        assert_eq!(route.provider_exact_id.as_deref(), Some(provider_id));
+        assert_eq!(route.model, model);
+    }
+
+    #[test]
+    fn invalid_utf8_terminal_route_fails_closed_without_lossy_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log_path = tmp.path().join("invalid-utf8.jsonl");
+        let mut line = br#"{"type":"metadata","meta":{"receipt_kind":"terminal","provider":"custom","provider_id":"remote-x","model":"worker-model"}}"#.to_vec();
+        let invalid_at = line
+            .windows(b"remote-x".len())
+            .position(|window| window == b"remote-x")
+            .unwrap()
+            + 3;
+        line[invalid_at] = 0xff;
+        line.push(b'\n');
+        std::fs::write(&log_path, line).unwrap();
+
+        let mut executor = FleetExecutor::new(tmp.path());
+        track_test_stream(&mut executor, "invalid-utf8", log_path);
+        assert!(executor.drain_events("invalid-utf8").is_empty());
+        assert!(matches!(
+            executor
+                .streams
+                .get("invalid-utf8")
+                .map(|stream| &stream.terminal_route),
+            Some(TerminalRouteEvidence::InvalidOrAmbiguous)
+        ));
+    }
+
+    #[test]
+    fn invalid_utf8_nonterminal_line_cannot_synthesize_route_evidence() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log_path = tmp.path().join("invalid-nonterminal.jsonl");
+        let mut line = br#"{"type":"content","delta":"ordinary-output"}"#.to_vec();
+        let invalid_at = line
+            .windows(b"ordinary-output".len())
+            .position(|window| window == b"ordinary-output")
+            .unwrap()
+            + 4;
+        line[invalid_at] = 0xff;
+        line.push(b'\n');
+        std::fs::write(&log_path, line).unwrap();
+
+        let mut executor = FleetExecutor::new(tmp.path());
+        track_test_stream(&mut executor, "invalid-nonterminal", log_path);
+        assert!(executor.drain_events("invalid-nonterminal").is_empty());
+        assert!(
+            executor
+                .streams
+                .get("invalid-nonterminal")
+                .and_then(|stream| stream.terminal_route.reported_route())
+                .is_none()
         );
     }
 }

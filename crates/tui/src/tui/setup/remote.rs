@@ -22,9 +22,11 @@ impl SetupRemoteFacts {
             .map(|bridge| bridge.slug)
             .collect::<Vec<_>>();
         let provider_count = codewhale_config::ProviderKind::all().len();
-        let command_provider =
-            crate::remote_setup::bundle::ProviderInfo::from_slug(app.api_provider.as_str())
-                .map_or_else(|| "deepseek".to_string(), |provider| provider.slug);
+        // Keep the exact route identity. Named custom routes are not yet
+        // representable by the remote bundle registry, so the generated CLI
+        // command must fail explicitly for that name instead of silently
+        // substituting DeepSeek's endpoint and credential contract.
+        let command_provider = app.provider_identity_for_persistence().to_string();
 
         Self {
             clouds_result: format!(
@@ -39,7 +41,7 @@ impl SetupRemoteFacts {
             ),
             providers_result: format!(
                 "{provider_count} providers from the provider registry; active route {} / {}",
-                app.api_provider.as_str(),
+                app.provider_identity_for_persistence(),
                 app.model
             ),
             mode_result: format!(

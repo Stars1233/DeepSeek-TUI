@@ -15,5 +15,10 @@ Completion is unproven until you verify it against current-state evidence:
 4. Only when the full objective is satisfied, call `update_goal` with
    `status: "complete"` and concise evidence.
 
-If the goal cannot continue because of a real blocker, call `update_goal` with
-`status: "blocked"` and explain the blocker. Otherwise continue making progress.
+If the latest assistant response asked the user a question whose answer is
+required and no answer has arrived, do not continue past that confirmation
+gate. Call `update_goal` with `status: "blocked"` and identify the blocker as
+"waiting for user response."
+
+For any other blocker that prevents meaningful progress, call `update_goal`
+with `status: "blocked"` and explain it. Otherwise continue making progress.

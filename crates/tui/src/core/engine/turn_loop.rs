@@ -207,10 +207,10 @@ impl Engine {
     async fn drain_subagent_completion_events(&mut self, status_label: &str) -> usize {
         let mut completions: Vec<crate::tools::subagent::SubAgentCompletion> = Vec::new();
         while let Ok(completion) = self.rx_subagent_completion.try_recv() {
-            if self
-                .delivered_subagent_completion_ids
-                .insert(completion.agent_id.clone())
-            {
+            if let Some(completion) = super::claim_subagent_completion(
+                &mut self.delivered_subagent_completion_ids,
+                completion,
+            ) {
                 completions.push(completion);
             }
         }
@@ -220,13 +220,12 @@ impl Engine {
             manager.terminal_results_excluding(&self.delivered_subagent_completion_ids)
         };
         for result in synthesized {
-            if self
-                .delivered_subagent_completion_ids
-                .insert(result.agent_id.clone())
-            {
-                completions.push(crate::tools::subagent::subagent_completion_from_result(
-                    &result,
-                ));
+            let completion = crate::tools::subagent::subagent_completion_from_result(&result);
+            if let Some(completion) = super::claim_subagent_completion(
+                &mut self.delivered_subagent_completion_ids,
+                completion,
+            ) {
+                completions.push(completion);
             }
         }
 
@@ -266,7 +265,7 @@ impl Engine {
         // app-server, and stream-json stdout must remain byte-clean.
         if self.config.terminal_chrome_enabled {
             crate::tui::notifications::set_taskbar_progress_busy();
-            crate::tui::notifications::start_title_animation("CodeWhale");
+            crate::tui::notifications::start_title_animation("Codewhale");
         }
 
         let client = self
@@ -299,7 +298,6 @@ impl Engine {
                 .map(std::string::ToString::to_string),
         );
         let mut goal_continuations_this_turn = 0u32;
-
         // Outer stream-retry counter: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
         // Phase 3) or the host slept mid-turn (#2990), we silently re-issue
@@ -1628,18 +1626,7 @@ impl Engine {
                 // clobbered by it.
                 let mut hook_requires_approval = false;
 
-                if mode == AppMode::Plan
-                    && matches!(
-                        tool_name.as_str(),
-                        "exec_shell"
-                            | "exec_shell_wait"
-                            | "exec_shell_interact"
-                            | "exec_wait"
-                            | "exec_interact"
-                            | CODE_EXECUTION_TOOL_NAME
-                            | JS_EXECUTION_TOOL_NAME
-                    )
-                {
+                if mode_blocks_command_execution(mode, &tool_name) {
                     blocked_error = Some(ToolError::permission_denied(format!(
                         "'{tool_name}' is not available in Plan mode — switch to Act mode (`/mode act`) to run commands and code."
                     )));
@@ -1796,8 +1783,7 @@ impl Engine {
                 }
 
                 if blocked_error.is_none()
-                    && mode == AppMode::Plan
-                    && plan_mode_blocks_write_capable_tool(&tool_name, read_only)
+                    && mode_blocks_write_capable_tool(mode, &tool_name, read_only)
                 {
                     blocked_error = Some(ToolError::permission_denied(format!(
                         "'{tool_name}' is not available in Plan mode - switch to Act mode (`/mode act`) to modify files or run write-capable tools."
@@ -3021,9 +3007,24 @@ fn should_pre_tool_snapshot(
         && matches!(tool_name, "write_file" | "edit_file" | "apply_patch")
 }
 
-fn plan_mode_blocks_write_capable_tool(tool_name: &str, read_only: bool) -> bool {
-    matches!(tool_name, "write_file" | "edit_file" | "apply_patch")
-        || (McpPool::is_mcp_tool(tool_name) && !read_only)
+fn mode_blocks_command_execution(mode: AppMode, tool_name: &str) -> bool {
+    mode == AppMode::Plan
+        && matches!(
+            tool_name,
+            "exec_shell"
+                | "exec_shell_wait"
+                | "exec_shell_interact"
+                | "exec_wait"
+                | "exec_interact"
+                | CODE_EXECUTION_TOOL_NAME
+                | JS_EXECUTION_TOOL_NAME
+        )
+}
+
+fn mode_blocks_write_capable_tool(mode: AppMode, tool_name: &str, read_only: bool) -> bool {
+    mode == AppMode::Plan
+        && (matches!(tool_name, "write_file" | "edit_file" | "apply_patch")
+            || (McpPool::is_mcp_tool(tool_name) && !read_only))
 }
 
 /// Synthesize the tool result recorded for a tool call that never executed
@@ -3103,21 +3104,51 @@ mod pre_tool_snapshot_gate_tests {
     }
 
     #[test]
-    fn plan_mode_blocks_file_and_mcp_write_tools() {
-        for tool in ["write_file", "edit_file", "apply_patch"] {
-            assert!(plan_mode_blocks_write_capable_tool(tool, false));
+    fn plan_blocks_write_capable_tools_without_narrowing_operate() {
+        for tool in [
+            "exec_shell",
+            "exec_shell_wait",
+            "exec_shell_interact",
+            CODE_EXECUTION_TOOL_NAME,
+            JS_EXECUTION_TOOL_NAME,
+        ] {
+            assert!(mode_blocks_command_execution(AppMode::Plan, tool));
+            assert!(
+                !mode_blocks_command_execution(AppMode::Operate, tool),
+                "Operate must not add a mode-only command denial for {tool}"
+            );
         }
 
-        assert!(plan_mode_blocks_write_capable_tool(
+        for tool in ["write_file", "edit_file", "apply_patch"] {
+            assert!(mode_blocks_write_capable_tool(AppMode::Plan, tool, false));
+            assert!(
+                !mode_blocks_write_capable_tool(AppMode::Operate, tool, false),
+                "Operate must not add a mode-only write denial for {tool}"
+            );
+        }
+
+        assert!(mode_blocks_write_capable_tool(
+            AppMode::Plan,
             "mcp_filesystem_write",
             false
         ));
-        assert!(!plan_mode_blocks_write_capable_tool(
+        assert!(!mode_blocks_write_capable_tool(
+            AppMode::Operate,
+            "mcp_filesystem_write",
+            false
+        ));
+        assert!(!mode_blocks_write_capable_tool(
+            AppMode::Plan,
             "mcp_filesystem_read",
             true
         ));
-        assert!(!plan_mode_blocks_write_capable_tool("read_file", true));
-        assert!(!plan_mode_blocks_write_capable_tool(
+        assert!(!mode_blocks_write_capable_tool(
+            AppMode::Plan,
+            "read_file",
+            true
+        ));
+        assert!(!mode_blocks_write_capable_tool(
+            AppMode::Plan,
             "request_user_input",
             false
         ));

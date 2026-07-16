@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus};
+use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus, localized_whale_display_names};
 use crate::tui::app::{App, TaskPanelEntry, TaskPanelEntryKind};
 use crate::tui::history::{HistoryCell, ToolCell, ToolStatus};
 
@@ -16,7 +16,6 @@ pub(super) enum LiveWorkKind {
     Task,
     Run,
     Worker,
-    Workflow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,7 +51,6 @@ pub(super) struct LiveWorkCounts {
     pub tasks: usize,
     pub runs: usize,
     pub workers: usize,
-    pub workflows: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -65,6 +63,17 @@ impl LiveWorkProjection {
     #[must_use]
     pub(super) fn from_app(app: &App) -> Self {
         let mut by_identity = HashMap::new();
+        let cached_worker_ids = app
+            .subagent_cache
+            .iter()
+            .map(|agent| agent.agent_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let worker_display_names = localized_whale_display_names(
+            app.subagent_cache
+                .iter()
+                .map(|agent| (agent.agent_id.as_str(), agent.nickname.as_deref())),
+            app.ui_locale.tag(),
+        );
 
         for task in &app.task_panel {
             let (kind, identity) = if task.kind == TaskPanelEntryKind::Background {
@@ -131,9 +140,9 @@ impl LiveWorkProjection {
                 .map(worker_status)
                 .unwrap_or_else(|| subagent_status(&agent.status));
             let state = worker_state(agent.worker_status, &agent.status, status);
-            let name = agent
-                .nickname
-                .clone()
+            let name = worker_display_names
+                .get(&agent.agent_id)
+                .cloned()
                 .or_else(|| app.agent_label_map.get(&agent.agent_id).cloned())
                 .unwrap_or_else(|| agent.name.clone());
             insert_prefer_live(
@@ -148,11 +157,6 @@ impl LiveWorkProjection {
                 },
             );
         }
-        let cached_worker_ids = app
-            .subagent_cache
-            .iter()
-            .map(|agent| agent.agent_id.as_str())
-            .collect::<std::collections::HashSet<_>>();
         for (agent_id, progress) in &app.agent_progress {
             if cached_worker_ids.contains(agent_id.as_str()) {
                 continue;
@@ -179,25 +183,6 @@ impl LiveWorkProjection {
             );
         }
 
-        if let Some(panel) = app.workflow_panel.as_ref() {
-            let state = if panel.lifecycle.is_running() {
-                LiveWorkState::Active
-            } else {
-                LiveWorkState::Settled
-            };
-            insert_prefer_live(
-                &mut by_identity,
-                LiveWorkRow {
-                    identity: format!("workflow:{}", panel.run_id),
-                    kind: LiveWorkKind::Workflow,
-                    state,
-                    status: panel.lifecycle.label().to_string(),
-                    label: panel.label.clone(),
-                    detail: panel.run_id.clone(),
-                },
-            );
-        }
-
         let mut rows = by_identity.into_values().collect::<Vec<_>>();
         rows.sort_by(|left, right| {
             left.state
@@ -213,7 +198,6 @@ impl LiveWorkProjection {
                     LiveWorkKind::Task => counts.tasks += 1,
                     LiveWorkKind::Run => counts.runs += 1,
                     LiveWorkKind::Worker => counts.workers += 1,
-                    LiveWorkKind::Workflow => counts.workflows += 1,
                 }
             }
         }
@@ -312,6 +296,65 @@ fn subagent_status(status: &SubAgentStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::tools::subagent::{SubAgentAssignment, SubAgentResult, SubAgentType};
+    use crate::tui::app::TuiOptions;
+    use std::path::PathBuf;
+
+    fn test_app() -> App {
+        App::new(
+            TuiOptions {
+                model: "deepseek-v4-pro".to_string(),
+                workspace: PathBuf::from("."),
+                config_path: None,
+                config_profile: None,
+                allow_shell: false,
+                use_alt_screen: true,
+                use_mouse_capture: false,
+                use_bracketed_paste: true,
+                max_subagents: 4,
+                skills_dir: PathBuf::from("."),
+                memory_path: PathBuf::from("memory.md"),
+                notes_path: PathBuf::from("notes.txt"),
+                mcp_config_path: PathBuf::from("mcp.json"),
+                use_memory: false,
+                start_in_agent_mode: false,
+                skip_onboarding: true,
+                yolo: false,
+                resume_session_id: None,
+                initial_input: None,
+            },
+            &Config::default(),
+        )
+    }
+
+    fn cached_agent(agent_id: &str, nickname: &str) -> SubAgentResult {
+        SubAgentResult {
+            name: agent_id.to_string(),
+            agent_id: agent_id.to_string(),
+            context_mode: "fresh".to_string(),
+            fork_context: false,
+            workspace: None,
+            git_branch: None,
+            agent_type: SubAgentType::General,
+            assignment: SubAgentAssignment {
+                objective: "task".to_string(),
+                role: Some("worker".to_string()),
+            },
+            model: "deepseek-v4-pro".to_string(),
+            nickname: Some(nickname.to_string()),
+            status: SubAgentStatus::Running,
+            worker_status: None,
+            parent_run_id: None,
+            spawn_depth: 0,
+            result: None,
+            steps_taken: 1,
+            checkpoint: None,
+            needs_input: None,
+            duration_ms: 100,
+            from_prior_session: true,
+        }
+    }
 
     #[test]
     fn three_live_shell_runs_are_three_runs_not_one_task() {
@@ -343,5 +386,46 @@ mod tests {
             .count();
         assert_eq!(runs, 3);
         assert_ne!(format!("Tasks {}", 1), format!("Runs {runs}"));
+    }
+
+    #[test]
+    fn english_fleet_strip_relocalizes_mixed_persisted_whale_names() {
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::En;
+        app.subagent_cache = [
+            ("agent_strip_a", "zh-Hans"),
+            ("agent_strip_b", "ja"),
+            ("agent_strip_c", "vi"),
+        ]
+        .into_iter()
+        .map(|(agent_id, legacy_locale)| {
+            let legacy_name =
+                crate::tools::subagent::whale_name_for_id_in_locale(agent_id, legacy_locale);
+            cached_agent(agent_id, &legacy_name)
+        })
+        .collect();
+
+        let projection = LiveWorkProjection::from_app(&app);
+        let workers = projection
+            .rows
+            .iter()
+            .filter(|row| row.kind == LiveWorkKind::Worker)
+            .collect::<Vec<_>>();
+        assert_eq!(workers.len(), 3);
+        for row in workers {
+            let display = row.label.split(" · ").next().expect("worker display");
+            assert!(
+                display.is_ascii(),
+                "English Fleet strip leaked a prior-locale whale: {display}"
+            );
+            let agent_id = row
+                .identity
+                .strip_prefix("worker:")
+                .expect("worker identity");
+            assert_eq!(
+                display,
+                crate::tools::subagent::whale_name_for_id_in_locale(agent_id, "en")
+            );
+        }
     }
 }

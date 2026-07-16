@@ -271,6 +271,9 @@ web_search = true
     h.wait_for_text("Choose your language", BOOT_TIMEOUT)?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Trust Workspace", BOOT_TIMEOUT)?;
+    h.wait_for_text("Press 1/Y to trust and continue", BOOT_TIMEOUT)?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("Press 1 or Y to trust this workspace", BOOT_TIMEOUT)?;
     h.send(keys::key::ch('2'))?;
     assert_eq!(h.wait_for_exit(KEY_TIMEOUT), Some(0));
     Ok(())
@@ -499,7 +502,8 @@ fn work_surface_real_rows_own_click_wheel_resize_and_stop_confirm() -> anyhow::R
 
     // A live bang shell projects a real stoppable run row. Arm and accept the
     // rendered row-local Stop control using its actual post-resize coordinates.
-    h.send(keys::key::text("! echo CWQA_STOP_ROW; sleep 30"))?;
+    h.paste("! echo CWQA_STOP_ROW; sleep 30")?;
+    h.wait_for_text("CWQA_STOP_ROW", KEY_TIMEOUT)?;
     h.wait_for_idle(Duration::from_millis(100), Duration::from_secs(2))?;
     h.send(keys::key::enter())?;
     h.wait_for_text("run running", KEY_TIMEOUT)?;
@@ -542,8 +546,7 @@ fn work_surface_real_rows_own_click_wheel_resize_and_stop_confirm() -> anyhow::R
 }
 
 #[test]
-fn approval_modal_real_rows_survive_wheel_resize_and_deny_without_side_effect() -> anyhow::Result<()>
-{
+fn approval_modal_keeps_wheel_for_review_and_denies_without_side_effect() -> anyhow::Result<()> {
     let _guard = qa_pty_test_lock();
     let (base_url, server) = spawn_approval_fixture_server()?;
     let ws = make_sealed_workspace()?;
@@ -567,9 +570,12 @@ fn approval_modal_real_rows_survive_wheel_resize_and_deny_without_side_effect() 
         .spawn()?;
     enter_launch_session(&mut h)?;
 
-    h.send(keys::key::text(
-        "Request the fixture write_file call; do not change its arguments.",
-    ))?;
+    let prompt = "Request the fixture write_file call; do not change its arguments.";
+    // This is a whole prompt, not simulated human typing. Send it as the
+    // bracketed paste a real terminal would emit so the raw-key paste-burst
+    // heuristic cannot absorb the following Enter as a pasted newline.
+    h.paste(prompt)?;
+    h.wait_for_text(prompt, KEY_TIMEOUT)?;
     h.wait_for_idle(Duration::from_millis(100), Duration::from_secs(2))?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Approve once", Duration::from_secs(10))?;
@@ -579,8 +585,10 @@ fn approval_modal_real_rows_survive_wheel_resize_and_deny_without_side_effect() 
         .frame()
         .find_text("Deny this call")
         .expect("rendered denial option");
+    h.send(keys::key::page_up())?;
+    h.wait_for_text("❯ [1 / y]", KEY_TIMEOUT)?;
     h.send(keys::mouse::wheel_down(deny_row, deny_col))?;
-    h.wait_for_text("❯ [2 / a]", KEY_TIMEOUT)?;
+    h.wait_for_text("❯ [1 / y]", KEY_TIMEOUT)?;
     h.resize(24, 80)?;
     h.wait_for(
         |frame| frame.rows() == 24 && frame.cols() == 80,
@@ -593,6 +601,9 @@ fn approval_modal_real_rows_survive_wheel_resize_and_deny_without_side_effect() 
         .find_text("Deny this call")
         .expect("denial option survived resize");
     h.send(keys::mouse::wheel_down(deny_row, deny_col))?;
+    h.wait_for_text("❯ [1 / y]", KEY_TIMEOUT)?;
+    h.send(keys::key::down())?;
+    h.send(keys::key::down())?;
     h.wait_for_text("❯ [3 / d / n]", KEY_TIMEOUT)?;
     h.send(keys::mouse::click(deny_row, deny_col))?;
     if let Err(err) = h.wait_for_text("DENIAL-HONORED", Duration::from_secs(10)) {
@@ -624,7 +635,7 @@ fn approval_modal_real_rows_survive_wheel_resize_and_deny_without_side_effect() 
 fn work_and_permission_are_visible_at_release_terminal_sizes() -> anyhow::Result<()> {
     let _guard = qa_pty_test_lock();
 
-    for (cols, rows) in [(120_u16, 32_u16), (100, 30), (80, 24)] {
+    for (cols, rows) in [(120_u16, 32_u16), (100, 30), (80, 24), (60, 16), (40, 12)] {
         let ws = make_sealed_workspace()?;
         let codewhale_home = ws.home().join(".codewhale");
         let codex_home = ws.home().join(".codex");

@@ -14,18 +14,22 @@ Current packaging note:
   - `codewhale-tui`
   - `codewhale-cli`
 - Supporting crates published from this workspace:
-  - `codewhale-secrets`
-  - `codewhale-config`
+  - `codewhale-build-support`
+  - `codewhale-mcp`
   - `codewhale-protocol`
+  - `codewhale-release`
+  - `codewhale-secrets`
   - `codewhale-state`
-  - `codewhale-agent`
+  - `codewhale-workflow`
+  - `codewhale-workflow-js`
   - `codewhale-execpolicy`
   - `codewhale-hooks`
-  - `codewhale-mcp`
   - `codewhale-tools`
+  - `codewhale-config`
+  - `codewhale-lane`
+  - `codewhale-agent`
   - `codewhale-core`
   - `codewhale-app-server`
-  - `codewhale-workflow`
 
 ## Version Coordination
 
@@ -187,25 +191,39 @@ and fails branch-only release sources before assets are published.
 3. Merge the release PR into `main` before tagging. After the same-version
    queue is frozen and `main` is at the intended source SHA, create `vX.Y.Z`
    from `main` with the manual **Create release tag** workflow or with a signed
-   local tag push from a developer machine. See the npm wrapper release section
-   below for the `RELEASE_TAG_PAT` / manual release dispatch caveat.
-4. Publish crates in this order with `./scripts/release/publish-crates.sh publish`:
-   - `codewhale-mcp`
-   - `codewhale-protocol`
-   - `codewhale-release`
-   - `codewhale-secrets`
-   - `codewhale-state`
-   - `codewhale-workflow`
-   - `codewhale-execpolicy`
-   - `codewhale-hooks`
-   - `codewhale-tools`
-   - `codewhale-config`
-   - `codewhale-agent`
-   - `codewhale-tui`
-   - `codewhale-core`
-   - `codewhale-app-server`
-   - `codewhale-cli`
-5. Wait for each published crate version to appear on crates.io before publishing dependents.
+   local tag push from a developer machine.
+   - If `RELEASE_TAG_PAT` is configured, the tag push starts `release.yml`.
+   - If no Release run appears and the tag already exists, first confirm that
+     no tag-triggered run is queued or active, then dispatch the exact tag:
+     `gh workflow run release.yml --ref vX.Y.Z -f version=X.Y.Z`.
+   - Never dispatch from `main`, and do not start a duplicate while the
+     tag-triggered run is merely delayed. The workflow serializes runs for the
+     same tag, but a duplicate still rebuilds public artifacts unnecessarily.
+4. Wait for the GitHub Release workflow and all public assets to finish, then
+   fetch the release tag and run the public asset gate. Do not publish any
+   Cargo or npm package until it passes:
+
+   ```bash
+   git fetch --force origin +refs/tags/vX.Y.Z:refs/tags/vX.Y.Z
+   ./scripts/release/verify-release-assets.sh X.Y.Z
+   ```
+
+5. Create a clean detached checkout of the immutable release tag, then publish
+   the Rust crates from that checkout only:
+
+   ```bash
+   git worktree add --detach ../codewhale-release-vX.Y.Z vX.Y.Z
+   cd ../codewhale-release-vX.Y.Z
+   ./scripts/release/require-release-tag-checkout.sh X.Y.Z
+   ./scripts/release/publish-crates.sh publish
+   ```
+
+   Both Cargo and npm publication fail closed unless `HEAD`, the clean local
+   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative 18-crate
+   dependency order lives in `scripts/release/crates.sh`; do not maintain a
+   second handwritten order in this runbook. The helper waits for each new
+   version to appear on crates.io before moving to dependents and safely skips
+   versions that are already public on a rerun.
 
 The publish helper is idempotent for reruns: already-published crate versions are skipped.
 
@@ -213,14 +231,16 @@ The publish helper is idempotent for reruns: already-published crate versions ar
 
 `.github/workflows/release.yml` builds these binaries:
 
-- `codewhale-*` CLI binaries for Linux x64/arm64, macOS x64/arm64, and Windows x64
+- `codewhale-*` CLI binaries for Linux x64/arm64, Android arm64, macOS
+  x64/arm64, and Windows x64
 - `codewhale-tui-*` TUI binaries for the same target matrix
 - `codew-*` shortcut binaries for the same target matrix
 - `codewhale.bat` for the Windows npm launcher
+- platform `.tar.gz` / `.zip` archives and `CodeWhaleSetup.exe`
 
-The release job also uploads `codewhale-artifacts-sha256.txt`. The npm installer and
-release verification script both depend on that checksum manifest. The
-authoritative npm-facing asset list lives in
+The release job also uploads `codewhale-artifacts-sha256.txt` and
+`codewhale-bundles-sha256.txt`. The npm installer and release verification
+script depend on those manifests. The authoritative release asset list lives in
 `npm/codewhale/scripts/artifacts.js`.
 
 Before any Cargo or npm publish, prove that the public GitHub Release assets
@@ -233,10 +253,10 @@ belong to the tag commit you are publishing:
 That gate compares the local and remote `vX.Y.Z` tag SHAs, confirms a
 successful `Release` workflow run used that SHA, then runs the npm wrapper's
 release check against the public GitHub asset URLs. The npm check fails if the
-release is missing an npm-facing asset, the checksum manifest omits a required
-binary, or the assets predate the matching release workflow run. If the command
-fails, rerun or repair `release.yml`; do not publish Cargo or npm against stale
-assets.
+release is missing a required binary, archive, installer, or manifest; either
+manifest omits a required row; or the assets predate the matching release
+workflow run. If the command fails, rerun or repair `release.yml`; do not
+publish Cargo or npm against stale assets.
 
 ## npm Wrapper Release
 
@@ -253,9 +273,10 @@ on a workstation with `npm login` and an authenticator app.
 3. Push the version bump to `main`. After the release source is frozen, create
    the matching `vX.Y.Z` tag from `main`; `release.yml` then builds the binary
    matrix and drafts the GitHub Release.
-4. **Wait for the GitHub Release to finalize** with the full npm-facing binary
-   matrix plus `codewhale-artifacts-sha256.txt`. The npm `prepublishOnly` hook
-   (`scripts/verify-release-assets.js`) requires every asset to be present.
+4. **Wait for the GitHub Release to finalize** with the full binary and archive
+   matrix, Windows installer, and both checksum manifests. The npm
+   `prepublishOnly` hook (`scripts/verify-release-assets.js`) requires every
+   asset to be present.
 5. Run the public asset freshness gate from the repo root:
 
 ```bash
@@ -264,9 +285,15 @@ on a workstation with `npm login` and an authenticator app.
 
 For a rare packaging-only npm release where the npm package version intentionally
 points at older Rust binaries, add `--allow-npm-binary-mismatch` and keep the
-release notes explicit that no new binary version shipped.
+release notes explicit that no new binary version shipped. Carry the same
+explicit exception through the publish command with
+`CODEWHALE_ALLOW_NPM_BINARY_MISMATCH=1 npm publish --access public`; the exact
+tag/clean-checkout guard still applies.
 
-6. From a developer machine, confirm npm auth and publish the wrapper manually:
+6. From the same clean detached `vX.Y.Z` worktree used above (or a newly
+   created one), confirm npm auth and publish the wrapper manually. The
+   `prepublishOnly` hook rejects a branch-ahead or dirty checkout before the
+   registry write:
 
 ```bash
 npm whoami
@@ -316,9 +343,9 @@ it** before declaring the release shipped:
 git ls-remote https://cnb.cool/codewhale.net/codewhale.git refs/tags/vX.Y.Z
 ```
 
-If the workflow failed for the release tag, the manual fallback is
-documented in [docs/CNB_MIRROR.md](CNB_MIRROR.md) (one-time `git
-remote add cnb …`, then `git push cnb vX.Y.Z`).
+If the workflow failed for the release tag, use the exact-tag rerun or
+`workflow_dispatch --ref vX.Y.Z` recovery documented in
+[docs/CNB_MIRROR.md](CNB_MIRROR.md#manual-fallback).
 
 ## Recovery and Rollback
 
@@ -348,5 +375,7 @@ remote add cnb …`, then `git push cnb vX.Y.Z`).
   - publish a new npm version with corrected metadata or install logic
 - CNB mirror failed for the release tag:
   - check the run via `gh run list --workflow=sync-cnb.yml`
-  - retrigger with `gh workflow run sync-cnb.yml`, or push the tag
-    manually per [docs/CNB_MIRROR.md](CNB_MIRROR.md#manual-fallback)
+  - rerun the failed tag run, or dispatch
+    `gh workflow run sync-cnb.yml --ref vX.Y.Z`; never omit the tag ref
+  - follow the proof steps in
+    [docs/CNB_MIRROR.md](CNB_MIRROR.md#manual-fallback)

@@ -2,6 +2,7 @@
 name = "codewhale-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Agentic terminal facade for open-source and open-weight coding models"
@@ -19,16 +20,16 @@ path = "src/bin/codew_legacy_shim.rs"
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-codewhale-agent = { path = "../agent", version = "0.8.68" }
-codewhale-app-server = { path = "../app-server", version = "0.8.68" }
-codewhale-config = { path = "../config", version = "0.8.68" }
-codewhale-lane = { path = "../lane", version = "0.8.68" }
-codewhale-workflow = { path = "../workflow", version = "0.8.68" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.8.68" }
-codewhale-mcp = { path = "../mcp", version = "0.8.68" }
-codewhale-release = { path = "../release", version = "0.8.68" }
-codewhale-secrets = { path = "../secrets", version = "0.8.68" }
-codewhale-state = { path = "../state", version = "0.8.68" }
+codewhale-agent = { path = "../agent", version = "0.9.0" }
+codewhale-app-server = { path = "../app-server", version = "0.9.0" }
+codewhale-config = { path = "../config", version = "0.9.0" }
+codewhale-lane = { path = "../lane", version = "0.9.0" }
+codewhale-workflow = { path = "../workflow", version = "0.9.0" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.0" }
+codewhale-mcp = { path = "../mcp", version = "0.9.0" }
+codewhale-release = { path = "../release", version = "0.9.0" }
+codewhale-secrets = { path = "../secrets", version = "0.9.0" }
+codewhale-state = { path = "../state", version = "0.9.0" }
 chrono.workspace = true
 dirs.workspace = true
 serde.workspace = true
@@ -43,7 +44,7 @@ tempfile.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-codewhale-build-support = { path = "../build-support", version = "0.8.68" }
+codewhale-build-support = { path = "../build-support", version = "0.9.0" }
 
 # Parent-death cleanup for delegated server children (#3259): on Linux the
 # dispatcher sets PR_SET_PDEATHSIG so the child is signalled if the dispatcher

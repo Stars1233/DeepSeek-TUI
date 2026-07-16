@@ -534,6 +534,7 @@ fn cache_command_renders_recorded_turns_with_ratio() {
     // Three turns: 75% hit, 50% hit, miss-only (provider didn't report hit).
     app.push_turn_cache_record(TurnCacheRecord {
         provider: Some(crate::config::ApiProvider::Deepseek),
+        provider_identity: Some("deepseek".to_string()),
         model: Some("deepseek-v4-pro".to_string()),
         auto_model: true,
         input_tokens: 4_000,
@@ -545,6 +546,7 @@ fn cache_command_renders_recorded_turns_with_ratio() {
     });
     app.push_turn_cache_record(TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 6_000,
@@ -558,6 +560,7 @@ fn cache_command_renders_recorded_turns_with_ratio() {
     // infer miss = input − hit and mark with `*`.
     app.push_turn_cache_record(TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 5_000,
@@ -570,6 +573,7 @@ fn cache_command_renders_recorded_turns_with_ratio() {
     // Turn 4: no telemetry at all — must not pollute aggregate ratios.
     app.push_turn_cache_record(TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 1_000,
@@ -613,6 +617,7 @@ fn cache_command_replays_reported_1177_low_hit_fixture() {
     ] {
         app.push_turn_cache_record(TurnCacheRecord {
             provider: None,
+            provider_identity: None,
             model: None,
             auto_model: false,
             input_tokens: input,
@@ -641,6 +646,7 @@ fn cache_command_count_argument_clamps_to_history() {
     for _ in 0..3 {
         app.push_turn_cache_record(TurnCacheRecord {
             provider: None,
+            provider_identity: None,
             model: None,
             auto_model: false,
             input_tokens: 1_000,
@@ -663,6 +669,7 @@ fn turn_cache_history_is_capped_at_50() {
     for i in 0..(crate::tui::app::App::TURN_CACHE_HISTORY_CAP + 12) {
         app.push_turn_cache_record(TurnCacheRecord {
             provider: None,
+            provider_identity: None,
             model: None,
             auto_model: false,
             input_tokens: i as u32,
@@ -1341,6 +1348,7 @@ fn cache_stats_shows_cache_hit_summary() {
 
     app.push_turn_cache_record(TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 10_000,
@@ -1352,6 +1360,7 @@ fn cache_stats_shows_cache_hit_summary() {
     });
     app.push_turn_cache_record(TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 5_000,
@@ -1380,6 +1389,7 @@ fn cache_stats_low_hit_rate_shows_note() {
 
     app.push_turn_cache_record(TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 10_000,
@@ -1413,6 +1423,7 @@ fn cache_stats_flags_reported_1747_low_hit_fixture() {
     // hit=21,356,928, miss=8,470,281, output=165,624.
     app.push_turn_cache_record(TurnCacheRecord {
         provider: None,
+        provider_identity: None,
         model: None,
         auto_model: false,
         input_tokens: 29_827_209,

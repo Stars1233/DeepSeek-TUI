@@ -1555,11 +1555,26 @@ fn turn_route_lines(app: &App) -> Vec<String> {
         .as_ref()
         .and_then(|turn| turn.route.as_ref())
     {
-        (route.provider.display_name(), route.model.clone())
+        let provider = if route.provider == crate::config::ApiProvider::Custom {
+            route.provider_identity.clone()
+        } else {
+            route.provider.display_name().to_string()
+        };
+        (provider, route.model.clone())
     } else if let Some((provider, model, _auto_model)) = app.pending_turn_route.as_ref() {
-        (provider.display_name(), model.clone())
+        let provider = if *provider == crate::config::ApiProvider::Custom {
+            app.provider_identity_for_persistence().to_string()
+        } else {
+            provider.display_name().to_string()
+        };
+        (provider, model.clone())
     } else {
-        (app.api_provider.display_name(), app.model.clone())
+        let provider = if app.api_provider == crate::config::ApiProvider::Custom {
+            app.provider_identity_for_persistence().to_string()
+        } else {
+            app.api_provider.display_name().to_string()
+        };
+        (provider, app.model.clone())
     };
     lines.push(format!("Route: {provider} · {model}"));
 

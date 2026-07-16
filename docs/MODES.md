@@ -11,7 +11,7 @@ Model selection is separate. `--model auto` and `/model auto` route each turn to
 a concrete model and thinking level; they are not TUI modes and are not part of
 the `Tab` cycle.
 
-Workflow is also separate from the `Tab` mode cycle. It is the visible
+Workflow is also separate from the mode itself. It is the visible
 continuous-work layer for repeatable workflows and fleet workers. High fan-out
 routes through durable Fleet-backed workers instead of prompt-only sub-agent
 fanout. The active mode
@@ -22,8 +22,7 @@ into a resumable workflow with its own progress view.
 
 Press `Tab` to complete composer menus, queue a draft as a next-turn follow-up
 while a turn is running, or cycle through the visible modes when the composer is
-otherwise idle: **Plan ↔ Act**. Operate is an explicit preview entry in the
-mode picker while its Workflow control surface is still being built.
+otherwise idle: **Plan → Act → Operate → Plan**.
 Press `Shift+Tab` to cycle permission posture (Ask → Auto-Review → Full Access).
 Press `Ctrl+T` to cycle reasoning effort.
 Run `/mode` to open the mode picker, or switch directly with `/mode act`,
@@ -31,7 +30,7 @@ Run `/mode` to open the mode picker, or switch directly with `/mode act`,
 
 - **Plan**: design-first prompting. Read-only investigation tools stay available; shell and patch execution stay off. Use this when you want to think out loud and produce a plan to hand to a human (yourself later, or a reviewer).
 - **Act** (Agent): multi-step tool use. In interactive TUI sessions, shell tools (`exec_shell`, `task_shell_start`, `task_shell_wait`) are available by default and approval prompts gate each call. Set top-level `allow_shell = false` to hide shell tools for a workspace/profile. File writes are allowed without a prompt.
-- **Operate (preview)**: conductor posture — prefer Fleet roster + `/workflow` orchestration over solo inline tool chains; delegate by default. Select it explicitly; it is not in the `Tab` cycle yet.
+- **Operate**: multitask conductor posture. Send ordinary messages and use the same direct tools, shell configuration, sandbox, approval posture, ask-rules, and repository protections as Act. Codewhale prefers Fleet workers for independent, parallel, background, or long-running work, but delegation is not mandatory. New messages can start additional lanes while workers continue. Workflow is optional and reserved for work that needs ordered phases, gates, shared budgets, or deterministic fan-in.
 
 **Act** is accepted as an alias for Agent mode. Saved settings still normalize to `agent` for backward compatibility.
 
@@ -40,12 +39,17 @@ Run `/mode` to open the mode picker, or switch directly with `/mode act`,
 | Tool family | Plan | Act | Operate |
 |:---|:---:|:---:|:---:|
 | Read-only file, search, and diagnostic tools | yes | yes | yes |
-| File write and patch tools | no | yes | yes |
-| Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | approval-gated by default, hidden when `allow_shell = false` | yes |
-| Paid or external-service tools | approval-gated | approval-gated | auto-approved |
-| Access outside the workspace root | no | only with trust mode | yes |
+| File write and patch tools | no | yes | yes; same active posture and protections as Act |
+| Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | approval-gated by default, hidden when `allow_shell = false` | same as Act; delegation is preferred when parallelism or isolation helps |
+| Paid or external-service tools | follows approval posture | follows approval posture | follows approval posture |
+| Access outside the workspace root | explicit trusted paths only | only through trusted paths or trust mode | same trusted-path/trust policy as Act; Fleet profiles never widen it |
 
-If a shell tool is missing from the model-visible catalog in Agent mode, check
+Operate changes scheduling emphasis, not authority. It neither adds a
+mode-specific tool denial nor bypasses the active approval, sandbox, shell,
+ask-rule, repository-law, or managed-policy boundary. Plan remains the
+mode-specific read-only boundary for shell and write-capable tools.
+
+If a shell tool is missing from the model-visible catalog in Act or Operate, check
 for an explicit `allow_shell = false` in the active config/profile or runtime
 session. Durable tasks and automation keep conservative omitted-field defaults;
 they only receive shell access when their task settings explicitly grant it.
@@ -72,7 +76,7 @@ only controls model and thinking selection.
 Workflow builds on the same separation: a goal can ask the agent to keep
 working, while Workflow supplies the repeatable workflow/progress surface for
 large fanout. In the UI, a Workflow run should be shown as an overlay on the
-main screen, not as another mode beside Plan, Act, and the Operate preview.
+main screen, not as another mode beside Plan, Act, and Operate.
 
 App-server clients can persist a thread-scoped goal with `thread/goal/set`, read
 it with `thread/goal/get`, and clear it with `thread/goal/clear`. That persisted

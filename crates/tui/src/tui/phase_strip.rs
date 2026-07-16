@@ -169,9 +169,19 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     }
 
     if tier != ShellTier::Compact
-        && phase != ShellPhase::Done
         && let Some(toast) = status_toast.filter(|toast| {
-            !toast.text.trim().is_empty() && toast.text.trim() != phase_label.as_ref()
+            // Completion may land in the same event drain as an approval
+            // denial. Keep unresolved attention/error receipts visible after
+            // `done`; only routine informational completion copy yields to the
+            // stable done marker.
+            let survives_completion = matches!(
+                toast.level,
+                crate::tui::app::StatusToastLevel::Warning
+                    | crate::tui::app::StatusToastLevel::Error
+            );
+            (phase != ShellPhase::Done || survives_completion)
+                && !toast.text.trim().is_empty()
+                && toast.text.trim() != phase_label.as_ref()
         })
     {
         left.push(Span::styled(
@@ -374,6 +384,36 @@ mod tests {
         assert!(
             !text.contains("Alt+?") && !text.contains("F1:"),
             "live phase strip stays quiet: {text}"
+        );
+    }
+
+    #[test]
+    fn completed_band_keeps_unresolved_warning_visible() {
+        let mut app = test_app();
+        app.runtime_turn_status = Some("completed".to_string());
+        app.push_status_toast(
+            "Auto-denied exec_shell: denied earlier; restart Codewhale",
+            crate::tui::app::StatusToastLevel::Warning,
+            Some(12_000),
+        );
+
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render(frame.area(), frame.buffer_mut(), &mut app))
+            .expect("draw");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("done"), "completion phase missing: {text}");
+        assert!(
+            text.contains("Auto-denied exec_shell"),
+            "completion hid unresolved warning: {text}"
         );
     }
 }

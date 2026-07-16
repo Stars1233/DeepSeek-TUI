@@ -258,6 +258,10 @@ pub struct PermissionSpec {
     pub allow_write: bool,
     #[serde(default)]
     pub allow_network: bool,
+    /// Expose no tools to the child. This is distinct from an empty
+    /// `allowed_tools` list, which preserves the role's default tool surface.
+    #[serde(default)]
+    pub deny_all_tools: bool,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
     #[serde(default)]
@@ -541,13 +545,13 @@ impl IsolationMode {
 
 /// A leaf is write-capable when it can mutate the workspace.
 ///
-/// Used by workflow lowering to decide the default isolation for parallel
-/// children (#4120).
+/// Authority comes from the declared mode and permissions, not the agent's
+/// role identity. In particular, an implementer may be deliberately confined
+/// to a read-only verification task. Used by workflow lowering to decide the
+/// default isolation for parallel children (#4120).
 #[must_use]
 pub fn leaf_is_write_capable(spec: &LeafSpec) -> bool {
-    spec.mode == TaskMode::ReadWrite
-        || spec.permissions.allow_write
-        || matches!(spec.agent_type, AgentType::Implementer)
+    spec.mode == TaskMode::ReadWrite || spec.permissions.allow_write
 }
 
 /// Effective worktree flag for a leaf given whether it is being lowered inside
@@ -2505,6 +2509,18 @@ mod tests {
         assert!(!leaf_is_write_capable(&read_only));
         assert!(!leaf_wants_worktree(&read_only, true));
 
+        let mut read_only_implementer = read_only.clone();
+        read_only_implementer.id = "ro-implementer".to_string();
+        read_only_implementer.agent_type = AgentType::Implementer;
+        assert!(
+            !leaf_is_write_capable(&read_only_implementer),
+            "role identity must not grant write authority"
+        );
+        assert!(
+            !leaf_wants_worktree(&read_only_implementer, true),
+            "parallel read-only implementers stay shared under auto isolation"
+        );
+
         let mut write = read_only.clone();
         write.id = "rw".to_string();
         write.mode = TaskMode::ReadWrite;
@@ -2564,6 +2580,7 @@ mod tests {
             permissions: PermissionSpec {
                 allow_write: false,
                 allow_network: false,
+                deny_all_tools: false,
                 allowed_tools: vec!["rg".to_string()],
                 file_scope: vec!["README.md".to_string()],
             },
@@ -2636,6 +2653,7 @@ mod tests {
                             permissions: PermissionSpec {
                                 allow_write: true,
                                 allow_network: false,
+                                deny_all_tools: false,
                                 allowed_tools: Vec::new(),
                                 file_scope: vec!["README.md".to_string()],
                             },
