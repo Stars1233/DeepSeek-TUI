@@ -14,11 +14,13 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,12 +28,17 @@ use serde_json::Value;
 pub const GROK_OIDC_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 /// Default issuer / authorization server.
 pub const XAI_OIDC_ISSUER: &str = "https://auth.x.ai";
-/// Scopes requested by device-code login (matches Grok CLI surface).
-pub const DEFAULT_SCOPES: &str =
-    "openid profile email offline_access api:access grok-cli:access team:read";
+/// User-principal scopes requested by device-code login.
+///
+/// Although xAI advertises `team:read` in discovery metadata, its device-code
+/// endpoint rejects that scope for User principals. Keep team enrichment out of
+/// the user-principal login request.
+pub const DEFAULT_SCOPES: &str = "openid profile email offline_access api:access grok-cli:access";
 const REFRESH_SKEW_SECS: i64 = 60;
 const DEVICE_POLL_DEFAULT_SECS: u64 = 5;
 const DEVICE_POLL_MAX_SECS: u64 = 900;
+const OAUTH_RESPONSE_BODY_LIMIT: u64 = 64 * 1024;
+const OAUTH_ERROR_DETAIL_LIMIT: usize = 256;
 
 /// One entry in `~/.grok/auth.json` (map key = `{issuer}::{client_id}`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,19 +69,41 @@ struct TokenResponse {
     refresh_token: Option<String>,
     expires_in: Option<u64>,
     error: Option<String>,
-    error_description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct DeviceCodeResponse {
-    device_code: String,
-    user_code: String,
+    device_code: Option<String>,
+    user_code: Option<String>,
     verification_uri: Option<String>,
     verification_uri_complete: Option<String>,
     expires_in: Option<u64>,
     interval: Option<u64>,
     error: Option<String>,
     error_description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DeviceCodeGrant {
+    device_code: String,
+    user_code: String,
+    verification_uri: Option<String>,
+    verification_uri_complete: Option<String>,
+    expires_in: Option<u64>,
+    interval: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OidcDiscoveryResponse {
+    issuer: Option<String>,
+    device_authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceOauthEndpoints {
+    device_authorization_endpoint: String,
+    token_endpoint: String,
 }
 
 /// Resolved bearer credential ready for API use.
@@ -240,8 +269,21 @@ pub fn device_code_login() -> Result<XaiOAuthCredentials> {
     let scopes = std::env::var("GROK_OIDC_SCOPES")
         .or_else(|_| std::env::var("XAI_OIDC_SCOPES"))
         .unwrap_or_else(|_| DEFAULT_SCOPES.to_string());
+    let auth_path = auth_file_path();
+    let open_browser = std::env::var_os("CODEWHALE_XAI_OAUTH_NO_BROWSER").is_none();
 
-    let device = request_device_code(&issuer, &client_id, &scopes)?;
+    device_code_login_with(&issuer, &client_id, &scopes, &auth_path, open_browser)
+}
+
+fn device_code_login_with(
+    issuer: &str,
+    client_id: &str,
+    scopes: &str,
+    auth_path: &Path,
+    open_browser: bool,
+) -> Result<XaiOAuthCredentials> {
+    let endpoints = resolve_device_oauth_endpoints(issuer);
+    let device = request_device_code(&endpoints.device_authorization_endpoint, client_id, scopes)?;
     let verify = device
         .verification_uri_complete
         .clone()
@@ -252,9 +294,7 @@ pub fn device_code_login() -> Result<XaiOAuthCredentials> {
     eprintln!("  Open:  {verify}");
     eprintln!("  Code:  {}", device.user_code);
     eprintln!("Waiting for approval in the browser… (Ctrl+C to abort)");
-    if std::env::var_os("CODEWHALE_XAI_OAUTH_NO_BROWSER").is_none()
-        && let Err(err) = webbrowser::open(&verify)
-    {
+    if open_browser && let Err(err) = webbrowser::open(&verify) {
         eprintln!("Could not open the browser automatically: {err}");
     }
 
@@ -270,11 +310,10 @@ pub fn device_code_login() -> Result<XaiOAuthCredentials> {
             );
         }
         thread::sleep(Duration::from_secs(interval));
-        match poll_device_token(&issuer, &client_id, &device.device_code) {
+        match poll_device_token(&endpoints.token_endpoint, client_id, &device.device_code) {
             Ok(token) => {
-                let path = auth_file_path();
-                let mut file = if path.exists() {
-                    load_auth_file(&path).unwrap_or_default()
+                let mut file = if auth_path.exists() {
+                    load_auth_file(auth_path).unwrap_or_default()
                 } else {
                     BTreeMap::new()
                 };
@@ -283,19 +322,19 @@ pub fn device_code_login() -> Result<XaiOAuthCredentials> {
                     key: None,
                     refresh_token: None,
                     expires_at: None,
-                    oidc_issuer: Some(issuer.clone()),
-                    oidc_client_id: Some(client_id.clone()),
+                    oidc_issuer: Some(issuer.to_string()),
+                    oidc_client_id: Some(client_id.to_string()),
                     auth_mode: Some("oidc".to_string()),
                     extra: BTreeMap::new(),
                 });
-                apply_token_response(&mut entry, &issuer, &client_id, &token)?;
+                apply_token_response(&mut entry, issuer, client_id, &token)?;
                 file.insert(scope.clone(), entry.clone());
-                if let Some(parent) = path.parent() {
+                if let Some(parent) = auth_path.parent() {
                     fs::create_dir_all(parent).with_context(|| {
                         format!("creating xAI OAuth auth directory {}", parent.display())
                     })?;
                 }
-                write_auth_file(&path, &file)?;
+                write_auth_file(auth_path, &file)?;
                 let access = entry
                     .key
                     .clone()
@@ -303,7 +342,7 @@ pub fn device_code_login() -> Result<XaiOAuthCredentials> {
                     .context("xAI device-code login returned an empty access token")?;
                 eprintln!(
                     "Signed in. Tokens stored at {} (mode 0600).",
-                    path.display()
+                    auth_path.display()
                 );
                 return Ok(credentials_from_entry(scope, &entry, access));
             }
@@ -489,12 +528,186 @@ fn apply_token_response(
     Ok(())
 }
 
+fn fallback_device_oauth_endpoints(issuer: &str) -> DeviceOauthEndpoints {
+    let issuer = issuer.trim_end_matches('/');
+    DeviceOauthEndpoints {
+        device_authorization_endpoint: format!("{issuer}/oauth2/device/code"),
+        token_endpoint: format!("{issuer}/oauth2/token"),
+    }
+}
+
+fn resolve_device_oauth_endpoints(issuer: &str) -> DeviceOauthEndpoints {
+    match discover_device_oauth_endpoints(issuer) {
+        Ok(endpoints) => endpoints,
+        Err(err) => {
+            let fallback = fallback_device_oauth_endpoints(issuer);
+            tracing::warn!(
+                target: "codewhale::xai_oauth",
+                error = %err,
+                device_authorization_endpoint = %fallback.device_authorization_endpoint,
+                token_endpoint = %fallback.token_endpoint,
+                "xAI OIDC discovery failed; using documented endpoint fallback"
+            );
+            fallback
+        }
+    }
+}
+
+fn discover_device_oauth_endpoints(issuer: &str) -> Result<DeviceOauthEndpoints> {
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+    let client = crate::tls::reqwest_blocking_client_builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .context("Failed to build xAI OIDC discovery client")?;
+    let response = client
+        .get(&discovery_url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .context("xAI OIDC discovery request failed")?;
+    let (status, discovery): (_, OidcDiscoveryResponse) =
+        parse_oauth_json_response(response, "xAI OIDC discovery")?;
+    if !status.is_success() {
+        bail!("xAI OIDC discovery failed with HTTP {status}");
+    }
+    validate_discovered_issuer(discovery.issuer, issuer)?;
+
+    Ok(DeviceOauthEndpoints {
+        device_authorization_endpoint: validate_discovered_oauth_endpoint(
+            discovery.device_authorization_endpoint,
+            "device_authorization_endpoint",
+            issuer,
+        )?,
+        token_endpoint: validate_discovered_oauth_endpoint(
+            discovery.token_endpoint,
+            "token_endpoint",
+            issuer,
+        )?,
+    })
+}
+
+fn validate_discovered_issuer(discovered: Option<String>, expected: &str) -> Result<()> {
+    let discovered = discovered
+        .as_deref()
+        .map(str::trim)
+        .filter(|issuer| !issuer.is_empty())
+        .context("xAI OIDC discovery missing issuer")?;
+    if discovered.trim_end_matches('/') != expected.trim_end_matches('/') {
+        bail!("xAI OIDC discovery issuer does not match the requested issuer");
+    }
+    Ok(())
+}
+
+fn validate_discovered_oauth_endpoint(
+    endpoint: Option<String>,
+    field: &str,
+    issuer: &str,
+) -> Result<String> {
+    let endpoint = endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .with_context(|| format!("xAI OIDC discovery missing {field}"))?;
+    let parsed = reqwest::Url::parse(endpoint)
+        .with_context(|| format!("xAI OIDC discovery returned an invalid {field}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("xAI OIDC discovery returned unsupported {field} scheme");
+    }
+    let issuer = reqwest::Url::parse(issuer).context("xAI OIDC issuer is not a valid URL")?;
+    if issuer.scheme() == "https" && parsed.scheme() != "https" {
+        bail!("xAI OIDC discovery attempted to downgrade {field} from HTTPS");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("xAI OIDC discovery returned credentials in {field}");
+    }
+    Ok(endpoint.to_string())
+}
+
+fn parse_oauth_json_response<T: DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    operation: &str,
+) -> Result<(reqwest::StatusCode, T)> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("missing")
+        .to_string();
+    let mut reader = response.take(OAUTH_RESPONSE_BODY_LIMIT + 1);
+    let mut body = Vec::new();
+    reader
+        .read_to_end(&mut body)
+        .with_context(|| format!("reading {operation} response"))?;
+    let truncated = body.len() as u64 > OAUTH_RESPONSE_BODY_LIMIT;
+    if truncated {
+        body.truncate(OAUTH_RESPONSE_BODY_LIMIT as usize);
+    }
+
+    let parsed = serde_json::from_slice(&body).map_err(|_| {
+        let limit = if truncated {
+            " (body exceeded the 64 KiB diagnostic limit)"
+        } else {
+            ""
+        };
+        anyhow::anyhow!(
+            "{operation} returned HTTP {status} with content type {content_type}; expected JSON{limit}"
+        )
+    })?;
+    Ok((status, parsed))
+}
+
+fn oauth_failure_detail(
+    error: Option<&str>,
+    description: Option<&str>,
+    status: reqwest::StatusCode,
+) -> String {
+    let mut code = bounded_oauth_error_text(error.unwrap_or("request_failed"));
+    if code.is_empty() {
+        code = "request_failed".to_string();
+    }
+    let description = description
+        .map(bounded_oauth_error_text)
+        .filter(|description| !description.is_empty() && description != &code);
+    match description {
+        Some(description) => format!("{code}: {description}; HTTP {status}"),
+        None => format!("{code}; HTTP {status}"),
+    }
+}
+
+fn bounded_oauth_error_text(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len().min(OAUTH_ERROR_DETAIL_LIMIT));
+    let mut previous_was_space = false;
+    let mut written = 0;
+    for character in raw.chars() {
+        let character = if character.is_whitespace() {
+            ' '
+        } else if character.is_control() {
+            continue;
+        } else {
+            character
+        };
+        if character == ' ' && previous_was_space {
+            continue;
+        }
+        if written == OAUTH_ERROR_DETAIL_LIMIT {
+            break;
+        }
+        output.push(character);
+        previous_was_space = character == ' ';
+        written += 1;
+    }
+    output.trim().to_string()
+}
+
 fn refresh_access_token(
     issuer: &str,
     client_id: &str,
     refresh_token: &str,
 ) -> Result<TokenResponse> {
-    let url = format!("{}/oauth2/token", issuer.trim_end_matches('/'));
+    let token_endpoint = resolve_device_oauth_endpoints(issuer).token_endpoint;
     let client = crate::tls::reqwest_blocking_client_builder()
         .timeout(Duration::from_secs(20))
         .build()
@@ -505,19 +718,16 @@ fn refresh_access_token(
         ("refresh_token", refresh_token),
     ];
     let response = client
-        .post(url)
+        .post(token_endpoint)
         .form(&params)
         .send()
         .context("xAI OAuth refresh request failed")?;
-    let status = response.status();
-    let body: TokenResponse = response
-        .json()
-        .context("Failed to parse xAI OAuth refresh response")?;
+    let (status, body): (_, TokenResponse) =
+        parse_oauth_json_response(response, "xAI OAuth refresh")?;
     if !status.is_success() || body.error.is_some() {
-        let err = body
-            .error_description
-            .or(body.error)
-            .unwrap_or_else(|| format!("HTTP {status}"));
+        // Refresh requests carry a credential. Do not echo a server-provided
+        // description that could reflect the submitted refresh token.
+        let err = oauth_failure_detail(body.error.as_deref(), None, status);
         bail!(
             "xAI OAuth refresh failed ({err}). Run `grok login` or device-code login again. \
              If SuperGrok OAuth returns HTTP 403, use XAI_API_KEY instead."
@@ -526,37 +736,54 @@ fn refresh_access_token(
     Ok(body)
 }
 
-fn request_device_code(issuer: &str, client_id: &str, scopes: &str) -> Result<DeviceCodeResponse> {
-    let url = format!("{}/oauth2/device/code", issuer.trim_end_matches('/'));
+fn request_device_code(
+    device_authorization_endpoint: &str,
+    client_id: &str,
+    scopes: &str,
+) -> Result<DeviceCodeGrant> {
     let client = crate::tls::reqwest_blocking_client_builder()
         .timeout(Duration::from_secs(20))
         .build()
         .context("Failed to build xAI device-code client")?;
     let params = [("client_id", client_id), ("scope", scopes)];
     let response = client
-        .post(url)
+        .post(device_authorization_endpoint)
         .form(&params)
         .send()
         .context("xAI device-code request failed")?;
-    let status = response.status();
-    let body: DeviceCodeResponse = response
-        .json()
-        .context("Failed to parse xAI device-code response")?;
+    let (status, body): (_, DeviceCodeResponse) =
+        parse_oauth_json_response(response, "xAI device-code request")?;
     if !status.is_success() || body.error.is_some() {
-        let err = body
-            .error_description
-            .or(body.error)
-            .unwrap_or_else(|| format!("HTTP {status}"));
+        let err = oauth_failure_detail(
+            body.error.as_deref(),
+            body.error_description.as_deref(),
+            status,
+        );
         bail!("xAI device-code request failed ({err})");
     }
-    if body.device_code.trim().is_empty() || body.user_code.trim().is_empty() {
-        bail!("xAI device-code response missing device_code/user_code");
-    }
-    Ok(body)
+    let device_code = body
+        .device_code
+        .filter(|value| !value.trim().is_empty())
+        .context("xAI device-code response missing device_code")?;
+    let user_code = body
+        .user_code
+        .filter(|value| !value.trim().is_empty())
+        .context("xAI device-code response missing user_code")?;
+    Ok(DeviceCodeGrant {
+        device_code,
+        user_code,
+        verification_uri: body.verification_uri,
+        verification_uri_complete: body.verification_uri_complete,
+        expires_in: body.expires_in,
+        interval: body.interval,
+    })
 }
 
-fn poll_device_token(issuer: &str, client_id: &str, device_code: &str) -> Result<TokenResponse> {
-    let url = format!("{}/oauth2/token", issuer.trim_end_matches('/'));
+fn poll_device_token(
+    token_endpoint: &str,
+    client_id: &str,
+    device_code: &str,
+) -> Result<TokenResponse> {
     let client = crate::tls::reqwest_blocking_client_builder()
         .timeout(Duration::from_secs(20))
         .build()
@@ -567,26 +794,24 @@ fn poll_device_token(issuer: &str, client_id: &str, device_code: &str) -> Result
         ("device_code", device_code),
     ];
     let response = client
-        .post(url)
+        .post(token_endpoint)
         .form(&params)
         .send()
         .context("xAI device-code token poll failed")?;
-    let status = response.status();
-    let body: TokenResponse = response
-        .json()
-        .context("Failed to parse xAI device-code token response")?;
+    let (status, body): (_, TokenResponse) =
+        parse_oauth_json_response(response, "xAI device-code token exchange")?;
     if let Some(err) = body.error.as_deref() {
         if matches!(err, "authorization_pending" | "slow_down") {
             bail!("{err}");
         }
-        let detail = body
-            .error_description
-            .clone()
-            .unwrap_or_else(|| err.to_string());
+        // Poll requests carry the device credential. Keep diagnostics to the
+        // standard error code and HTTP status rather than echoing descriptions.
+        let detail = oauth_failure_detail(Some(err), None, status);
         bail!("xAI device-code token exchange failed: {detail}");
     }
     if !status.is_success() {
-        bail!("xAI device-code token exchange failed with HTTP {status}");
+        let detail = oauth_failure_detail(None, None, status);
+        bail!("xAI device-code token exchange failed: {detail}");
     }
     Ok(body)
 }
@@ -652,7 +877,7 @@ use std::os::unix::fs::PermissionsExt;
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -724,8 +949,17 @@ mod tests {
 
     #[test]
     fn device_code_constants_match_discovery_shape() {
-        assert!(DEFAULT_SCOPES.contains("offline_access"));
-        assert!(DEFAULT_SCOPES.contains("api:access"));
+        assert_eq!(
+            DEFAULT_SCOPES.split_whitespace().collect::<Vec<_>>(),
+            [
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "api:access",
+                "grok-cli:access",
+            ]
+        );
         assert_eq!(XAI_OIDC_ISSUER, "https://auth.x.ai");
         assert_eq!(GROK_OIDC_CLIENT_ID.len(), 36);
         // Keep device_code_login referenced so the residual entry point stays linked.
@@ -733,10 +967,210 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn device_code_login_exchanges_and_persists_tokens() {
+    async fn discovers_device_authorization_and_token_endpoints() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": server.uri(),
+                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
+                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoints = tokio::task::block_in_place(|| {
+            discover_device_oauth_endpoints(&server.uri()).expect("discover endpoints")
+        });
+
+        assert_eq!(
+            endpoints,
+            DeviceOauthEndpoints {
+                device_authorization_endpoint: format!("{}/oauth2/device-advertised", server.uri()),
+                token_endpoint: format!("{}/oauth2/token-advertised", server.uri()),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_uses_discovered_token_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": server.uri(),
+                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
+                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token-advertised"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "refreshed-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let token = tokio::task::block_in_place(|| {
+            refresh_access_token(&server.uri(), GROK_OIDC_CLIENT_ID, "refresh-secret")
+                .expect("refresh token")
+        });
+
+        assert_eq!(token.access_token.as_deref(), Some("refreshed-access"));
+        assert_eq!(token.refresh_token.as_deref(), Some("rotated-refresh"));
+    }
+
+    #[test]
+    fn https_discovery_rejects_plaintext_endpoint_downgrade() {
+        let error = validate_discovered_oauth_endpoint(
+            Some("http://auth.x.ai/oauth2/device/code".to_string()),
+            "device_authorization_endpoint",
+            XAI_OIDC_ISSUER,
+        )
+        .expect_err("HTTPS issuer must reject an HTTP endpoint");
+
+        assert!(error.to_string().contains("downgrade"), "{error}");
+    }
+
+    #[test]
+    fn discovery_rejects_mismatched_issuer() {
+        let error = validate_discovered_issuer(
+            Some("https://attacker.example".to_string()),
+            XAI_OIDC_ISSUER,
+        )
+        .expect_err("discovery issuer must bind to the request issuer");
+
+        assert!(error.to_string().contains("does not match"), "{error}");
+    }
+
+    #[test]
+    fn oauth_error_details_collapse_control_whitespace() {
+        let detail = oauth_failure_detail(
+            Some("invalid_scope\nforged"),
+            Some("bad\t scope\r\nnext line"),
+            reqwest::StatusCode::BAD_REQUEST,
+        );
+
+        assert!(
+            !detail
+                .chars()
+                .any(|character| matches!(character, '\n' | '\r' | '\t')),
+            "{detail}"
+        );
+        assert!(detail.contains("invalid_scope forged"), "{detail}");
+        assert!(detail.contains("bad scope next line"), "{detail}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn discovery_failure_uses_documented_endpoint_fallback() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_raw("<html>temporarily unavailable</html>", "text/html"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoints =
+            tokio::task::block_in_place(|| resolve_device_oauth_endpoints(&server.uri()));
+
+        assert_eq!(
+            endpoints,
+            DeviceOauthEndpoints {
+                device_authorization_endpoint: format!("{}/oauth2/device/code", server.uri()),
+                token_endpoint: format!("{}/oauth2/token", server.uri()),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_device_endpoint_surfaces_structured_invalid_scope() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/oauth2/device/code"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_scope",
+                "error_description": "Scope 'team:read' is not valid for User principals"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = tokio::task::block_in_place(|| {
+            request_device_code(
+                &format!("{}/oauth2/device/code", server.uri()),
+                GROK_OIDC_CLIENT_ID,
+                "openid team:read",
+            )
+            .expect_err("invalid scope must fail")
+        });
+        let message = error.to_string();
+
+        assert!(message.contains("invalid_scope"), "{message}");
+        assert!(message.contains("team:read"), "{message}");
+        assert!(message.contains("HTTP 400"), "{message}");
+        assert!(!message.contains("missing device_code"), "{message}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_code_request_reports_non_json_without_echoing_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/device"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw("<html>private-upstream-detail</html>", "text/html"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = tokio::task::block_in_place(|| {
+            request_device_code(
+                &format!("{}/oauth2/device", server.uri()),
+                GROK_OIDC_CLIENT_ID,
+                DEFAULT_SCOPES,
+            )
+            .expect_err("non-JSON response must fail")
+        });
+        let message = error.to_string();
+
+        assert!(message.contains("HTTP 404"), "{message}");
+        assert!(message.contains("text/html"), "{message}");
+        assert!(message.contains("expected JSON"), "{message}");
+        assert!(!message.contains("private-upstream-detail"), "{message}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_code_login_exchanges_and_persists_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": server.uri(),
+                "device_authorization_endpoint": format!("{}/oauth2/device-advertised", server.uri()),
+                "token_endpoint": format!("{}/oauth2/token-advertised", server.uri())
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/device-advertised"))
+            .and(body_string_contains(format!(
+                "client_id={GROK_OIDC_CLIENT_ID}"
+            )))
+            .and(body_string_contains(
+                "scope=openid+profile+email+offline_access+api%3Aaccess+grok-cli%3Aaccess",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "device_code": "device-token",
                 "user_code": "CW-TEST",
@@ -748,7 +1182,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/oauth2/token"))
+            .and(path("/oauth2/token-advertised"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "test-xai-access",
                 "refresh_token": "test-xai-refresh",
@@ -759,20 +1193,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        let _guard = crate::test_support::lock_test_env();
         let dir = TempDir::new().unwrap();
         let auth_path = dir.path().join("grok-auth.json");
-        unsafe {
-            std::env::set_var("GROK_OIDC_ISSUER", server.uri());
-            std::env::set_var("GROK_AUTH_PATH", &auth_path);
-            std::env::set_var("CODEWHALE_XAI_OAUTH_NO_BROWSER", "1");
-        }
-        let result = tokio::task::block_in_place(device_code_login);
-        unsafe {
-            std::env::remove_var("GROK_OIDC_ISSUER");
-            std::env::remove_var("GROK_AUTH_PATH");
-            std::env::remove_var("CODEWHALE_XAI_OAUTH_NO_BROWSER");
-        }
+        let result = tokio::task::block_in_place(|| {
+            device_code_login_with(
+                &server.uri(),
+                GROK_OIDC_CLIENT_ID,
+                DEFAULT_SCOPES,
+                &auth_path,
+                false,
+            )
+        });
 
         let credentials = result.expect("device login");
         assert_eq!(credentials.access_token, "test-xai-access");
