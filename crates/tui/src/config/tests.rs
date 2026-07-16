@@ -2548,6 +2548,10 @@ fn config_with_provider_scoped_key(provider: &str, api_key: &str) -> Config {
 
 #[test]
 fn has_api_key_uses_active_provider_scoped_config_key() {
+    // `has_api_key` intentionally consults live endpoint env overrides. Keep
+    // this config-only assertion out of the windows where another test owns a
+    // process-global custom endpoint.
+    let _lock = lock_test_env();
     for provider in [
         "openai",
         "wanjie-ark",
@@ -2601,6 +2605,10 @@ fn has_api_key_uses_active_provider_env_key() -> Result<()> {
 
 #[test]
 fn has_api_key_uses_root_config_key_for_deepseek_variants() {
+    // A concurrent CODEWHALE_BASE_URL override deliberately unbinds the saved
+    // root key from the active endpoint. Serialize this assertion with the
+    // tests that install those process-global overrides.
+    let _lock = lock_test_env();
     for provider in ["deepseek", "deepseek-cn"] {
         let config = Config {
             provider: Some(provider.to_string()),
@@ -4159,6 +4167,9 @@ migrated_deepseek_model_alias = "deepseek-chat"
 
 #[test]
 fn retired_deepseek_aliases_keep_mode_intent_unless_effort_is_explicit() {
+    // Model normalization reads the process-global model override. Without the
+    // shared lock, env-focused config tests can replace these fixture aliases.
+    let _lock = lock_test_env();
     for (alias, expected_effort) in [("deepseek-chat", "off"), ("deepseek-reasoner", "high")] {
         for provider in [
             ApiProvider::Deepseek,
@@ -7482,6 +7493,7 @@ fn has_api_key_for_accepts_xai_oauth_without_masking_api_keys() -> Result<()> {
 
 #[test]
 fn has_api_key_for_uses_root_config_key_for_deepseek_variants() {
+    let _lock = lock_test_env();
     let config = Config {
         api_key: Some("root-config-key".to_string()),
         ..Config::default()
