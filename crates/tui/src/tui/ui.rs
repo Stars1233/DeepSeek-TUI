@@ -273,6 +273,18 @@ async fn auto_deny_session_approval(
     let notice = app
         .tr(MessageId::ApprovalAutoDeniedSession)
         .replace("{tool}", tool_name);
+    let notice_cell = HistoryCell::System {
+        content: notice.clone(),
+    };
+    if let Some(active) = app.active_cell.as_mut() {
+        // Keep the notice in the live transcript without changing
+        // `history.len()`: running tools are addressed by virtual indices
+        // based on that length until the active cell is flushed.
+        active.push_untracked(notice_cell);
+        app.mark_history_updated();
+    } else {
+        app.add_message(notice_cell);
+    }
     app.push_status_toast(notice, StatusToastLevel::Warning, Some(12_000));
 }
 

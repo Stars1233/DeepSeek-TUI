@@ -26,7 +26,7 @@ use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::text::Span;
+use ratatui::{Terminal, backend::TestBackend, text::Span};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -2119,8 +2119,28 @@ fn session_denied_cache_matches_only_approval_key() {
     assert!(is_session_denied_for_key(&app, "file:edit_file:retry"));
 }
 
+fn render_underwater_test_app(app: &mut App, width: u16, height: u16) -> String {
+    app.onboarding_workspace_trust_gate = false;
+    app.onboarding = OnboardingState::None;
+    let config = Config::default();
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("underwater test terminal");
+    terminal
+        .draw(|frame| render(frame, app, &config))
+        .expect("render underwater shell");
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>()
+}
+
 #[tokio::test]
 async fn session_denied_cache_auto_deny_explains_the_cached_rejection() {
+    let home = SettingsHomeGuard::new();
+    let audit_path = home._tmp.path().join(".codewhale").join("audit.log");
     let mut app = create_test_app();
     let mut engine = mock_engine_handle();
     let approval_key = "shell:exec_shell:git push secret-token";
@@ -2143,14 +2163,260 @@ async fn session_denied_cache_auto_deny_explains_the_cached_rejection() {
     let toast = app.status_toasts.back().expect("auto-deny warning toast");
     assert_eq!(toast.level, StatusToastLevel::Warning);
     assert_eq!(toast.ttl_ms, Some(12_000));
-    assert!(toast.text.contains("rejected this exact request earlier"));
+    assert!(toast.text.contains("matching request was denied earlier"));
+    assert!(toast.text.contains("during this CodeWhale run"));
     assert!(toast.text.contains("Restart CodeWhale"));
     assert!(toast.text.contains("exec_shell"));
+    let history_notice = app
+        .history
+        .iter()
+        .rev()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("persistent auto-deny explanation");
+    assert_eq!(history_notice, toast.text);
+    for visible_text in [&toast.text, history_notice] {
+        assert!(
+            !visible_text.contains(approval_key)
+                && !visible_text.contains("git push")
+                && !visible_text.contains("secret-token"),
+            "the user-facing notice must not expose the approval key, command, or arguments"
+        );
+    }
+    let audit = std::fs::read_to_string(&audit_path).expect("isolated approval audit log");
+    assert!(audit.contains(approval_key));
+
+    let rendered = render_underwater_test_app(&mut app, 40, 12);
+    assert!(rendered.contains("Auto-denied"), "{rendered:?}");
     assert!(
-        !toast.text.contains(approval_key)
-            && !toast.text.contains("git push")
-            && !toast.text.contains("secret-token"),
-        "the user-facing notice must not expose the approval key, command, or arguments"
+        rendered.contains("Restart") && rendered.contains("CodeWhale"),
+        "{rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_denied_cache_notice_preserves_active_tool_index() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    let mut engine = mock_engine_handle();
+    let tool_id = "tool-retry";
+    let tool_name = "exec_shell";
+
+    handle_tool_call_started(
+        &mut app,
+        tool_id,
+        tool_name,
+        &serde_json::json!({"command": "git push secret-token"}),
+    );
+    let history_len = app.history.len();
+    let tool_index = app.tool_cells[tool_id];
+    assert_eq!(tool_index, history_len);
+
+    auto_deny_session_approval(
+        &mut app,
+        &engine.handle,
+        tool_id,
+        tool_name,
+        "shell:exec_shell:git push secret-token",
+    )
+    .await;
+
+    assert_eq!(
+        app.history.len(),
+        history_len,
+        "the notice must not shift virtual indices while a tool is active"
+    );
+    assert_eq!(app.tool_cells.get(tool_id), Some(&tool_index));
+    let active = app.active_cell.as_ref().expect("active tool and notice");
+    assert!(matches!(
+        active.entries().first(),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec))) if exec.status == ToolStatus::Running
+    ));
+    assert!(matches!(
+        active.entries().get(1),
+        Some(HistoryCell::System { content }) if content.contains("Auto-denied")
+    ));
+
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: tool_id.to_string(),
+        })
+    );
+    let denied_result = Ok(crate::tools::spec::ToolResult::error(
+        "request denied by cached approval",
+    ));
+    handle_tool_call_complete(&mut app, tool_id, tool_name, &denied_result);
+
+    let active = app.active_cell.as_ref().expect("completed tool and notice");
+    assert!(matches!(
+        active.entries().first(),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec))) if exec.status == ToolStatus::Failed
+    ));
+    assert!(matches!(
+        active.entries().get(1),
+        Some(HistoryCell::System { .. })
+    ));
+
+    app.flush_active_cell();
+    assert!(matches!(
+        app.history.get(history_len),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec))) if exec.status == ToolStatus::Failed
+    ));
+    assert!(matches!(
+        app.history.get(history_len + 1),
+        Some(HistoryCell::System { content }) if content.contains("Auto-denied")
+    ));
+    let detail = app
+        .tool_detail_record_for_cell(history_len)
+        .expect("tool detail remains bound to the completed tool cell");
+    assert_eq!(detail.tool_id, tool_id);
+    assert!(
+        detail
+            .output
+            .as_deref()
+            .is_some_and(|output| output.contains("cached approval"))
+    );
+}
+
+#[tokio::test]
+async fn session_denied_cache_notice_preserves_parallel_tool_indices() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    let mut engine = mock_engine_handle();
+
+    handle_tool_call_started(
+        &mut app,
+        "tool-first",
+        "exec_shell",
+        &serde_json::json!({"command": "echo first"}),
+    );
+    handle_tool_call_started(
+        &mut app,
+        "tool-denied",
+        "exec_shell",
+        &serde_json::json!({"command": "git push secret-token"}),
+    );
+    let history_len = app.history.len();
+    let first_index = app.tool_cells["tool-first"];
+    let denied_index = app.tool_cells["tool-denied"];
+    assert_eq!(first_index, history_len);
+    assert_eq!(denied_index, history_len + 1);
+
+    auto_deny_session_approval(
+        &mut app,
+        &engine.handle,
+        "tool-denied",
+        "exec_shell",
+        "shell:exec_shell:git push secret-token",
+    )
+    .await;
+
+    assert_eq!(app.history.len(), history_len);
+    assert_eq!(app.tool_cells.get("tool-first"), Some(&first_index));
+    assert_eq!(app.tool_cells.get("tool-denied"), Some(&denied_index));
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: "tool-denied".to_string(),
+        })
+    );
+
+    let denied_result = Ok(crate::tools::spec::ToolResult::error(
+        "request denied by cached approval",
+    ));
+    handle_tool_call_complete(&mut app, "tool-denied", "exec_shell", &denied_result);
+    let active = app.active_cell.as_ref().expect("parallel tools and notice");
+    assert!(matches!(
+        active.entries().first(),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec)))
+            if exec.status == ToolStatus::Running && exec.command == "echo first"
+    ));
+    assert!(matches!(
+        active.entries().get(1),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec)))
+            if exec.status == ToolStatus::Failed
+                && exec.command == "git push secret-token"
+                && exec.output.as_deref().is_some_and(|output| output.contains("cached approval"))
+    ));
+    assert!(matches!(
+        active.entries().get(2),
+        Some(HistoryCell::System { content }) if content.contains("Auto-denied")
+    ));
+
+    handle_tool_call_complete(
+        &mut app,
+        "tool-first",
+        "exec_shell",
+        &ok_result("first output"),
+    );
+    app.flush_active_cell();
+
+    assert!(matches!(
+        app.history.get(history_len),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec)))
+            if exec.status == ToolStatus::Success
+                && exec.command == "echo first"
+                && exec.output.as_deref() == Some("first output")
+    ));
+    assert!(matches!(
+        app.history.get(history_len + 1),
+        Some(HistoryCell::Tool(ToolCell::Exec(exec)))
+            if exec.status == ToolStatus::Failed && exec.command == "git push secret-token"
+    ));
+    assert!(matches!(
+        app.history.get(history_len + 2),
+        Some(HistoryCell::System { content }) if content.contains("Auto-denied")
+    ));
+}
+
+#[tokio::test]
+async fn session_denied_cache_notice_renders_host_scope_in_zh_hans() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::ZhHans;
+    let mut engine = mock_engine_handle();
+
+    auto_deny_session_approval(
+        &mut app,
+        &engine.handle,
+        "fetch-retry",
+        "fetch_url",
+        "net:example.com",
+    )
+    .await;
+
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: "fetch-retry".to_string(),
+        })
+    );
+    let notice = app
+        .history
+        .iter()
+        .rev()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("localized persistent auto-deny explanation");
+    assert!(notice.contains("本次 CodeWhale 运行期间"));
+    assert!(notice.contains("匹配请求"));
+    assert!(!notice.contains("example.com"));
+
+    let rendered = render_underwater_test_app(&mut app, 60, 16);
+    let rendered_compact = rendered
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(rendered_compact.contains("已自动拒绝"), "{rendered:?}");
+    assert!(rendered_compact.contains("匹配请求"), "{rendered:?}");
+    assert!(
+        rendered_compact.contains("重启") && rendered_compact.contains("CodeWhale"),
+        "{rendered:?}"
     );
 }
 

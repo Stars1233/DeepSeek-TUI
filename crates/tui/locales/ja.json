@@ -565,7 +565,7 @@
     "ApprovalChooseAction": "Enterで選択、または y/a/d を直接入力",
     "ApprovalIntentLabel": "意図：",
     "ApprovalMoreLines": "  … (+{count} 行)",
-    "ApprovalAutoDeniedSession": "{tool} を自動的に拒否しました: このセッションで同じリクエストを以前に拒否しています。再検討するには CodeWhale を再起動してください。",
+    "ApprovalAutoDeniedSession": "{tool} を自動的に拒否しました: この CodeWhale の実行中に一致するリクエストが以前拒否されています。再検討するには CodeWhale を再起動してください。",
     "ElevationTitleSandboxDenied": "  ⚠, サンドボックス拒否 ",
     "ElevationTitleRequired": " サンドボックス昇格 ",
     "ElevationFieldTool": "  ツール：",

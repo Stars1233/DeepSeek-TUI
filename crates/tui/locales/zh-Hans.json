@@ -565,7 +565,7 @@
     "ApprovalChooseAction": "Enter 执行选中项，或直接按 y/a/d",
     "ApprovalIntentLabel": "意图：",
     "ApprovalMoreLines": "  … (还有 {count} 行)",
-    "ApprovalAutoDeniedSession": "已自动拒绝 {tool}：你之前在此会话中拒绝了相同请求。若要重新考虑，请重启 CodeWhale。",
+    "ApprovalAutoDeniedSession": "已自动拒绝 {tool}：在本次 CodeWhale 运行期间，已有匹配请求被拒绝。若要重新考虑，请重启 CodeWhale。",
     "ElevationTitleSandboxDenied": "  ⚠ 沙箱拒绝 ",
     "ElevationTitleRequired": " 沙箱提权 ",
     "ElevationFieldTool": "  工具：",

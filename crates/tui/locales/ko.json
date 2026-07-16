@@ -567,7 +567,7 @@
     "ApprovalChooseAction": "Enter로 선택 항목 적용, 또는 y/a/d를 바로 누르세요",
     "ApprovalIntentLabel": "의도: ",
     "ApprovalMoreLines": "  … (+{count}줄)",
-    "ApprovalAutoDeniedSession": "{tool} 자동 거부: 이 세션에서 동일한 요청을 이전에 거부했습니다. 다시 검토하려면 CodeWhale을 재시작하세요.",
+    "ApprovalAutoDeniedSession": "{tool} 자동 거부: 이번 CodeWhale 실행 중 일치하는 요청이 이전에 거부되었습니다. 다시 검토하려면 CodeWhale을 재시작하세요.",
     "ElevationTitleSandboxDenied": "  ⚠, 샌드박스 거부됨 ",
     "ElevationTitleRequired": " 샌드박스 권한 상승 필요 ",
     "ElevationFieldTool": "  도구: ",

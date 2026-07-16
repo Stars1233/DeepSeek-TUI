@@ -4696,30 +4696,31 @@ impl App {
         }
     }
 
+    fn prune_expired_status_toasts(&mut self, now: Instant) {
+        let queued_before = self.status_toasts.len();
+        self.status_toasts.retain(|toast| !toast.is_expired(now));
+        let queued_removed = self.status_toasts.len() != queued_before;
+        let sticky_removed = self
+            .sticky_status
+            .as_ref()
+            .is_some_and(|toast| toast.is_expired(now));
+        if sticky_removed {
+            self.sticky_status = None;
+        }
+        if queued_removed || sticky_removed {
+            self.needs_redraw = true;
+        }
+    }
+
     /// Up to `limit` currently-active toasts, most recent last (so a stacked
     /// renderer iterating top-to-bottom shows the freshest message at the
-    /// bottom, like a chat log). Drains expired toasts off the front as a
-    /// side effect — same cleanup as `active_status_toast` so callers see a
-    /// consistent queue. Whalescale#439.
+    /// bottom, like a chat log). Prunes expired toasts throughout the queue as
+    /// a side effect — the same cleanup as `active_status_toast` so callers see
+    /// a consistent queue. Whalescale#439.
     pub fn active_status_toasts(&mut self, limit: usize) -> Vec<StatusToast> {
         self.sync_status_message_to_toasts();
         let now = Instant::now();
-        while self
-            .status_toasts
-            .front()
-            .is_some_and(|toast| toast.is_expired(now))
-        {
-            self.status_toasts.pop_front();
-            self.needs_redraw = true;
-        }
-        if self
-            .sticky_status
-            .as_ref()
-            .is_some_and(|toast| toast.is_expired(now))
-        {
-            self.sticky_status = None;
-            self.needs_redraw = true;
-        }
+        self.prune_expired_status_toasts(now);
 
         let mut out: Vec<StatusToast> = Vec::with_capacity(limit);
         if let Some(sticky) = self.sticky_status.clone() {
@@ -4744,29 +4745,7 @@ impl App {
     pub fn active_status_toast(&mut self) -> Option<StatusToast> {
         self.sync_status_message_to_toasts();
         let now = Instant::now();
-        let mut removed = false;
-
-        while self
-            .status_toasts
-            .front()
-            .is_some_and(|toast| toast.is_expired(now))
-        {
-            self.status_toasts.pop_front();
-            removed = true;
-        }
-
-        if self
-            .sticky_status
-            .as_ref()
-            .is_some_and(|toast| toast.is_expired(now))
-        {
-            self.sticky_status = None;
-            removed = true;
-        }
-
-        if removed {
-            self.needs_redraw = true;
-        }
+        self.prune_expired_status_toasts(now);
 
         self.sticky_status
             .clone()

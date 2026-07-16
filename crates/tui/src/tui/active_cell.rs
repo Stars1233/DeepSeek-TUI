@@ -158,10 +158,9 @@ impl ActiveCell {
         entry_idx
     }
 
-    /// Push an entry with no tool id binding (used for non-tool grouping if
-    /// ever needed). Currently unused; kept for symmetry with Codex which
-    /// allows e.g. session-header cells to live in `active_cell`.
-    #[allow(dead_code)]
+    /// Push an entry with no tool id binding. Approval notices use this path
+    /// so they can remain in the transcript without shifting the virtual
+    /// indices of tools that are still running in `active_cell`.
     pub fn push_untracked(&mut self, cell: HistoryCell) -> usize {
         let entry_idx = self.entries.len();
         self.entries.push(cell);

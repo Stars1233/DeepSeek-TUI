@@ -565,7 +565,7 @@
     "ApprovalChooseAction": "Enter para seleccionar, o presione y/a/d directamente",
     "ApprovalIntentLabel": "Intención: ",
     "ApprovalMoreLines": "  … (+{count} líneas)",
-    "ApprovalAutoDeniedSession": "Se rechazó automáticamente {tool}: ya rechazaste esta solicitud exacta en esta sesión. Reinicia CodeWhale para reconsiderarla.",
+    "ApprovalAutoDeniedSession": "Se rechazó automáticamente {tool}: se rechazó antes una solicitud coincidente durante esta ejecución de CodeWhale. Reinicia CodeWhale para reconsiderarla.",
     "ElevationTitleSandboxDenied": "  ⚠, Sandbox Denegado ",
     "ElevationTitleRequired": " Elevación de Sandbox Requerida ",
     "ElevationFieldTool": "  Herramienta: ",

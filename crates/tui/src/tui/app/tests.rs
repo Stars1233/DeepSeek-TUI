@@ -3837,6 +3837,41 @@ fn status_classifier_does_not_paint_negated_success_green() {
 }
 
 #[test]
+fn status_toasts_expire_even_behind_a_persistent_entry() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.status_message = None;
+    app.last_status_message_seen = None;
+    app.status_toasts.clear();
+    app.sticky_status = None;
+
+    app.push_status_toast("persistent", StatusToastLevel::Info, None);
+    app.push_status_toast("expired-list", StatusToastLevel::Warning, Some(1));
+    app.status_toasts
+        .back_mut()
+        .expect("temporary toast")
+        .created_at = Instant::now() - std::time::Duration::from_millis(2);
+
+    let visible = app.active_status_toasts(3);
+    assert_eq!(
+        visible
+            .iter()
+            .map(|toast| toast.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["persistent"]
+    );
+
+    app.push_status_toast("expired-single", StatusToastLevel::Warning, Some(1));
+    app.status_toasts
+        .back_mut()
+        .expect("temporary toast")
+        .created_at = Instant::now() - std::time::Duration::from_millis(2);
+
+    let active = app.active_status_toast().expect("persistent toast remains");
+    assert_eq!(active.text, "persistent");
+    assert_eq!(app.status_toasts.len(), 1);
+}
+
+#[test]
 fn onboarding_provider_copy_is_provider_neutral_in_en() {
     use crate::localization::{Locale, MessageId, tr};
 

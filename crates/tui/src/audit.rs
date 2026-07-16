@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 
 use crate::utils::{flush_and_sync, open_append};
 
-/// Append an audit event to `~/.codewhale/audit.log`.
+/// Append an audit event to `$CODEWHALE_HOME/audit.log` (or the default
+/// `~/.codewhale/audit.log` when no explicit CodeWhale home is configured).
 ///
 /// This helper is best-effort by design: callers should not fail critical flows
 /// if audit persistence fails.
@@ -40,6 +41,5 @@ fn append_event(event: &str, details: Value) -> anyhow::Result<()> {
 }
 
 fn default_audit_path() -> anyhow::Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("home directory not found"))?;
-    Ok(home.join(".codewhale").join("audit.log"))
+    Ok(codewhale_config::codewhale_home()?.join("audit.log"))
 }

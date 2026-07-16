@@ -45,7 +45,7 @@
     "ApprovalChooseAction": "Enter 執行選中項，或直接按 y/a/d",
     "ApprovalIntentLabel": "意圖：",
     "ApprovalMoreLines": "  … (還有 {count} 行)",
-    "ApprovalAutoDeniedSession": "已自動拒絕 {tool}：你先前在此工作階段中拒絕了相同請求。若要重新考慮，請重新啟動 CodeWhale。",
+    "ApprovalAutoDeniedSession": "已自動拒絕 {tool}：在本次 CodeWhale 執行期間，已有相符請求被拒絕。若要重新考慮，請重新啟動 CodeWhale。",
     "ElevationTitleSandboxDenied": "  ⚠, 沙箱拒絕 ",
     "ElevationTitleRequired": " 沙箱提權 ",
     "ElevationFieldTool": "  工具：",

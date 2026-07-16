@@ -567,7 +567,7 @@
     "ApprovalChooseAction": "Enter selected option, or press y/a/d directly",
     "ApprovalIntentLabel": "Intent: ",
     "ApprovalMoreLines": "  … (+{count} lines)",
-    "ApprovalAutoDeniedSession": "Auto-denied {tool}: you rejected this exact request earlier in this session. Restart CodeWhale to reconsider it.",
+    "ApprovalAutoDeniedSession": "Auto-denied {tool}: a matching request was denied earlier during this CodeWhale run. Restart CodeWhale to reconsider it.",
     "ElevationTitleSandboxDenied": "  ⚠, Sandbox Denied ",
     "ElevationTitleRequired": " Sandbox Elevation Required ",
     "ElevationFieldTool": "  Tool: ",
