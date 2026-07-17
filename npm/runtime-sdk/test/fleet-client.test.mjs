@@ -24,6 +24,14 @@ function fakeFetch(responseFactory) {
   return fetch;
 }
 
+test("createRuntimeClient returns CodeWhaleRuntimeClient instance", () => {
+  const fetch = fakeFetch(() => jsonResponse({}));
+  const client = createRuntimeClient({ fetch });
+
+  assert.ok(client instanceof CodeWhaleRuntimeClient);
+  assert.equal(client.baseUrl, "http://127.0.0.1:7878/");
+});
+
 test("listFleetRuns calls the Runtime API with bearer auth", async () => {
   const fetch = fakeFetch(() =>
     jsonResponse({
