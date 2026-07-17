@@ -20,10 +20,30 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
+
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+};
+#[cfg(windows)]
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
+};
+#[cfg(windows)]
+use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+#[cfg(windows)]
+use windows::core::PCWSTR;
 
 /// Events that can trigger hook execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -629,6 +649,227 @@ pub struct TurnEndPayloadInput<'a> {
     pub queued_message_count: usize,
 }
 
+/// Owns the process tree created for one hook invocation.
+///
+/// Hooks run through a shell, so killing only the immediate `sh`/`cmd.exe`
+/// child can leave the actual hook runtime alive. Unix hooks get their own
+/// process group and Windows hooks are attached to a kill-on-close Job Object.
+/// Dropping this guard after the shell exits also closes inherited stdout and
+/// stderr pipes held by any lingering descendants.
+struct HookProcessTree {
+    #[cfg(unix)]
+    pgid: libc::pid_t,
+    #[cfg(windows)]
+    job: WindowsHookJob,
+}
+
+impl HookProcessTree {
+    fn attach(child: &Child) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                pgid: child.id() as libc::pid_t,
+            })
+        }
+
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                job: WindowsHookJob::attach(child)?,
+            })
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        #[cfg(unix)]
+        {
+            let result = unsafe { libc::kill(-self.pgid, libc::SIGKILL) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    tracing::warn!(?error, "failed to terminate hook process group");
+                    let _ = child.kill();
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let result = self
+                .job
+                .terminate()
+                .or_else(|_| kill_windows_process_tree(child.id()));
+            if let Err(error) = result {
+                tracing::warn!(
+                    ?error,
+                    "failed to terminate hook process tree; killing immediate child"
+                );
+                let _ = child.kill();
+            }
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = child.kill();
+        }
+    }
+}
+
+impl Drop for HookProcessTree {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            // The shell may have exited while one of its descendants still
+            // holds a captured pipe. Reaping the process group keeps hook
+            // lifetimes bounded and lets the reader threads finish.
+            let _ = libc::kill(-self.pgid, libc::SIGKILL);
+        }
+        // On Windows, dropping WindowsHookJob closes a Job Object configured
+        // with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+    }
+}
+
+#[cfg(windows)]
+struct WindowsHookJob {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+impl WindowsHookJob {
+    fn attach(child: &Child) -> std::io::Result<Self> {
+        let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()).map_err(windows_io_error)? };
+        let job = Self { handle };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .map_err(windows_io_error)?;
+            AssignProcessToJobObject(job.handle, HANDLE(child.as_raw_handle()))
+                .map_err(windows_io_error)?;
+        }
+        Ok(job)
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        unsafe { TerminateJobObject(self.handle, 1).map_err(windows_io_error) }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsHookJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_io_error(error: windows::core::Error) -> std::io::Error {
+    std::io::Error::other(error)
+}
+
+#[cfg(windows)]
+fn resume_windows_process(child: &Child) -> std::io::Result<()> {
+    let snapshot =
+        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).map_err(windows_io_error)? };
+    let result = (|| {
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut next = unsafe { Thread32First(snapshot, &mut entry) };
+        let mut resumed = 0usize;
+        while next.is_ok() {
+            if entry.th32OwnerProcessID == child.id() {
+                let thread = unsafe {
+                    OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                        .map_err(windows_io_error)?
+                };
+                let resume_result = unsafe { ResumeThread(thread) };
+                let close_result = unsafe { CloseHandle(thread).map_err(windows_io_error) };
+                if resume_result == u32::MAX {
+                    return Err(std::io::Error::last_os_error());
+                }
+                close_result?;
+                resumed += 1;
+            }
+            next = unsafe { Thread32Next(snapshot, &mut entry) };
+        }
+        if resumed == 0 {
+            return Err(std::io::Error::other(
+                "suspended hook process had no resumable thread",
+            ));
+        }
+        Ok(())
+    })();
+    let close_result = unsafe { CloseHandle(snapshot).map_err(windows_io_error) };
+    result?;
+    close_result
+}
+
+#[cfg(windows)]
+fn kill_windows_process_tree(pid: u32) -> std::io::Result<()> {
+    let mut command = Command::new("taskkill");
+    crate::utils::suppress_console_window(&mut command);
+    let pid = pid.to_string();
+    let status = command
+        .args(["/F", "/T", "/PID", pid.as_str()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "taskkill exited with {status}"
+        )))
+    }
+}
+
+fn spawn_hook_child(
+    command: &mut Command,
+    hook_command: &str,
+) -> std::io::Result<(Child, HookProcessTree)> {
+    let mut child = command.spawn()?;
+    let process_tree = match HookProcessTree::attach(&child) {
+        Ok(process_tree) => process_tree,
+        Err(error) => {
+            // Windows hooks are created suspended, so a containment failure
+            // cannot race with a descendant spawn. Fail closed without ever
+            // running the uncontained hook.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other(format!(
+                "failed to contain hook process tree for `{hook_command}`: {error}"
+            )));
+        }
+    };
+
+    #[cfg(windows)]
+    if let Err(error) = resume_windows_process(&child) {
+        process_tree.terminate(&mut child);
+        let _ = child.wait();
+        return Err(std::io::Error::other(format!(
+            "failed to resume contained hook process for `{hook_command}`: {error}"
+        )));
+    }
+
+    Ok((child, process_tree))
+}
+
 /// Executor for running hooks
 #[derive(Debug, Clone)]
 pub struct HookExecutor {
@@ -643,7 +884,9 @@ impl HookExecutor {
         {
             use std::os::windows::process::CommandExt as _;
             let mut cmd = Command::new("cmd");
-            crate::utils::suppress_console_window(&mut cmd);
+            const CREATE_SUSPENDED: u32 = 0x0000_0004;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
             // raw_arg: cmd.exe does not parse the CRT-style \" escapes that
             // Command::arg would insert, so pass the command line verbatim.
             cmd.arg("/C").raw_arg(command);
@@ -653,6 +896,11 @@ impl HookExecutor {
         {
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(command);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt as _;
+                cmd.process_group(0);
+            }
             cmd
         }
     }
@@ -1107,12 +1355,14 @@ impl HookExecutor {
             .current_dir(&working_dir)
             .envs(env_vars)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if stdin_bytes.is_some() {
-            command.stdin(Stdio::piped());
-        }
+            .stderr(Stdio::piped())
+            .stdin(if stdin_bytes.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
 
-        let mut child = match command.spawn() {
+        let (mut child, process_tree) = match spawn_hook_child(&mut command, &hook.command) {
             Ok(child) => child,
             Err(e) => {
                 return HookResult {
@@ -1122,7 +1372,7 @@ impl HookExecutor {
                     stdout: String::new(),
                     stderr: String::new(),
                     duration: started.elapsed(),
-                    error: Some(format!("Failed to spawn hook: {e}")),
+                    error: Some(format!("Failed to start hook: {e}")),
                 };
             }
         };
@@ -1135,21 +1385,24 @@ impl HookExecutor {
         };
 
         match child.wait_timeout(timeout) {
-            Ok(Some(status)) => HookResult {
-                name: hook.name.clone(),
-                success: status.success(),
-                exit_code: status.code(),
-                stdout: join_reader(stdout_reader),
-                stderr: join_reader(stderr_reader),
-                duration: started.elapsed(),
-                error: None,
-            },
+            Ok(Some(status)) => {
+                drop(process_tree);
+                HookResult {
+                    name: hook.name.clone(),
+                    success: status.success(),
+                    exit_code: status.code(),
+                    stdout: collect_reader(stdout_reader, HOOK_PIPE_DRAIN_TIMEOUT),
+                    stderr: collect_reader(stderr_reader, HOOK_PIPE_DRAIN_TIMEOUT),
+                    duration: started.elapsed(),
+                    error: None,
+                }
+            }
             Ok(None) => {
-                let _ = child.kill();
+                process_tree.terminate(&mut child);
                 let _ = child.wait();
-                // Do not join pipe threads on timeout: descendant processes can
-                // inherit pipe fds, and waiting for those threads would defeat
-                // the hook timeout we just enforced.
+                drop(process_tree);
+                let _ = collect_reader(stdout_reader, HOOK_PIPE_SHUTDOWN_TIMEOUT);
+                let _ = collect_reader(stderr_reader, HOOK_PIPE_SHUTDOWN_TIMEOUT);
                 HookResult {
                     name: hook.name.clone(),
                     success: false,
@@ -1161,8 +1414,11 @@ impl HookExecutor {
                 }
             }
             Err(e) => {
-                let _ = child.kill();
+                process_tree.terminate(&mut child);
                 let _ = child.wait();
+                drop(process_tree);
+                let _ = collect_reader(stdout_reader, HOOK_PIPE_SHUTDOWN_TIMEOUT);
+                let _ = collect_reader(stderr_reader, HOOK_PIPE_SHUTDOWN_TIMEOUT);
                 HookResult {
                     name: hook.name.clone(),
                     success: false,
@@ -1228,13 +1484,19 @@ impl HookExecutor {
                 .current_dir(&wd)
                 .envs(&env)
                 .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            if stdin_bytes.is_some() {
-                command.stdin(Stdio::piped());
-            }
+                .stderr(Stdio::null())
+                .stdin(if stdin_bytes.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                });
 
-            let Ok(mut child) = command.spawn() else {
-                return;
+            let (mut child, process_tree) = match spawn_hook_child(&mut command, &cmd) {
+                Ok(child) => child,
+                Err(error) => {
+                    tracing::warn!(?error, command = cmd, "failed to start background hook");
+                    return;
+                }
             };
             if let (Some(mut bytes), Some(mut stdin)) = (stdin_bytes, child.stdin.take()) {
                 bytes.push(b'\n');
@@ -1242,6 +1504,7 @@ impl HookExecutor {
                 let _ = stdin.flush();
             }
             let _ = child.wait();
+            drop(process_tree);
         });
 
         // Return immediately with success (background execution is fire-and-forget)
@@ -1257,18 +1520,34 @@ impl HookExecutor {
     }
 }
 
-fn spawn_pipe_reader(mut pipe: impl Read + Send + 'static) -> JoinHandle<String> {
+const HOOK_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const HOOK_PIPE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+
+fn spawn_pipe_reader(mut pipe: impl Read + Send + 'static) -> Receiver<String> {
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut buf = String::new();
         let _ = pipe.read_to_string(&mut buf);
-        buf
-    })
+        let _ = tx.send(buf);
+    });
+    rx
 }
 
-fn join_reader(reader: Option<JoinHandle<String>>) -> String {
-    reader
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default()
+fn collect_reader(reader: Option<Receiver<String>>, timeout: Duration) -> String {
+    let Some(reader) = reader else {
+        return String::new();
+    };
+    match reader.recv_timeout(timeout) {
+        Ok(output) => output,
+        Err(RecvTimeoutError::Timeout) => {
+            tracing::warn!(
+                ?timeout,
+                "hook pipe reader did not finish after process cleanup"
+            );
+            String::new()
+        }
+        Err(RecvTimeoutError::Disconnected) => String::new(),
+    }
 }
 
 fn spawn_stdin_writer(mut stdin: std::process::ChildStdin, mut bytes: Vec<u8>) -> JoinHandle<()> {
@@ -1762,6 +2041,130 @@ NOEQUAL line dropped
                 .error
                 .as_ref()
                 .is_some_and(|e| e.contains("timed out"))
+        );
+    }
+
+    #[test]
+    fn observer_hook_receives_eof_instead_of_inheriting_terminal_stdin() {
+        const INNER_ENV: &str = "CODEWHALE_TEST_HOOK_EOF_INNER";
+        const TEST_NAME: &str =
+            "hooks::tests::observer_hook_receives_eof_instead_of_inheriting_terminal_stdin";
+
+        if std::env::var_os(INNER_ENV).is_some() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            #[cfg(not(windows))]
+            let command = write_hook_script(
+                &dir,
+                "read_to_eof.sh",
+                r#"#!/bin/sh
+payload=$(cat)
+printf 'stdin-bytes=%s\n' "${#payload}"
+"#,
+            );
+            #[cfg(windows)]
+            let command = "powershell -NoProfile -Command \"$value = [Console]::In.ReadToEnd(); [Console]::Out.WriteLine(('stdin-bytes=' + $value.Length))\"".to_string();
+            let hook = Hook::new(HookEvent::ToolCallBefore, &command).with_timeout(2);
+            let executor = HookExecutor::new(HooksConfig::default(), dir.path().to_path_buf());
+
+            let result = executor.execute_sync(&hook, &HashMap::new());
+            assert!(result.success, "stdin-less hook should finish: {result:?}");
+            assert_eq!(result.stdout.trim(), "stdin-bytes=0");
+            return;
+        }
+
+        // Keep this subprocess's stdin pipe deliberately open. Before #4489,
+        // the hook inherited that live pipe and blocked instead of receiving
+        // EOF. The inner test can only finish when HookExecutor uses null stdin.
+        let mut child = Command::new(std::env::current_exe().expect("current test binary"))
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env(INNER_ENV, "1")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn isolated hook EOF test");
+        let held_open_stdin = child.stdin.take().expect("piped child stdin");
+        let status = match child
+            .wait_timeout(Duration::from_secs(10))
+            .expect("wait for isolated hook EOF test")
+        {
+            Some(status) => status,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("isolated hook EOF test hung with parent stdin open");
+            }
+        };
+        drop(held_open_stdin);
+        assert!(status.success(), "isolated hook EOF test failed: {status}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn timed_out_hook_kills_descendant_process_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("descendant-survived");
+        let command = write_hook_script(
+            &dir,
+            "spawn_descendant.sh",
+            &format!(
+                "#!/bin/sh\n(sleep 2; printf leaked > '{}') &\nsleep 5\n",
+                marker.display()
+            ),
+        );
+        let hook = Hook::new(HookEvent::ToolCallBefore, &command).with_timeout(1);
+        let executor = HookExecutor::new(HooksConfig::default(), dir.path().to_path_buf());
+
+        let result = executor.execute_sync(&hook, &HashMap::new());
+        assert!(
+            result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.contains("timed out")),
+            "hook should time out: {result:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1_500));
+        assert!(
+            !marker.exists(),
+            "the timed-out hook's descendant escaped its process group"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn timed_out_hook_kills_windows_descendant_job() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = dir.path().join("descendant-started.txt");
+        let survived = dir.path().join("descendant-survived.txt");
+        let descendant = dir.path().join("descendant.cmd");
+        std::fs::write(
+            &descendant,
+            "@echo off\r\necho started>descendant-started.txt\r\nping -n 5 127.0.0.1 > nul\r\necho survived>descendant-survived.txt\r\n",
+        )
+        .expect("write descendant script");
+        let parent = dir.path().join("parent.cmd");
+        std::fs::write(
+            &parent,
+            "@echo off\r\nstart \"\" /b cmd.exe /d /c descendant.cmd\r\n:wait_for_child\r\nif exist descendant-started.txt goto child_started\r\nping -n 2 127.0.0.1 > nul\r\ngoto wait_for_child\r\n:child_started\r\nping -n 10 127.0.0.1 > nul\r\n",
+        )
+        .expect("write parent script");
+        let hook = Hook::new(HookEvent::ToolCallBefore, "call parent.cmd").with_timeout(3);
+        let executor = HookExecutor::new(HooksConfig::default(), dir.path().to_path_buf());
+
+        let result = executor.execute_sync(&hook, &HashMap::new());
+        assert!(
+            result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.contains("timed out")),
+            "hook should time out: {result:?}"
+        );
+        assert!(
+            started.exists(),
+            "descendant never reached its start handshake"
+        );
+        std::thread::sleep(Duration::from_secs(5));
+        assert!(
+            !survived.exists(),
+            "the timed-out hook's descendant escaped its Job Object"
         );
     }
 

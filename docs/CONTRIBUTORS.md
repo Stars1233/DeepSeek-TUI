@@ -50,6 +50,9 @@ notes, and relevant issue/PR comments.
 - **[shenyongqing](https://github.com/shenyongqing)** — the original HarmonyOS
   workflow-js bindgen approach (PR #4384), carried into the landed
   implementation with credit
+- **[Luis Mateus Vargas / luismateusvargas](https://github.com/luismateusvargas)**
+  — the Windows hook-process leak reproduction, process-tree analysis, and EOF
+  fix direction (#4489)
 
 </details>
 
