@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-17
+
+Codewhale v0.9.1 ships a first-class local web client over the Runtime API,
+first-class OpenCode Go and restored xAI device login on the provider surface,
+calendar-correct hourly automations, and a hardening pass over the community
+site's draft, feed, login, and content-watch boundaries.
+
 ### Added
 
 - Add `codewhale web [--port 7878]`, a first-class loopback-only browser
@@ -29,11 +36,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restore xAI/Grok device-code OAuth login against the live xAI OIDC
+  contract: discovery with issuer/endpoint validation and documented
+  fallbacks, user-principal scope set, RFC 8628 `slow_down` backoff capped at
+  code expiry, and bounded, sanitized error reporting for denial, expiry, and
+  malformed responses (#4410).
 - Anchor `FREQ=HOURLY` automations with `BYHOUR`/`BYMINUTE` to persisted
   local-calendar slots so intervals keep their wall-clock phase across DST,
   restart, resume, RRULE updates, duplicate-slot recovery, and post-run
   advancement. Nonexistent clock slots are skipped and ambiguous slots run at
   their first occurrence (#4381 by @h3c-hexin).
+- Give content-watch drafts canonical identities: the link and semantic-drift
+  watchers now write and dedup through one canonical draft-storage key with
+  deterministic hash-suffixed IDs, validate and bound model drift output
+  before any KV writes, and show truthful admin draft labels, so unchanged
+  findings dedup and changed findings re-draft instead of colliding (#4453).
+- Make model-policy JSON repair consider object and array payloads in source
+  order, matching nested delimiters across quoted strings and escapes and
+  returning the earliest balanced candidate that parses, instead of letting
+  an unmatched opening delimiter or object-first preference corrupt array
+  payloads (#4430).
 - Convert persisted sub-agent completion and still-running control events into
   concise, non-authoritative resume checkpoints, keeping their raw runtime
   envelopes, sentinels, and retry instructions out of restored model and TUI
@@ -43,15 +65,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state. Restart now reconciles orphaned queued/model/tool-wait worker records
   to interrupted while preserving checkpoints, and cancelled workers no
   longer read as completed in the TUI (#4408).
+- Give host applications a cancellation boundary for MCP OAuth login so a
+  stalled or abandoned provider login no longer hangs the calling session
+  (#4380).
+- Avoid blocked reader joins after Windows process kills so terminated shell
+  sessions cannot hang their readers (#4383).
 - Keep the Hotbar Setup action list synchronized with keyboard focus when the
   selection moves beyond the visible rows, including Down past `/export`
   (#4418).
+- Reconcile the website roadmap with reality: the retired share-link
+  direction is now an explicit non-goal, Workrooms is the considered
+  direction, and the local web client appears as underway, in English and
+  Chinese (#3418).
 
 ### Security
 
 - Restrict cross-origin Runtime API browser preflights to the documented
   authentication and content headers, explicitly allowing `Authorization`
   instead of relying on a wildcard (#4454).
+
+### Contributors
+
+Thank you to the contributors whose code, reports, and reviews shaped v0.9.1:
+
+- [@h3c-hexin](https://github.com/h3c-hexin) — calendar-anchored hourly
+  automation recurrence (PR #4381) and the MCP OAuth cancellation report
+  (#4380).
+- [@zhangweiii](https://github.com/zhangweiii) and
+  [@sternelee](https://github.com/sternelee) — the original first-class
+  OpenCode Go implementations (PRs #773 and #1050), harvested into the
+  current provider architecture.
+- [@seanthefuturegorilla](https://github.com/seanthefuturegorilla) — the
+  canonical OpenCode Go/Zen provider request and acceptance direction
+  (#1481).
 
 ## [0.9.0] - 2026-07-16
 
@@ -3523,7 +3569,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Hmbown/CodeWhale/compare/v0.8.67...v0.9.0
 [0.8.67]: https://github.com/Hmbown/CodeWhale/compare/v0.8.66...v0.8.67
 [0.8.66]: https://github.com/Hmbown/CodeWhale/compare/v0.8.65...v0.8.66

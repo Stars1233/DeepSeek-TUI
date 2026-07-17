@@ -1,7 +1,7 @@
 # Termux / Android arm64 Support
 
 Codewhale provides an Android arm64 build and archive path for
-[Termux](https://termux.dev). Treat v0.9.0 support as a preview until the
+[Termux](https://termux.dev). Treat v0.9.1 support as a preview until the
 real-device runtime QA tracked in #4236 and #4242 is complete. This document
 covers the install path and the platform-specific behavior differences you
 should know about.

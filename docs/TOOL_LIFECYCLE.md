@@ -47,7 +47,7 @@ The lifecycle policy exists to **shrink and discipline the model-visible
 surface** without ever breaking the ability to replay an old transcript that
 referenced a now-retired name.
 
-### Canonical work-tracking surface for v0.9.0
+### Canonical work-tracking surface for v0.9.1
 
 The model-visible progress surface is a single tool: `work_update` (#4132).
 Agents and Fleet workers use it for concrete To-do / Work progress under the

@@ -8,5 +8,5 @@ repository.workspace = true
 description = "Model/provider registry and fallback strategy for Codewhale"
 
 [dependencies]
-codewhale-config = { path = "../config", version = "0.9.0" }
+codewhale-config = { path = "../config", version = "0.9.1" }
 serde.workspace = true

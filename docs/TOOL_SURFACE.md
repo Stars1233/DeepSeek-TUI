@@ -15,7 +15,7 @@ chosen over the available shell equivalent. Companion to `crates/tui/src/prompts
   for the same backing operation are a model trap — the LLM will alternate
   between them and the cache hit rate suffers.
 
-## Current surface (v0.9.0)
+## Current surface (v0.9.1)
 
 ### File operations
 

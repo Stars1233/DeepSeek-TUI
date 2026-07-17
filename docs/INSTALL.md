@@ -24,7 +24,7 @@ verifies them against `codewhale-artifacts-sha256.txt`, installs to
 
 Codewhale ships matched `codewhale`, `codew`, and `codewhale-tui` prebuilt binaries for
 the supported platform/architecture combinations below. Android/Termux is a
-preview in v0.9.0 pending real-device QA. Linux ARM64 is available from v0.8.8
+preview in v0.9.1 pending real-device QA. Linux ARM64 is available from v0.8.8
 onward. Linux RISC-V prebuilts are temporarily paused because the locked
 `rquickjs-sys` dependency does not ship `riscv64gc-unknown-linux-gnu` bindings.
 
@@ -46,7 +46,7 @@ onward. Linux RISC-V prebuilts are temporarily paused because the locked
   [Build from source](#7-build-from-source) below.
 ³ RISC-V source builds currently need upstream `rquickjs-sys` RISC-V bindings or
   a bindgen-enabled dependency build.
-⁴ The Android/Termux build and setup paths are implemented, but v0.9.0 remains
+⁴ The Android/Termux build and setup paths are implemented, but v0.9.1 remains
   preview-only until the real-device compile, startup, approval, file-tool, and
   update checks tracked in #4236 and #4242 are complete.
 
@@ -68,7 +68,7 @@ and are built on Ubuntu 24.04, so they can require `GLIBC_2.39`.
 
 This floor applies only to the **GNU libc** arm64 asset. The static x64 (musl)
 asset has no `GLIBC_*` symbols, so it passes the install preflight and runs on
-older systems without error. The v0.9.0 GNU arm64 asset is built on Ubuntu
+older systems without error. The v0.9.1 GNU arm64 asset is built on Ubuntu
 24.04 and can require `GLIBC_2.39`. Ubuntu 22.04 ships glibc
 2.35, so those arm64 binaries fail with errors such as:
 
@@ -225,11 +225,11 @@ a download sourced from an impersonating repository or mirror.
 ## 3. Install via npm
 
 npm is the recommended install path. The `codewhale` wrapper is published at
-v0.9.0 (Node 18+; wrapper available for v0.8.56 and later).
+v0.9.1 (Node 18+; wrapper available for v0.8.56 and later).
 
 ```bash
 npm install -g codewhale
-codewhale --version   # 0.9.0
+codewhale --version   # 0.9.1
 ```
 
 `postinstall` downloads the right pair of binaries from the matching GitHub

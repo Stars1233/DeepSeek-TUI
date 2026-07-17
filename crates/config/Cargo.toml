@@ -9,8 +9,8 @@ description = "Config schema and precedence model for Codewhale"
 
 [dependencies]
 anyhow.workspace = true
-codewhale-execpolicy = { path = "../execpolicy", version = "0.9.0" }
-codewhale-secrets = { path = "../secrets", version = "0.9.0" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.1" }
+codewhale-secrets = { path = "../secrets", version = "0.9.1" }
 dirs.workspace = true
 libc = "0.2"
 serde.workspace = true
