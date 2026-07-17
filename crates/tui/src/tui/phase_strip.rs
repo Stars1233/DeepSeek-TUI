@@ -112,6 +112,19 @@ fn working_detail(app: &App) -> Option<String> {
     }
 }
 
+fn session_cache_hit_percentage(app: &App) -> Option<u8> {
+    let hit = u64::from(app.session.total_cache_hit_tokens);
+    let miss = u64::from(app.session.total_cache_miss_tokens);
+    let total = hit + miss;
+    if total == 0 {
+        return None;
+    }
+
+    // Round to the nearest whole percent. Widen before adding so sessions
+    // with saturated u32 telemetry counters can never render above 100%.
+    Some(((hit * 100 + total / 2) / total) as u8)
+}
+
 fn count_running_tools(cell: &HistoryCell) -> usize {
     let HistoryCell::Tool(tool) = cell else {
         return 0;
@@ -127,8 +140,8 @@ fn count_running_tools(cell: &HistoryCell) -> usize {
 }
 
 /// Paint the one-line phase band. Owns phase, optional working detail, cost,
-/// and detail-key hints — never route/context (header) or Tasks/To-do
-/// (work surface).
+/// configured session cache rate, and detail-key hints — never route/context
+/// (header) or Tasks/To-do (work surface).
 pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -216,15 +229,17 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         ));
     }
 
-    // Cache hit percentage right after cost, e.g. "(98%)"
-    let total = app.session.total_cache_hit_tokens
-        .saturating_add(app.session.total_cache_miss_tokens);
-    if total > 0 {
-        let pct = (app.session.total_cache_hit_tokens as f64 * 100.0
-            / total as f64).round() as u8;
+    if tier != ShellTier::Compact
+        && app.status_items.contains(&crate::config::StatusItem::Cache)
+        && let Some(pct) = session_cache_hit_percentage(app)
+    {
         left.push(Span::styled(
-            format!(" ({pct}%)"),
+            " · ",
             Style::default().fg(app.ui_theme.text_dim),
+        ));
+        left.push(Span::styled(
+            format!("cache {pct}%"),
+            Style::default().fg(app.ui_theme.text_muted),
         ));
     }
 
@@ -424,5 +439,69 @@ mod tests {
             text.contains("Auto-denied exec_shell"),
             "completion hid unresolved warning: {text}"
         );
+    }
+
+    #[test]
+    fn cache_percentage_uses_wide_arithmetic_and_rounds() {
+        let mut app = test_app();
+        assert_eq!(session_cache_hit_percentage(&app), None);
+
+        app.session.total_cache_hit_tokens = 2;
+        app.session.total_cache_miss_tokens = 1;
+        assert_eq!(session_cache_hit_percentage(&app), Some(67));
+
+        app.session.total_cache_hit_tokens = u32::MAX;
+        app.session.total_cache_miss_tokens = u32::MAX;
+        assert_eq!(session_cache_hit_percentage(&app), Some(50));
+    }
+
+    #[test]
+    fn cache_chip_is_labeled_configurable_and_hidden_when_compact() {
+        let mut app = test_app();
+        app.status_items = vec![crate::config::StatusItem::Cache];
+        app.session.total_cache_hit_tokens = 7;
+        app.session.total_cache_miss_tokens = 3;
+
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render(frame.area(), frame.buffer_mut(), &mut app))
+            .expect("draw");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("cache 70%"), "{text}");
+
+        app.status_items.clear();
+        terminal
+            .draw(|frame| render(frame.area(), frame.buffer_mut(), &mut app))
+            .expect("draw without cache");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!text.contains("cache"), "{text}");
+
+        app.status_items = vec![crate::config::StatusItem::Cache];
+        let backend = TestBackend::new(50, 1);
+        let mut compact = Terminal::new(backend).expect("compact terminal");
+        compact
+            .draw(|frame| render(frame.area(), frame.buffer_mut(), &mut app))
+            .expect("compact draw");
+        let text = compact
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!text.contains("cache"), "compact strip: {text}");
     }
 }
