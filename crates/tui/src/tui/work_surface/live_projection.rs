@@ -63,13 +63,23 @@ impl LiveWorkProjection {
     #[must_use]
     pub(super) fn from_app(app: &App) -> Self {
         let mut by_identity = HashMap::new();
+        // `subagent_cache` is shared by several views. AgentList normally
+        // removes prior-session snapshots before updating it, but the Work
+        // surface is the final owner of the "live work" claim and must defend
+        // that boundary itself. Other-session workers remain available through
+        // the explicit archived agent listing; they are not live rows here.
+        let current_session_agents = app
+            .subagent_cache
+            .iter()
+            .filter(|agent| !agent.from_prior_session)
+            .collect::<Vec<_>>();
         let cached_worker_ids = app
             .subagent_cache
             .iter()
             .map(|agent| agent.agent_id.as_str())
             .collect::<std::collections::HashSet<_>>();
         let worker_display_names = localized_whale_display_names(
-            app.subagent_cache
+            current_session_agents
                 .iter()
                 .map(|agent| (agent.agent_id.as_str(), agent.nickname.as_deref())),
             app.ui_locale.tag(),
@@ -134,7 +144,7 @@ impl LiveWorkProjection {
             }
         }
 
-        for agent in &app.subagent_cache {
+        for agent in current_session_agents {
             let status = agent
                 .worker_status
                 .map(worker_status)
@@ -352,8 +362,48 @@ mod tests {
             checkpoint: None,
             needs_input: None,
             duration_ms: 100,
-            from_prior_session: true,
+            from_prior_session: false,
         }
+    }
+
+    #[test]
+    fn fresh_session_hides_prior_terminal_and_active_sibling_workers() {
+        let mut app = test_app();
+        let mut failed = cached_agent("agent_prior_failed", "Prior failed");
+        failed.status = SubAgentStatus::Failed("old failure".to_string());
+        failed.worker_status = Some(AgentWorkerStatus::Failed);
+        failed.from_prior_session = true;
+
+        let mut running = cached_agent("agent_active_sibling", "Sibling");
+        running.from_prior_session = true;
+        app.agent_progress.insert(
+            running.agent_id.clone(),
+            "running in another session".to_string(),
+        );
+        app.subagent_cache = vec![failed, running];
+
+        let projection = LiveWorkProjection::from_app(&app);
+        assert!(
+            projection.rows.is_empty(),
+            "other-session workers must not become fresh live-work rows: {:?}",
+            projection.rows
+        );
+        assert_eq!(projection.counts, LiveWorkCounts::default());
+    }
+
+    #[test]
+    fn current_session_terminal_worker_remains_a_settled_receipt() {
+        let mut app = test_app();
+        let mut failed = cached_agent("agent_current_failed", "Current failed");
+        failed.status = SubAgentStatus::Failed("current failure".to_string());
+        failed.worker_status = Some(AgentWorkerStatus::Failed);
+        app.subagent_cache = vec![failed];
+
+        let projection = LiveWorkProjection::from_app(&app);
+        assert_eq!(projection.rows.len(), 1);
+        assert_eq!(projection.rows[0].state, LiveWorkState::Settled);
+        assert_eq!(projection.rows[0].status, "failed");
+        assert_eq!(projection.counts.active, 0);
     }
 
     #[test]

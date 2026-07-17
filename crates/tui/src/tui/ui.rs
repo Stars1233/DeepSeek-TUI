@@ -1732,51 +1732,35 @@ fn build_app_system_prompt_with_goal(
     )
 }
 
-/// How long after a task finishes it should still appear in the Work
-/// sidebar even if its `ended_at` predates the current TUI session.
-///
-/// Tasks completing during the current session always show (until the
-/// next session boundary). Tasks that completed shortly before the
-/// session also show, so users coming back to a terminal see "you just
-/// finished X". Anything older than this window is hidden — preventing
-/// the sidebar from accumulating indefinitely (bug #1913).
-const WORK_SIDEBAR_RECENT_COMPLETED_TTL: chrono::Duration = chrono::Duration::hours(2);
-
 /// Choose which durable-task summaries should appear in the Work
 /// sidebar's Tasks panel.
 ///
 /// Active tasks (`Queued`/`Running`) are always included. Terminal
-/// tasks (`Completed`/`Failed`/`Canceled`) are kept only if their
-/// `ended_at` falls within the "recent" window — defined as either:
+/// tasks (`Completed`/`Failed`/`Canceled`) are session-local receipts: both
+/// their creation and completion must fall within this TUI session. Durable
+/// tasks are stored per user rather than per TUI process, and startup recovery
+/// can stamp an old running record with a fresh `ended_at`. Treating that as a
+/// current receipt makes a new same-workspace instance look failed (#4416).
+/// Shared and older task history remains available explicitly through
+/// `/tasks`; it does not belong on the fresh live-work surface by default.
 ///
-/// - within the current TUI session (`ended_at >= session_started_at`), or
-/// - within `recent_ttl` of `now` (so a task that finished a few
-///   minutes before the session started still shows).
-///
-/// Anything older than that — including the multi-day-old completed
-/// tasks reported in bug #1913 — is excluded so the sidebar does not
-/// accumulate indefinitely across sessions.
-///
-/// A terminal task missing `ended_at` is treated as not-recent and
+/// A terminal task missing `ended_at` is treated as not current and
 /// dropped: durable tasks always stamp `ended_at` when they reach a
 /// terminal state, so absence of it indicates a record from a much
 /// older schema and isn't worth surfacing.
 pub(crate) fn select_work_sidebar_tasks(
     tasks: Vec<TaskSummary>,
     session_started_at: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-    recent_ttl: chrono::Duration,
 ) -> Vec<TaskSummary> {
-    let recent_cutoff = now - recent_ttl;
     tasks
         .into_iter()
         .filter(|task| match task.status {
             TaskStatus::Queued | TaskStatus::Running => true,
             TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Canceled => {
-                match task.ended_at {
-                    Some(ended_at) => ended_at >= session_started_at || ended_at >= recent_cutoff,
-                    None => false,
-                }
+                task.created_at >= session_started_at
+                    && task
+                        .ended_at
+                        .is_some_and(|ended_at| ended_at >= session_started_at)
             }
         })
         .collect()
@@ -1785,16 +1769,10 @@ pub(crate) fn select_work_sidebar_tasks(
 async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManager) -> bool {
     let tasks = task_manager.list_tasks(None).await;
     let session_started_at = app.session_started_at;
-    let now = chrono::Utc::now();
-    let mut entries: Vec<TaskPanelEntry> = select_work_sidebar_tasks(
-        tasks,
-        session_started_at,
-        now,
-        WORK_SIDEBAR_RECENT_COMPLETED_TTL,
-    )
-    .into_iter()
-    .map(task_summary_to_panel_entry)
-    .collect();
+    let mut entries: Vec<TaskPanelEntry> = select_work_sidebar_tasks(tasks, session_started_at)
+        .into_iter()
+        .map(task_summary_to_panel_entry)
+        .collect();
 
     entries.extend(active_rlm_task_entries(app));
 

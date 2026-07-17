@@ -15811,13 +15811,15 @@ fn toast_stack_overlay_respects_composer_boundary() {
     );
 }
 
-// === Bug #1913: Work sidebar should hide stale completed tasks ============
+// === Bugs #1913/#4416: Work sidebar session ownership =====================
 //
 // The Work sidebar reads `~/.deepseek/tasks/` on startup, which holds every
 // durable task the user has ever run. Without filtering, completed tasks
-// from prior sessions persist indefinitely. The projection helper keeps
-// active tasks, keeps tasks that finished during this session, keeps tasks
-// that finished within the last `recent_ttl`, and drops everything older.
+// from prior sessions persist indefinitely. Worse, startup recovery can mark
+// an old running task failed *during* a new TUI session. The projection helper
+// keeps active durable tasks, but only renders terminal receipts that were
+// created and completed during this TUI session. Shared history stays in
+// `/tasks` instead of making a fresh Work surface look failed.
 
 mod work_sidebar_projection_tests {
     use super::*;
@@ -15827,6 +15829,7 @@ mod work_sidebar_projection_tests {
     fn sample_task(
         id: &str,
         status: TaskStatus,
+        created_at: chrono::DateTime<Utc>,
         ended_at: Option<chrono::DateTime<Utc>>,
     ) -> TaskSummary {
         TaskSummary {
@@ -15835,8 +15838,8 @@ mod work_sidebar_projection_tests {
             prompt_summary: format!("task {id}"),
             model: "deepseek-v4-flash".to_string(),
             mode: "agent".to_string(),
-            created_at: Utc.with_ymd_and_hms(2026, 5, 16, 12, 0, 0).unwrap(),
-            started_at: Some(Utc.with_ymd_and_hms(2026, 5, 16, 12, 1, 0).unwrap()),
+            created_at,
+            started_at: Some(created_at + Duration::seconds(1)),
             ended_at,
             duration_ms: ended_at.map(|_| 1_234),
             hunt_verdict: None,
@@ -15847,29 +15850,48 @@ mod work_sidebar_projection_tests {
     }
 
     #[test]
-    fn work_sidebar_hides_stale_completed_tasks_but_keeps_active_and_recent() {
-        // Pretend the TUI session started on 2026-05-23T10:00:00Z. "Now"
-        // is one minute into the session.
+    fn work_sidebar_hides_other_session_terminals_but_keeps_current_and_active() {
+        // Pretend the TUI session started on 2026-05-23T10:00:00Z.
         let session_started_at = Utc.with_ymd_and_hms(2026, 5, 23, 10, 0, 0).unwrap();
-        let now = session_started_at + Duration::minutes(1);
-        let recent_ttl = Duration::hours(2);
 
-        let active_running = sample_task("active_run", TaskStatus::Running, None);
-        let active_queued = sample_task("active_q", TaskStatus::Queued, None);
+        let active_running = sample_task(
+            "active_run",
+            TaskStatus::Running,
+            session_started_at - Duration::minutes(30),
+            None,
+        );
+        let active_queued = sample_task(
+            "active_q",
+            TaskStatus::Queued,
+            session_started_at - Duration::minutes(20),
+            None,
+        );
 
-        // Completed during the current session — must show.
+        // Created and completed during the current session — must show.
         let just_finished = sample_task(
             "just_done",
             TaskStatus::Completed,
+            session_started_at + Duration::seconds(5),
             Some(session_started_at + Duration::seconds(30)),
         );
 
-        // Completed shortly before the session started, inside the
-        // recent-TTL window — must show.
+        // Completed shortly before the session started — shared history, not
+        // this session's live-work receipt.
         let recently_finished_before_session = sample_task(
             "recent_done",
             TaskStatus::Failed,
+            session_started_at - Duration::minutes(20),
             Some(session_started_at - Duration::minutes(15)),
+        );
+
+        // Exact restart regression: a prior-session running record is marked
+        // failed by TaskManager startup and gets a fresh ended_at. Its old
+        // creation time keeps it off the fresh Work surface.
+        let recovered_after_restart = sample_task(
+            "recovered_old_run",
+            TaskStatus::Failed,
+            session_started_at - Duration::minutes(30),
+            Some(session_started_at + Duration::seconds(1)),
         );
 
         // Stale completed from 6 days ago (the exact scenario in #1913) —
@@ -15877,34 +15899,43 @@ mod work_sidebar_projection_tests {
         let stale_completed = sample_task(
             "stale_done",
             TaskStatus::Completed,
+            session_started_at - Duration::days(6) - Duration::minutes(1),
             Some(session_started_at - Duration::days(6)),
         );
         let stale_canceled = sample_task(
             "stale_cancel",
             TaskStatus::Canceled,
+            session_started_at - Duration::days(7) - Duration::minutes(1),
             Some(session_started_at - Duration::days(7)),
         );
         let stale_failed = sample_task(
             "stale_fail",
             TaskStatus::Failed,
+            session_started_at - Duration::days(3) - Duration::minutes(1),
             Some(session_started_at - Duration::days(3)),
         );
 
         // A terminal task without `ended_at` shouldn't sneak through.
-        let terminal_no_timestamp = sample_task("ghost", TaskStatus::Completed, None);
+        let terminal_no_timestamp = sample_task(
+            "ghost",
+            TaskStatus::Completed,
+            session_started_at + Duration::seconds(1),
+            None,
+        );
 
         let tasks = vec![
             active_running.clone(),
             active_queued.clone(),
             just_finished.clone(),
             recently_finished_before_session.clone(),
+            recovered_after_restart.clone(),
             stale_completed.clone(),
             stale_canceled.clone(),
             stale_failed.clone(),
             terminal_no_timestamp.clone(),
         ];
 
-        let kept = select_work_sidebar_tasks(tasks, session_started_at, now, recent_ttl);
+        let kept = select_work_sidebar_tasks(tasks, session_started_at);
         let kept_ids: Vec<&str> = kept.iter().map(|t| t.id.as_str()).collect();
 
         assert!(
@@ -15920,9 +15951,13 @@ mod work_sidebar_projection_tests {
             "task completed during the current session must show: {kept_ids:?}"
         );
         assert!(
-            kept_ids.contains(&"recent_done"),
-            "task completed within the recent TTL before session start must show: \
+            !kept_ids.contains(&"recent_done"),
+            "prior-session terminal task must stay in explicit history: \
              {kept_ids:?}"
+        );
+        assert!(
+            !kept_ids.contains(&"recovered_old_run"),
+            "startup recovery must not turn an old task into a fresh red row: {kept_ids:?}"
         );
 
         assert!(
@@ -15948,13 +15983,14 @@ mod work_sidebar_projection_tests {
         // Edge case: a task that finished at exactly the same instant the
         // session started should still be visible (>= comparison).
         let session_started_at = Utc.with_ymd_and_hms(2026, 5, 23, 10, 0, 0).unwrap();
-        let now = session_started_at + Duration::seconds(1);
-        let recent_ttl = Duration::hours(2);
+        let at_boundary = sample_task(
+            "boundary",
+            TaskStatus::Completed,
+            session_started_at,
+            Some(session_started_at),
+        );
 
-        let at_boundary = sample_task("boundary", TaskStatus::Completed, Some(session_started_at));
-
-        let kept =
-            select_work_sidebar_tasks(vec![at_boundary], session_started_at, now, recent_ttl);
+        let kept = select_work_sidebar_tasks(vec![at_boundary], session_started_at);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, "boundary");
     }
