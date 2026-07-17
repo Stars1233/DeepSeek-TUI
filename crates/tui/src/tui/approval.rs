@@ -29,6 +29,7 @@
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::sandbox::SandboxPolicy;
+use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 use crate::tui::widgets::{ApprovalWidget, ElevationWidget, Renderable};
 use codewhale_config::ToolAskRule;
@@ -784,16 +785,13 @@ fn file_write_preview_lines(tool_name: &str, params: &Value) -> Option<Vec<Strin
             lines.extend(prefixed_preview_lines("with this", "+ ", &replace, 3));
             Some(lines)
         }
-        "apply_patch" => params
-            .get("patch")
-            .and_then(Value::as_str)
-            .and_then(apply_patch_preview_lines)
-            .or_else(|| {
-                params
-                    .get("changes")
-                    .and_then(Value::as_array)
-                    .and_then(|changes| changes_preview_lines(changes))
-            }),
+        "apply_patch" => match normalize_apply_patch_input(params) {
+            Ok(NormalizedApplyPatchInput::Patch(patch)) => apply_patch_preview_lines(patch),
+            Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
+                changes_preview_lines(entries)
+            }
+            Err(_) => None,
+        },
         _ => None,
     }
     .filter(|lines| !lines.is_empty())
@@ -2161,7 +2159,7 @@ mod tests {
             "apply_patch",
             "Apply a patch",
             &json!({
-                "changes": [
+                "replace": [
                     {
                         "path": "src/lib.rs",
                         "content": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight"
@@ -2198,13 +2196,39 @@ mod tests {
     }
 
     #[test]
+    fn prominent_details_apply_patch_legacy_changes_includes_preview() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "changes": [{
+                    "path": "src/lib.rs",
+                    "content": "fn legacy() {}\n"
+                }]
+            }),
+            "tool:apply_patch",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("legacy changes preview");
+
+        assert!(preview.iter().any(|line| line == "file: src/lib.rs"));
+        assert!(preview.iter().any(|line| line == "+ fn legacy() {}"));
+    }
+
+    #[test]
     fn apply_patch_changes_array_preview_reports_second_file_when_first_fills_buffer() {
         let request = ApprovalRequest::new(
             "test-id",
             "apply_patch",
             "Apply a patch",
             &json!({
-                "changes": [
+                "replace": [
                     {
                         "path": "src/lib.rs",
                         "content": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight"
@@ -2538,7 +2562,7 @@ diff --git a/src/b.rs b/src/b.rs
             "apply_patch",
             "Apply a patch",
             &json!({
-                "changes": [
+                "replace": [
                     { "path": "src/a.rs", "content": "one" },
                     { "path": "/workspace/src/a.rs", "content": "two" }
                 ]
@@ -2607,7 +2631,7 @@ diff --git a/src/b.rs b/src/b.rs
             "apply_patch",
             "Apply a patch",
             &json!({
-                "changes": [
+                "replace": [
                     { "path": "src/a.rs", "content": "safe" },
                     { "path": "../escape.rs", "content": "unsafe" }
                 ]

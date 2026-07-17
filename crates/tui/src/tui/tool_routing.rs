@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::hooks::HookEvent;
 use crate::tools::ReviewOutput;
+use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::spec::{ToolError, ToolResult};
 use crate::tui::active_cell::ActiveCell;
@@ -1317,24 +1318,28 @@ fn parse_plan_input(input: &serde_json::Value) -> PlanSnapshot {
 }
 
 fn parse_patch_summary(input: &serde_json::Value) -> (String, String) {
-    if let Some(changes) = input.get("changes").and_then(|v| v.as_array()) {
-        let count = changes.len();
-        let path = changes
-            .first()
-            .and_then(|c| c.get("path"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| "<file>".to_string());
-        let label = if count <= 1 {
-            path
-        } else {
-            format!("{count} files")
-        };
-        let summary = format!("Changes: {count} file(s)");
-        return (label, summary);
-    }
-
-    let patch_text = input.get("patch").and_then(|v| v.as_str()).unwrap_or("");
+    let patch_text = match normalize_apply_patch_input(input) {
+        Ok(NormalizedApplyPatchInput::Replacement {
+            entries: changes, ..
+        }) => {
+            let count = changes.len();
+            let path = changes
+                .first()
+                .and_then(|c| c.get("path"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| "<file>".to_string());
+            let label = if count <= 1 {
+                path
+            } else {
+                format!("{count} files")
+            };
+            let summary = format!("Changes: {count} file(s)");
+            return (label, summary);
+        }
+        Ok(NormalizedApplyPatchInput::Patch(patch)) => patch,
+        Err(_) => "",
+    };
     let paths = extract_patch_paths(patch_text);
     let path = input
         .get("path")
@@ -1390,24 +1395,25 @@ fn extract_patch_paths(patch: &str) -> Vec<String> {
 }
 
 pub(super) fn maybe_add_patch_preview(app: &mut App, input: &serde_json::Value) {
-    if let Some(patch) = input.get("patch").and_then(|v| v.as_str()) {
-        app.add_message(HistoryCell::Tool(ToolCell::DiffPreview(DiffPreviewCell {
-            title: "Patch Preview".to_string(),
-            diff: patch.to_string(),
-        })));
-        app.mark_history_updated();
-        return;
-    }
-
-    if let Some(changes) = input.get("changes").and_then(|v| v.as_array()) {
-        let preview = format_changes_preview(changes);
-        if !preview.trim().is_empty() {
+    match normalize_apply_patch_input(input) {
+        Ok(NormalizedApplyPatchInput::Patch(patch)) => {
             app.add_message(HistoryCell::Tool(ToolCell::DiffPreview(DiffPreviewCell {
-                title: "Changes Preview".to_string(),
-                diff: preview,
+                title: "Patch Preview".to_string(),
+                diff: patch.to_string(),
             })));
             app.mark_history_updated();
         }
+        Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
+            let preview = format_changes_preview(entries);
+            if !preview.trim().is_empty() {
+                app.add_message(HistoryCell::Tool(ToolCell::DiffPreview(DiffPreviewCell {
+                    title: "Changes Preview".to_string(),
+                    diff: preview,
+                })));
+                app.mark_history_updated();
+            }
+        }
+        Err(_) => {}
     }
 }
 
@@ -1598,6 +1604,19 @@ mod tests {
         assert_eq!(snapshot.items.len(), 1);
         assert_eq!(snapshot.items[0].step, "render all fields");
         assert_eq!(snapshot.items[0].status, StepStatus::Pending);
+    }
+
+    #[test]
+    fn parse_patch_summary_treats_replace_and_legacy_changes_equally() {
+        let replacements = json!([{
+            "path": "src/lib.rs",
+            "content": "fn replacement() {}\n"
+        }]);
+
+        let canonical = parse_patch_summary(&json!({"replace": replacements.clone()}));
+        let legacy = parse_patch_summary(&json!({"changes": replacements}));
+
+        assert_eq!(canonical, legacy);
     }
 
     // ── #3031: "(no output)" placeholder must not defeat compact rendering ─

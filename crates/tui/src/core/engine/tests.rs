@@ -8261,7 +8261,19 @@ fn edited_paths_for_write_file_returns_path() {
 }
 
 #[test]
-fn edited_paths_for_apply_patch_with_changes_returns_each_path() {
+fn edited_paths_for_apply_patch_with_replace_returns_each_path() {
+    let input = json!({
+        "replace": [
+            { "path": "a.rs", "content": "" },
+            { "path": "b.rs", "content": "" }
+        ]
+    });
+    let paths = edited_paths_for_tool("apply_patch", &input);
+    assert_eq!(paths, vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
+}
+
+#[test]
+fn edited_paths_for_apply_patch_with_legacy_changes_returns_each_path() {
     let input = json!({
         "changes": [
             { "path": "a.rs", "content": "" },

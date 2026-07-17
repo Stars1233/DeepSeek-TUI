@@ -6792,7 +6792,7 @@ diff --git a/src/b.rs b/src/b.rs\n\
             "apply_patch",
             "Apply a patch",
             &serde_json::json!({
-                "changes": [
+                "replace": [
                     { "path": "src/a.rs", "content": "a" },
                     { "path": "src/b.rs", "content": "b" },
                     { "path": "src/c.rs", "content": "c" },

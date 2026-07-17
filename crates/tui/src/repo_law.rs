@@ -22,6 +22,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::project_context::{RepoLawAction, RepoLawRule, load_repo_law_rules};
+use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 
 /// Tools whose inputs name filesystem write targets we can hold. Any
 /// write-capable tool MUST be listed here — the gate fails open for tools it
@@ -86,7 +87,8 @@ pub(crate) fn repo_law_plan_decision(
 }
 
 /// Extract workspace-relative write targets from a tool input. Covers the
-/// `path`/`target`/`destination`/`file_path` params, `changes[].path`, and
+/// `path`/`target`/`destination`/`file_path` params, canonical
+/// `replace[].path`, legacy `changes[].path`, and
 /// every unified-diff / codex-envelope header shape the patch tools accept —
 /// old (`--- `) and new (`+++ `) paths, with or without an `a/`/`b/` prefix,
 /// tab-timestamp suffixes stripped, and `/dev/null` (deletion) falling back
@@ -99,41 +101,44 @@ fn write_target_paths(workspace: &Path, input: &Value) -> Vec<String> {
             push_normalized(&mut targets, workspace, path);
         }
     }
-    if let Some(changes) = input.get("changes").and_then(Value::as_array) {
-        for change in changes {
-            if let Some(path) = change.get("path").and_then(Value::as_str) {
-                push_normalized(&mut targets, workspace, path);
+    match normalize_apply_patch_input(input) {
+        Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
+            for change in entries {
+                if let Some(path) = change.get("path").and_then(Value::as_str) {
+                    push_normalized(&mut targets, workspace, path);
+                }
             }
         }
-    }
-    if let Some(patch) = input.get("patch").and_then(Value::as_str) {
-        let mut pending_old: Option<String> = None;
-        for line in patch.lines() {
-            if let Some(rest) = line.strip_prefix("*** Update File: ") {
-                push_normalized(&mut targets, workspace, rest.trim());
-            } else if let Some(rest) = line.strip_prefix("*** Add File: ") {
-                push_normalized(&mut targets, workspace, rest.trim());
-            } else if let Some(rest) = line.strip_prefix("*** Delete File: ") {
-                push_normalized(&mut targets, workspace, rest.trim());
-            } else if let Some(rest) = line.strip_prefix("--- ") {
-                // Old path: remember it so a `+++ /dev/null` deletion still
-                // holds the file being removed.
-                pending_old = diff_header_path(rest);
-                if let Some(ref p) = pending_old {
-                    push_normalized(&mut targets, workspace, p);
-                }
-            } else if let Some(rest) = line.strip_prefix("+++ ") {
-                match diff_header_path(rest) {
-                    Some(new_path) => push_normalized(&mut targets, workspace, &new_path),
-                    // `+++ /dev/null` → deletion; the target is the old path.
-                    None => {
-                        if let Some(old) = pending_old.take() {
-                            push_normalized(&mut targets, workspace, &old);
+        Ok(NormalizedApplyPatchInput::Patch(patch)) => {
+            let mut pending_old: Option<String> = None;
+            for line in patch.lines() {
+                if let Some(rest) = line.strip_prefix("*** Update File: ") {
+                    push_normalized(&mut targets, workspace, rest.trim());
+                } else if let Some(rest) = line.strip_prefix("*** Add File: ") {
+                    push_normalized(&mut targets, workspace, rest.trim());
+                } else if let Some(rest) = line.strip_prefix("*** Delete File: ") {
+                    push_normalized(&mut targets, workspace, rest.trim());
+                } else if let Some(rest) = line.strip_prefix("--- ") {
+                    // Old path: remember it so a `+++ /dev/null` deletion still
+                    // holds the file being removed.
+                    pending_old = diff_header_path(rest);
+                    if let Some(ref p) = pending_old {
+                        push_normalized(&mut targets, workspace, p);
+                    }
+                } else if let Some(rest) = line.strip_prefix("+++ ") {
+                    match diff_header_path(rest) {
+                        Some(new_path) => push_normalized(&mut targets, workspace, &new_path),
+                        // `+++ /dev/null` → deletion; the target is the old path.
+                        None => {
+                            if let Some(old) = pending_old.take() {
+                                push_normalized(&mut targets, workspace, &old);
+                            }
                         }
                     }
                 }
             }
         }
+        Err(_) => {}
     }
     targets.sort();
     targets.dedup();
@@ -294,7 +299,14 @@ mod tests {
     fn apply_patch_targets_are_extracted_from_all_shapes() {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
-        // changes[].path shape
+        // Canonical replace[].path shape.
+        let decision = repo_law_plan_decision(
+            tmp.path(),
+            "apply_patch",
+            &json!({"replace": [{"path": "crates/protocol/msg.rs"}]}),
+        );
+        assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
+        // Legacy changes[].path shape must receive the same hold.
         let decision = repo_law_plan_decision(
             tmp.path(),
             "apply_patch",
