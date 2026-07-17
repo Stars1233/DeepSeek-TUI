@@ -4,7 +4,7 @@ use crate::settings::Settings;
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use crate::tools::plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
 use crate::tools::todo::TodoStatus;
-use crate::tui::clipboard::PastedImage;
+use crate::tui::clipboard::{ClipboardHandler, PastedImage};
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
 
 fn test_options(yolo: bool) -> TuiOptions {
@@ -2941,6 +2941,30 @@ fn clipboard_text_paste_matches_bracketed_paste_state() {
     assert_eq!(clipboard.cursor_position, bracketed.cursor_position);
     assert_eq!(clipboard.slash_menu_hidden, bracketed.slash_menu_hidden);
     assert_eq!(clipboard.mention_menu_hidden, bracketed.mention_menu_hidden);
+}
+
+#[test]
+fn ssh_direct_clipboard_paste_points_to_terminal_owned_bracketed_paste() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.input = "keep this draft".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.clipboard = ClipboardHandler::for_test(true, true);
+
+    assert!(!app.paste_from_clipboard());
+    assert_eq!(app.input, "keep this draft");
+    let hint = app
+        .status_message
+        .as_deref()
+        .expect("remote paste hint")
+        .to_string();
+    assert!(hint.contains("SSH paste uses your local terminal"));
+    assert!(hint.contains("Cmd+V on macOS"));
+    assert!(hint.contains("Ctrl+Shift+V on Linux/Windows"));
+
+    app.status_message = None;
+    assert!(!app.paste_api_key_from_clipboard());
+    assert!(app.api_key_input.is_empty());
+    assert_eq!(app.status_message.as_deref(), Some(hint.as_str()));
 }
 
 #[test]

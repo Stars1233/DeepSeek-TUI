@@ -5163,11 +5163,21 @@ impl App {
         }
     }
 
-    /// Paste from clipboard into input
-    pub fn paste_from_clipboard(&mut self) {
+    /// Paste from clipboard into input.
+    ///
+    /// Returns whether content was inserted. In SSH sessions the terminal
+    /// client owns paste, so direct clipboard shortcuts surface the local
+    /// terminal-paste instruction while `Event::Paste` remains the data path.
+    pub fn paste_from_clipboard(&mut self) -> bool {
+        if let Some(hint) = self.clipboard.terminal_paste_hint() {
+            self.status_message = Some(hint.to_string());
+            return false;
+        }
         if let Some(content) = self.clipboard.read(self.workspace.as_path()) {
             self.apply_clipboard_content(content);
+            return true;
         }
+        false
     }
 
     pub fn apply_clipboard_content(&mut self, content: ClipboardContent) {
@@ -5183,10 +5193,16 @@ impl App {
         }
     }
 
-    pub fn paste_api_key_from_clipboard(&mut self) {
+    pub fn paste_api_key_from_clipboard(&mut self) -> bool {
+        if let Some(hint) = self.clipboard.terminal_paste_hint() {
+            self.status_message = Some(hint.to_string());
+            return false;
+        }
         if let Some(ClipboardContent::Text(text)) = self.clipboard.read(self.workspace.as_path()) {
             self.insert_api_key_str(&text);
+            return true;
         }
+        false
     }
 
     pub fn scroll_up(&mut self, amount: usize) {

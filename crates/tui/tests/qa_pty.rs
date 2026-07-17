@@ -34,7 +34,12 @@ fn qa_pty_test_lock() -> MutexGuard<'static, ()> {
 
 fn boot_minimal() -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
     let ws = make_sealed_workspace()?;
-    spawn_minimal(ws)
+    spawn_minimal_with_env(ws, &[])
+}
+
+fn boot_minimal_over_ssh() -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
+    let ws = make_sealed_workspace()?;
+    spawn_minimal_with_env(ws, &[("SSH_CONNECTION", "192.0.2.10 51234 192.0.2.20 22")])
 }
 
 fn boot_minimal_without_retry() -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
@@ -43,13 +48,14 @@ fn boot_minimal_without_retry() -> anyhow::Result<(qa_harness::harness::SealedWo
         ws.home().join(".deepseek").join("config.toml"),
         "[retry]\nenabled = false\n",
     )?;
-    spawn_minimal(ws)
+    spawn_minimal_with_env(ws, &[])
 }
 
-fn spawn_minimal(
+fn spawn_minimal_with_env(
     ws: qa_harness::harness::SealedWorkspace,
+    extra_env: &[(&str, &str)],
 ) -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
-    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+    let mut builder = Harness::builder(Harness::cargo_bin("codewhale-tui"))
         .cwd(ws.workspace())
         .clear_env()
         .seal_home(ws.home())
@@ -71,8 +77,11 @@ fn spawn_minimal(
             "--no-project-config",
             "--skip-onboarding",
         ])
-        .size(40, 140)
-        .spawn()?;
+        .size(40, 140);
+    for (key, value) in extra_env {
+        builder = builder.env(*key, *value);
+    }
+    let mut h = builder.spawn()?;
     enter_launch_session(&mut h)?;
     Ok((ws, h))
 }
@@ -917,6 +926,34 @@ fn paste_bracketed_with_trailing_newline_does_not_autosubmit() -> anyhow::Result
     assert!(
         f.contains("first line") || f.contains("third line"),
         "pasted text should be visible in composer:\n{dump}"
+    );
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
+/// A macOS terminal's Cmd+V is handled on the client: it injects bracketed
+/// paste bytes into the Linux SSH PTY. SSH detection must not divert that
+/// event into the remote host clipboard path.
+#[test]
+fn paste_bracketed_from_macos_client_into_linux_ssh_stays_in_composer() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let (_ws, mut h) = boot_minimal_over_ssh()?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+
+    let payload = "mac-client-to-linux-host\nsecond-line-stays-in-composer";
+    h.paste(payload)?;
+    h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(2))?;
+
+    let frame = h.frame();
+    let dump = frame.debug_dump();
+    assert!(
+        frame.contains("mac-client-to-linux-host"),
+        "SSH bracketed paste was not inserted:\n{dump}"
+    );
+    assert!(
+        !frame.contains("Working") && !frame.contains("thinking"),
+        "SSH bracketed paste unexpectedly submitted a turn:\n{dump}"
     );
 
     let _ = h.shutdown();

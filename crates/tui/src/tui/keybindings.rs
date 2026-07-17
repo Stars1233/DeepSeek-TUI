@@ -271,12 +271,14 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
     },
     // --- Clipboard ---
     KeybindingEntry {
-        chord: "Ctrl+V",
+        // Keep both terminal-client families visible: the TUI may be running
+        // on Linux while the user's SSH terminal is on macOS (or vice versa).
+        chord: "Cmd+V / Ctrl+Shift+V",
         description_id: crate::localization::MessageId::KbPasteAttach,
         section: KeybindingSection::Clipboard,
     },
     KeybindingEntry {
-        chord: "Ctrl+Shift+C",
+        chord: "Cmd+C / Ctrl+Shift+C",
         description_id: crate::localization::MessageId::KbCopySelection,
         section: KeybindingSection::Clipboard,
     },
@@ -344,6 +346,23 @@ mod tests {
                 .all(|entry| !entry.chord.contains("Alt+?")),
             "Alt+? must not be advertised in the help catalog"
         );
+    }
+
+    #[test]
+    fn clipboard_help_is_terminal_client_neutral_for_ssh() {
+        let paste = KEYBINDINGS
+            .iter()
+            .find(|entry| entry.description_id == crate::localization::MessageId::KbPasteAttach)
+            .expect("paste binding should be documented");
+        let copy = KEYBINDINGS
+            .iter()
+            .find(|entry| entry.description_id == crate::localization::MessageId::KbCopySelection)
+            .expect("copy binding should be documented");
+
+        assert!(paste.chord.contains("Cmd+V"));
+        assert!(paste.chord.contains("Ctrl+Shift+V"));
+        assert!(copy.chord.contains("Cmd+C"));
+        assert!(copy.chord.contains("Ctrl+Shift+C"));
     }
 
     #[test]

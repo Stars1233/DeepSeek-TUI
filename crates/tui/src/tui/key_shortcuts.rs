@@ -21,7 +21,9 @@ pub(super) fn has_control_like_modifier_for_platform(
         || (is_macos && modifiers.contains(KeyModifiers::SUPER))
 }
 
-/// Copy-to-clipboard: `Cmd+C` on macOS or `Ctrl+Shift+C` elsewhere.
+/// Copy-to-clipboard: accept both `Cmd+C` and `Ctrl+Shift+C` regardless of the
+/// compiled host OS. Over SSH, the terminal client and the Codewhale host can
+/// be different operating systems.
 pub(super) fn is_copy_shortcut(key: &KeyEvent) -> bool {
     let is_c = matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
     if !is_c {
@@ -92,8 +94,10 @@ pub(super) fn is_macos_option_v_legacy_key_for_platform(key: &KeyEvent, is_macos
     is_macos && key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('\u{221A}'))
 }
 
-/// Paste-from-clipboard: `Cmd+V` (macOS), `Ctrl+V` (Linux/Windows), or
-/// the legacy raw `\u{16}` ETX byte some terminals emit.
+/// Paste-from-clipboard: accept `Cmd+V`, `Ctrl+V`, or the legacy raw `\u{16}`
+/// byte some terminals emit. A remote terminal normally consumes its local
+/// paste chord and sends an `Event::Paste`; accepting both modifier families
+/// still keeps enhanced-keyboard clients independent of the remote host OS.
 pub(super) fn is_paste_shortcut(key: &KeyEvent) -> bool {
     let is_v = matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'));
     let is_legacy_ctrl_v = matches!(key.code, KeyCode::Char('\u{16}'));
@@ -135,4 +139,25 @@ pub(super) fn is_ctrl_h_backspace(key: &KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::ALT)
         && !key.modifiers.contains(KeyModifiers::SUPER)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_shortcuts_follow_terminal_client_not_compiled_host() {
+        let mac_copy = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER);
+        let mac_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER);
+        let linux_copy = KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        let linux_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+
+        assert!(is_copy_shortcut(&mac_copy));
+        assert!(is_paste_shortcut(&mac_paste));
+        assert!(is_copy_shortcut(&linux_copy));
+        assert!(is_paste_shortcut(&linux_paste));
+    }
 }

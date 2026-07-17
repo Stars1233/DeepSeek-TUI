@@ -4652,8 +4652,9 @@ async fn run_event_loop(
                         && app.onboarding == OnboardingState::ApiKey =>
                     {
                         // Cmd+V / Ctrl+V paste (bracketed paste handled above)
-                        app.paste_api_key_from_clipboard();
-                        onboarding::sync_api_key_validation_status(app, false);
+                        if app.paste_api_key_from_clipboard() {
+                            onboarding::sync_api_key_validation_status(app, false);
+                        }
                     }
                     KeyCode::Char(c)
                         if app.onboarding == OnboardingState::ApiKey

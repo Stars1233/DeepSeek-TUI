@@ -7,6 +7,7 @@
 //! endpoint, so we materialize the bytes to disk instead of base64-embedding
 //! them in the request).
 
+use std::ffi::OsStr;
 #[cfg(not(test))]
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,64 @@ use base64::Engine as _;
 use image::{ImageBuffer, Rgba};
 
 const OSC52_MAX_BYTES: usize = 100 * 1024;
+const REMOTE_PASTE_HINT: &str =
+    "SSH paste uses your local terminal: press Cmd+V on macOS or Ctrl+Shift+V on Linux/Windows.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardWriteOrder {
+    /// An SSH TUI must target the terminal client. A native clipboard on the
+    /// remote host can succeed while writing to the wrong machine.
+    TerminalClientOnly,
+    /// A local TUI should prefer the native clipboard (including images) and
+    /// retain OSC 52 as the terminal fallback.
+    NativeHostThenTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalClipboardContext {
+    in_ssh_session: bool,
+    in_tmux: bool,
+}
+
+impl TerminalClipboardContext {
+    fn detect() -> Self {
+        let ssh_client = std::env::var_os("SSH_CLIENT");
+        let ssh_connection = std::env::var_os("SSH_CONNECTION");
+        let ssh_tty = std::env::var_os("SSH_TTY");
+        let tmux = std::env::var_os("TMUX");
+        Self::from_env_values(
+            ssh_client.as_deref(),
+            ssh_connection.as_deref(),
+            ssh_tty.as_deref(),
+            tmux.as_deref(),
+        )
+    }
+
+    fn from_env_values(
+        ssh_client: Option<&OsStr>,
+        ssh_connection: Option<&OsStr>,
+        ssh_tty: Option<&OsStr>,
+        tmux: Option<&OsStr>,
+    ) -> Self {
+        Self {
+            // OpenSSH normally exports SSH_CLIENT and SSH_CONNECTION. SSH_TTY
+            // is limited to PTY sessions, so it cannot be the only signal.
+            in_ssh_session: [ssh_client, ssh_connection, ssh_tty]
+                .into_iter()
+                .flatten()
+                .any(|value| !value.is_empty()),
+            in_tmux: tmux.is_some_and(|value| !value.is_empty()),
+        }
+    }
+
+    fn write_order(self) -> ClipboardWriteOrder {
+        if self.in_ssh_session {
+            ClipboardWriteOrder::TerminalClientOnly
+        } else {
+            ClipboardWriteOrder::NativeHostThenTerminal
+        }
+    }
+}
 
 // === Types ===
 
@@ -81,6 +140,7 @@ pub enum ClipboardContent {
 
 /// Clipboard reader/writer helper.
 pub struct ClipboardHandler {
+    terminal_context: TerminalClipboardContext,
     #[cfg(any(
         target_os = "macos",
         target_os = "windows",
@@ -104,7 +164,12 @@ impl ClipboardHandler {
     /// (`ensure_clipboard`) so that startup on hosts without an X11/Wayland
     /// server (headless, WSL2) never blocks the TUI event loop.
     pub fn new() -> Self {
+        Self::with_terminal_context(TerminalClipboardContext::detect())
+    }
+
+    fn with_terminal_context(terminal_context: TerminalClipboardContext) -> Self {
         Self {
+            terminal_context,
             #[cfg(any(
                 target_os = "macos",
                 target_os = "windows",
@@ -120,6 +185,23 @@ impl ClipboardHandler {
             #[cfg(test)]
             written_text: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(in_ssh_session: bool, in_tmux: bool) -> Self {
+        Self::with_terminal_context(TerminalClipboardContext {
+            in_ssh_session,
+            in_tmux,
+        })
+    }
+
+    /// SSH cannot synchronously read the terminal client's clipboard. Paste
+    /// must be initiated by the local terminal so it arrives as bracketed
+    /// paste (or a raw paste burst on older terminals).
+    pub(crate) fn terminal_paste_hint(&self) -> Option<&'static str> {
+        self.terminal_context
+            .in_ssh_session
+            .then_some(REMOTE_PASTE_HINT)
     }
 
     /// Try to connect to the system clipboard, bounded by a short timeout.
@@ -156,6 +238,14 @@ impl ClipboardHandler {
     /// `workspace` is used as a fallback location when `~/.codewhale/` cannot
     /// be resolved (e.g. running with a stripped HOME in CI sandboxes).
     pub fn read(&mut self, workspace: &Path) -> Option<ClipboardContent> {
+        // In SSH, wl-paste/arboard address the remote host (or an unrelated
+        // forwarded display), not the keyboard user's terminal clipboard.
+        // The terminal-owned bracketed-paste path is handled in ui.rs before
+        // this direct-read fallback is considered.
+        if self.terminal_context.in_ssh_session {
+            return None;
+        }
+
         #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(test)))]
         if let Ok(text) = read_text_with_wlpaste() {
             return Some(ClipboardContent::Text(text));
@@ -194,6 +284,11 @@ impl ClipboardHandler {
 
         #[cfg(not(test))]
         {
+            if self.terminal_context.write_order() == ClipboardWriteOrder::TerminalClientOnly {
+                return write_text_with_osc52(text, self.terminal_context.in_tmux)
+                    .map_err(|err| anyhow::anyhow!("Clipboard unavailable: {err}"));
+            }
+
             #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
             if write_text_with_wlcopy(text).is_ok() {
                 return Ok(());
@@ -223,7 +318,7 @@ impl ClipboardHandler {
                 return Ok(());
             }
 
-            write_text_with_osc52(text)
+            write_text_with_osc52(text, self.terminal_context.in_tmux)
                 .map_err(|err| anyhow::anyhow!("Clipboard unavailable: {err}"))
         }
     }
@@ -326,13 +421,12 @@ fn write_text_with_wlcopy_using_argv(program: &str, text: &str) -> Result<()> {
 }
 
 #[cfg(not(test))]
-fn write_text_with_osc52(text: &str) -> Result<()> {
+fn write_text_with_osc52(text: &str, in_tmux: bool) -> Result<()> {
     let mut stdout = io::stdout();
     if !stdout.is_terminal() {
         bail!("OSC 52 clipboard fallback requires a terminal");
     }
 
-    let in_tmux = std::env::var_os("TMUX").is_some();
     let sequence = osc52_sequence(text, in_tmux)?;
     stdout
         .write_all(sequence.as_bytes())
@@ -514,6 +608,61 @@ mod tests {
         };
         assert_eq!(p.short_label(), "1024x768 PNG");
         assert_eq!(p.size_label(), "235KB");
+    }
+
+    #[test]
+    fn ssh_detection_covers_openssh_markers_and_ignores_empty_values() {
+        let client = TerminalClipboardContext::from_env_values(
+            Some(OsStr::new("192.0.2.10 51234 22")),
+            None,
+            None,
+            None,
+        );
+        let connection = TerminalClipboardContext::from_env_values(
+            None,
+            Some(OsStr::new("192.0.2.10 51234 192.0.2.20 22")),
+            None,
+            None,
+        );
+        let tty = TerminalClipboardContext::from_env_values(
+            None,
+            None,
+            Some(OsStr::new("/dev/pts/4")),
+            None,
+        );
+        let empty = TerminalClipboardContext::from_env_values(
+            Some(OsStr::new("")),
+            Some(OsStr::new("")),
+            Some(OsStr::new("")),
+            Some(OsStr::new("")),
+        );
+
+        assert!(client.in_ssh_session);
+        assert!(connection.in_ssh_session);
+        assert!(tty.in_ssh_session);
+        assert!(!empty.in_ssh_session);
+        assert!(!empty.in_tmux);
+    }
+
+    #[test]
+    fn ssh_copy_targets_terminal_client_before_native_host_clipboards() {
+        let remote_tmux = TerminalClipboardContext::from_env_values(
+            Some(OsStr::new("192.0.2.10 51234 22")),
+            None,
+            None,
+            Some(OsStr::new("/tmp/tmux-1000/default,1,0")),
+        );
+        let local = TerminalClipboardContext::from_env_values(None, None, None, None);
+
+        assert_eq!(
+            remote_tmux.write_order(),
+            ClipboardWriteOrder::TerminalClientOnly
+        );
+        assert!(remote_tmux.in_tmux);
+        assert_eq!(
+            local.write_order(),
+            ClipboardWriteOrder::NativeHostThenTerminal
+        );
     }
 
     #[test]
