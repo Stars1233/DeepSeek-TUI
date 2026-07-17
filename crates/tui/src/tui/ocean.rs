@@ -167,11 +167,20 @@ impl OceanColumn {
 impl OceanRamp {
     #[must_use]
     pub fn for_theme(theme: &UiTheme) -> Option<Self> {
+        // Solarized Light's Base3 (#fdf6e3) background is part of the named
+        // palette's contract. Tinting it with the underwater field turns the
+        // shell green-grey and no longer renders Solarized Light (#4457).
+        // Keep foreground ambient life, just as the flat treatment does, but
+        // leave the canonical background untouched.
+        if theme.mode == PaletteMode::SolarizedLight {
+            return None;
+        }
+
         let base = rgb(theme.surface_bg)?;
         let seafoam = rgb(theme.accent_secondary).unwrap_or((79, 209, 197));
 
         let (surface, middle, deep) = match theme.mode {
-            PaletteMode::Light | PaletteMode::SolarizedLight => (
+            PaletteMode::Light => (
                 mix(base, seafoam, 0.07),
                 mix(base, seafoam, 0.13),
                 mix(base, (70, 139, 196), 0.18),
@@ -181,6 +190,7 @@ impl OceanRamp {
                 mix(base, (7, 30, 54), 0.40),
                 mix(base, (2, 9, 24), 0.64),
             ),
+            PaletteMode::SolarizedLight => unreachable!("handled above"),
         };
 
         Some(Self {
@@ -333,13 +343,26 @@ mod tests {
     }
 
     #[test]
+    fn solarized_light_preserves_its_canonical_base3_background() {
+        let theme = crate::palette::SOLARIZED_LIGHT_UI_THEME;
+
+        assert_eq!(theme.surface_bg, Color::Rgb(0xfd, 0xf6, 0xe3));
+        assert_eq!(OceanRamp::for_theme(&theme), None);
+    }
+
+    #[test]
     fn every_shipped_theme_has_an_intentional_ocean_treatment() {
         use crate::palette::{SELECTABLE_THEMES, ThemeId};
 
         for id in SELECTABLE_THEMES {
             let ramp = OceanRamp::for_theme(&id.ui_theme());
-            if matches!(id, ThemeId::Terminal) {
-                assert_eq!(ramp, None, "Terminal must keep its inherited background");
+            if matches!(id, ThemeId::Terminal | ThemeId::SolarizedLight) {
+                assert_eq!(
+                    ramp,
+                    None,
+                    "{} must keep its canonical background",
+                    id.name()
+                );
             } else {
                 let ramp = ramp.unwrap_or_else(|| panic!("{} has no ocean ramp", id.name()));
                 assert_ne!(

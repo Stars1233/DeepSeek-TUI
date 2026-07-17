@@ -281,7 +281,9 @@ impl ModalView for ThemePickerView {
 
         let treatment = if matches!(self.current(), ThemeId::Terminal) {
             tr(self.locale, MessageId::ThemeTreatmentOmbreUnavailable)
-        } else if self.ocean_treatment.is_flat() {
+        } else if self.ocean_treatment.is_flat()
+            || crate::tui::ocean::OceanRamp::for_theme(&live).is_none()
+        {
             tr(self.locale, MessageId::ThemeTreatmentFlatActive)
         } else {
             tr(self.locale, MessageId::ThemeTreatmentOmbreActive)
@@ -587,6 +589,21 @@ mod tests {
             .collect::<String>();
         assert!(terminal_text.contains("Ombre unavailable"));
         assert!(terminal_text.contains("Terminal owns the background"));
+
+        let solarized = ThemePickerView::new_with_treatment(
+            "solarized-light".to_string(),
+            crate::tui::ocean::OceanTreatment::Ombre,
+            Locale::En,
+        );
+        let mut solarized_buf = ratatui::buffer::Buffer::empty(area);
+        solarized.render(area, &mut solarized_buf);
+        let solarized_text = solarized_buf
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(solarized_text.contains("Treatment  Flat — active"));
+        assert!(!solarized_text.contains("Treatment  Ombre — active"));
     }
 
     #[test]

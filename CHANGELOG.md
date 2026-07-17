@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve Solarized Light's canonical Base3 (`#fdf6e3`) shell background
+  instead of tinting it green-grey through the default underwater Ombre
+  treatment, while retaining foreground ambient life (#4457 by
+  @AiurArtanis).
+
 ## [0.9.1] - 2026-07-17
 
 Codewhale v0.9.1 ships a first-class local web client over the Runtime API,

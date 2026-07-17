@@ -437,7 +437,8 @@ patches, and TUI fixes landed alongside first-time and returning contributor wor
 - **[lihuan215](https://github.com/lihuan215)** — Unix socket hook sink design harvested into the opt-in hook event path (#2333, #2430)
 - **[AdityaVG13](https://github.com/AdityaVG13)** — Xiaomi MiMo provider support (#2246)
 - **[New2Niu](https://github.com/New2Niu)** — macOS display notifications (#2260)
-- **[AiurArtanis](https://github.com/AiurArtanis)** — Solarized Light theme (#2270)
+- **[AiurArtanis](https://github.com/AiurArtanis)** — Solarized Light theme and
+  canonical-background regression report (#2270, #4457)
 - **[Lee-take](https://github.com/Lee-take)** — task migration and session environment isolation fixes (#2272)
 - **[LeoAlex0](https://github.com/LeoAlex0)** — session persistence fixes for message counts and tool-output cache preservation (#2388, #2395)
 - **[jimmyzhuu](https://github.com/jimmyzhuu)** — Baidu AI Search backend for `web_search` (#2371)

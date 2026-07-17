@@ -728,8 +728,9 @@ impl Renderable for ChatWidget {
 impl ChatWidget {
     /// Paint the underwater field. The water column belongs to ombre;
     /// ambient life belongs to every underwater treatment. Flat keeps the
-    /// theme surface and Terminal keeps its inherited background, but
-    /// neither means a lifeless ocean.
+    /// theme surface, Solarized Light keeps canonical Base3, and Terminal
+    /// keeps its inherited background, but none of those means a lifeless
+    /// ocean.
     fn render_underwater_field(&self, area: Rect, buf: &mut Buffer) {
         if let Some(column) = self.ocean_column {
             for local_y in 0..area.height {
@@ -5873,6 +5874,38 @@ mod tests {
         assert!(
             (0..area.height).any(|y| (0..area.width).any(|x| buf[(x, y)].symbol() == "F")),
             "Fleet setup remains available in flat mode"
+        );
+    }
+
+    #[test]
+    fn solarized_light_ombre_keeps_canonical_surface_and_ambient_life() {
+        let mut app = create_test_app();
+        app.ui_theme = crate::palette::SOLARIZED_LIGHT_UI_THEME;
+        app.ocean_treatment = crate::tui::ocean::OceanTreatment::Ombre;
+        app.low_motion = false;
+        app.fancy_animations = true;
+        // The old cyan-tinted ramp produced the reported #e1e9da at row 16
+        // of a common 30-row viewport.
+        let area = Rect::new(0, 0, 100, 30);
+        let canonical_base3 = Color::Rgb(0xfd, 0xf6, 0xe3);
+        let mut buf = Buffer::empty(area);
+        ChatWidget::new(&mut app, area).render(area, &mut buf);
+
+        assert_eq!(buf[(0, 0)].bg, canonical_base3);
+        assert_eq!(
+            buf[(0, 16)].bg,
+            canonical_base3,
+            "Solarized Light must not regress to the reported #e1e9da tint"
+        );
+        assert_eq!(
+            buf[(0, 29)].bg,
+            canonical_base3,
+            "Solarized Light must keep canonical Base3 through the viewport"
+        );
+        let rendered = buffer_text(&buf, area);
+        assert!(
+            rendered.contains("><>") || rendered.contains("<><"),
+            "preserving the background must not remove ambient life:\n{rendered}"
         );
     }
 
