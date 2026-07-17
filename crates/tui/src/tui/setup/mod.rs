@@ -5995,7 +5995,7 @@ mod tests {
     #[test]
     fn tools_mcp_detail_lines_show_read_only_inventory_facts() {
         let facts = SetupRuntimeFacts {
-            tools_mcp_servers_result: "healthy — 2 configured (2 healthy, 0 needs_config, 0 off; global present at /tmp/mcp.json; project missing at /tmp/project/.codewhale/mcp.json); healthy: docs, search".to_string(),
+            tools_mcp_servers_result: "configured — 2 configured (2 configuration valid, 0 needs_config, 0 off; global present at /tmp/mcp.json; project missing at /tmp/project/.codewhale/mcp.json); live health not checked — servers not started; configuration valid: docs, search".to_string(),
             tools_mcp_skills_result: "healthy — 3 discovered (hotbar skill sources), 3 on disk at /tmp/skills".to_string(),
             tools_mcp_tools_result: "healthy — 1 entries, 0 script-plugin tools at /tmp/tools".to_string(),
             tools_mcp_plugins_result: "off — nothing configured yet (missing at /tmp/plugins); optional".to_string(),
@@ -6012,7 +6012,8 @@ mod tests {
         let text = lines_to_text(view.tools_mcp_detail_lines());
 
         assert!(text.contains("MCP servers:"));
-        assert!(text.contains("healthy"));
+        assert!(text.contains("configured"));
+        assert!(text.contains("live health not checked"));
         assert!(text.contains("/tmp/mcp.json"));
         assert!(text.contains("/tmp/project/.codewhale/mcp.json"));
         assert!(text.contains("Skills:"));

@@ -848,6 +848,13 @@ struct DoctorArgs {
     /// Emit only the diagnostic context source map as JSON
     #[arg(long, default_value_t = false, conflicts_with = "json")]
     context_json: bool,
+    /// Opt in to probing a local provider endpoint (may start a local service)
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["json", "context_json"]
+    )]
+    probe_local: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1395,7 +1402,7 @@ async fn run_async_main() -> Result<()> {
                 } else if args.json {
                     run_doctor_json(&config, &workspace, cli.config.as_deref())
                 } else {
-                    run_doctor(&config, &workspace, cli.config.as_deref()).await;
+                    run_doctor(&config, &workspace, cli.config.as_deref(), args.probe_local).await;
                     Ok(())
                 }
             }
@@ -2996,8 +3003,25 @@ fn run_session_diagnostics(args: SessionDiagnosticsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Local endpoints require an explicit opt-in because an HTTP request can wake
+/// a desktop-managed daemon (notably Ollama.app). Hosted endpoints preserve the
+/// historical `doctor` connectivity check.
+fn doctor_should_probe_api(
+    provider: crate::config::ApiProvider,
+    base_url: &str,
+    probe_local: bool,
+) -> bool {
+    let local = provider.is_self_hosted() || crate::config::base_url_uses_local_host(base_url);
+    !local || probe_local
+}
+
 /// Run system diagnostics
-async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Option<&Path>) {
+async fn run_doctor(
+    config: &Config,
+    workspace: &Path,
+    config_path_override: Option<&Path>,
+    probe_local: bool,
+) {
     use crate::palette;
     use colored::Colorize;
 
@@ -3248,7 +3272,9 @@ async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Opt
             alias.alias, alias.retirement_date, alias.replacement
         );
     }
-    if has_api_key {
+    if has_api_key
+        && doctor_should_probe_api(config.api_provider(), &api_target.base_url, probe_local)
+    {
         print!("  {} Testing connection...", "·".dimmed());
         use std::io::Write;
         std::io::stdout().flush().ok();
@@ -3302,13 +3328,22 @@ async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Opt
                 }
             }
         }
+    } else if has_api_key {
+        println!(
+            "  {} Live connectivity not checked for this local endpoint",
+            "·".dimmed()
+        );
+        println!(
+            "    Run `codewhale doctor --probe-local` to opt in; the request may start a local service."
+        );
     } else {
         println!("  {} Skipped (no API key configured)", "·".dimmed());
     }
 
     // MCP configuration
     println!();
-    println!("{}", "MCP Servers:".bold());
+    println!("{}", "MCP Servers (configuration only):".bold());
+    println!("  · Static check only; no server process was started.");
     let features = config.features();
     if features.enabled(Feature::Mcp) {
         println!(
@@ -3366,32 +3401,36 @@ async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Opt
             );
             for (name, server) in &cfg.servers {
                 let status = doctor_check_mcp_server(server);
-                let icon = match status {
-                    McpServerDoctorStatus::Ok(ref detail) => {
+                let icon = match &status {
+                    McpServerDoctorStatus::Ok(detail) => {
                         format!(
-                            "  {} {name}: {}",
+                            "  {} {name}: configuration valid; {}",
                             "✓".truecolor(aqua_r, aqua_g, aqua_b),
                             detail
                         )
                     }
-                    McpServerDoctorStatus::Warning(ref detail) => {
+                    McpServerDoctorStatus::Warning(detail) => {
                         format!(
-                            "  {} {name}: {}",
+                            "  {} {name}: configuration warning; {}",
                             "!".truecolor(sky_r, sky_g, sky_b),
                             detail
                         )
                     }
-                    McpServerDoctorStatus::Error(ref detail) => {
+                    McpServerDoctorStatus::Error(detail) => {
                         format!(
-                            "  {} {name}: {}",
+                            "  {} {name}: configuration invalid; {}",
                             "✗".truecolor(red_r, red_g, red_b),
                             detail
                         )
                     }
                 };
                 println!("{icon}");
-                if !server.enabled {
-                    println!("      (disabled)");
+                if !server.is_enabled() {
+                    println!("      disabled; live health not checked");
+                } else {
+                    println!(
+                        "      process/protocol/backend: not checked; `codewhale mcp validate` explicitly starts and initializes configured servers"
+                    );
                 }
             }
         }
@@ -4673,26 +4712,15 @@ fn run_doctor_json(
             let servers: Vec<serde_json::Value> = cfg
                 .servers
                 .iter()
-                .map(|(name, server)| {
-                    let status = doctor_check_mcp_server(server);
-                    let (kind, detail) = match &status {
-                        McpServerDoctorStatus::Ok(d) => ("ok", d.clone()),
-                        McpServerDoctorStatus::Warning(d) => ("warning", d.clone()),
-                        McpServerDoctorStatus::Error(d) => ("error", d.clone()),
-                    };
-                    json!({
-                        "name": name,
-                        "enabled": server.enabled && !server.disabled,
-                        "status": kind,
-                        "detail": detail,
-                    })
-                })
+                .map(|(name, server)| doctor_mcp_server_json(name, server))
                 .collect();
             json!({
                 "config_path": mcp_config_path.display().to_string(),
                 "present": mcp_present,
                 "project_config_path": project_mcp_config_path.display().to_string(),
                 "project_present": project_mcp_present,
+                "probe_scope": "configuration",
+                "live_health_checked": false,
                 "servers": servers,
             })
         }
@@ -4701,6 +4729,8 @@ fn run_doctor_json(
             "present": mcp_present,
             "project_config_path": project_mcp_config_path.display().to_string(),
             "project_present": project_mcp_present,
+            "probe_scope": "configuration",
+            "live_health_checked": false,
             "servers": [],
             "error": err.to_string(),
         }),
@@ -6705,6 +6735,49 @@ enum McpServerDoctorStatus {
     Error(String),
 }
 
+impl McpServerDoctorStatus {
+    fn legacy_status(&self) -> &'static str {
+        match self {
+            Self::Ok(_) => "ok",
+            Self::Warning(_) => "warning",
+            Self::Error(_) => "error",
+        }
+    }
+
+    fn configuration_status(&self) -> &'static str {
+        match self {
+            Self::Ok(_) => "valid",
+            Self::Warning(_) => "warning",
+            Self::Error(_) => "invalid",
+        }
+    }
+
+    fn detail(&self) -> &str {
+        match self {
+            Self::Ok(detail) | Self::Warning(detail) | Self::Error(detail) => detail,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpCommandDoctorStatus {
+    Available,
+    Missing,
+    NotApplicable,
+    NotChecked,
+}
+
+impl McpCommandDoctorStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+            Self::NotApplicable => "not_applicable",
+            Self::NotChecked => "not_checked",
+        }
+    }
+}
+
 fn is_relative_stdio_path_arg(value: &str) -> bool {
     if value.is_empty() || value.starts_with('-') || value.contains("://") || value.starts_with('~')
     {
@@ -6718,6 +6791,79 @@ fn is_relative_stdio_path_arg(value: &str) -> bool {
     let windows_absolute = value.starts_with("\\\\")
         || (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'));
     !Path::new(value).is_absolute() && !windows_absolute
+}
+
+/// Inspect command availability without starting the configured MCP server.
+fn doctor_mcp_command_status(server: &McpServerConfig) -> McpCommandDoctorStatus {
+    if server.url.is_some() {
+        return McpCommandDoctorStatus::NotApplicable;
+    }
+    let Some(cmd) = server.command.as_deref().map(str::trim) else {
+        return McpCommandDoctorStatus::NotChecked;
+    };
+    if cmd.is_empty() {
+        return McpCommandDoctorStatus::Missing;
+    }
+
+    let path = Path::new(cmd);
+    let is_absolute = path.is_absolute() || cmd.starts_with('/');
+    if is_absolute {
+        return if path.is_file() {
+            McpCommandDoctorStatus::Available
+        } else {
+            McpCommandDoctorStatus::Missing
+        };
+    }
+
+    if is_relative_stdio_path_arg(cmd) {
+        let Some(cwd) = server.cwd.as_deref() else {
+            return McpCommandDoctorStatus::NotChecked;
+        };
+        return if cwd.join(path).is_file() {
+            McpCommandDoctorStatus::Available
+        } else {
+            McpCommandDoctorStatus::Missing
+        };
+    }
+
+    if is_command_available(cmd) {
+        McpCommandDoctorStatus::Available
+    } else {
+        McpCommandDoctorStatus::Missing
+    }
+}
+
+fn doctor_mcp_server_json(name: &str, server: &McpServerConfig) -> serde_json::Value {
+    use serde_json::json;
+
+    let status = doctor_check_mcp_server(server);
+    json!({
+        "name": name,
+        "enabled": server.enabled && !server.disabled,
+        // Compatibility field retained for existing doctor JSON consumers.
+        // Its scope is now explicit in `checks.configuration` below.
+        "status": status.legacy_status(),
+        "detail": status.detail(),
+        "check_scope": "configuration",
+        "checks": {
+            "configuration": {
+                "status": status.configuration_status(),
+                "detail": status.detail(),
+            },
+            "command": {
+                "status": doctor_mcp_command_status(server).as_str(),
+            },
+            "process_reachable": {
+                "status": "not_checked",
+            },
+            "protocol_initialized": {
+                "status": "not_checked",
+            },
+            "backend_tool_health": {
+                "status": "not_checked",
+            },
+        },
+    })
 }
 
 /// Check an MCP server config entry for common issues.
@@ -6738,14 +6884,14 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
         return McpServerDoctorStatus::Error("empty command".to_string());
     }
 
+    if doctor_mcp_command_status(server) == McpCommandDoctorStatus::Missing {
+        return McpServerDoctorStatus::Error(format!("command not found: {cmd}"));
+    }
+
     let cmd_path = Path::new(cmd);
     // Also accept Unix-style `/` prefix on Windows, where Path::is_absolute()
     // requires a drive letter.
     let is_absolute = cmd_path.is_absolute() || cmd.starts_with('/');
-
-    if is_absolute && !cmd_path.exists() {
-        return McpServerDoctorStatus::Error(format!("command not found: {cmd}"));
-    }
 
     if server.cwd.is_none() {
         if is_relative_stdio_path_arg(cmd) {
@@ -12774,7 +12920,9 @@ mod doctor_mcp_tests {
 
     #[test]
     fn test_command_server_is_ok() {
-        let server = make_server(Some("node"), &["server.js"], None);
+        let executable = std::env::current_exe().expect("current test executable");
+        let executable = executable.to_string_lossy();
+        let server = make_server(Some(&executable), &["server.js"], None);
         match doctor_check_mcp_server(&server) {
             McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio")),
             other => panic!("Expected Ok, got {other:?}"),
@@ -12783,7 +12931,9 @@ mod doctor_mcp_tests {
 
     #[test]
     fn test_relative_stdio_path_arg_without_cwd_warns() {
-        let server = make_server(Some("python"), &["server/mcp_server.py"], None);
+        let executable = std::env::current_exe().expect("current test executable");
+        let executable = executable.to_string_lossy();
+        let server = make_server(Some(&executable), &["server/mcp_server.py"], None);
         match doctor_check_mcp_server(&server) {
             McpServerDoctorStatus::Warning(detail) => {
                 assert!(detail.contains("relative path argument"));
@@ -12795,7 +12945,9 @@ mod doctor_mcp_tests {
 
     #[test]
     fn test_relative_stdio_path_arg_with_cwd_is_ok() {
-        let mut server = make_server(Some("python"), &["server/mcp_server.py"], None);
+        let executable = std::env::current_exe().expect("current test executable");
+        let executable = executable.to_string_lossy();
+        let mut server = make_server(Some(&executable), &["server/mcp_server.py"], None);
         server.cwd = Some(PathBuf::from("/tmp/codewhale-project"));
         match doctor_check_mcp_server(&server) {
             McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio")),
@@ -12835,7 +12987,11 @@ mod doctor_mcp_tests {
 
     #[test]
     fn test_self_hosted_relative_is_warning() {
-        let server = make_server(Some("codewhale"), &["serve", "--mcp"], None);
+        #[cfg(unix)]
+        let command = "sh";
+        #[cfg(windows)]
+        let command = "cmd";
+        let server = make_server(Some(command), &["serve", "--mcp"], None);
         match doctor_check_mcp_server(&server) {
             McpServerDoctorStatus::Warning(detail) => {
                 assert!(detail.contains("relative"));
@@ -12850,6 +13006,94 @@ mod doctor_mcp_tests {
         assert!(matches!(
             doctor_check_mcp_server(&server),
             McpServerDoctorStatus::Error(_)
+        ));
+    }
+
+    #[test]
+    fn doctor_json_separates_configuration_from_live_health() {
+        let server = make_server(None, &[], Some("http://127.0.0.1:3000/mcp"));
+        let report = doctor_mcp_server_json("tools-only", &server);
+
+        assert_eq!(report["check_scope"], "configuration");
+        assert_eq!(report["checks"]["configuration"]["status"], "valid");
+        assert_eq!(report["checks"]["command"]["status"], "not_applicable");
+        assert_eq!(
+            report["checks"]["process_reachable"]["status"],
+            "not_checked"
+        );
+        assert_eq!(
+            report["checks"]["protocol_initialized"]["status"],
+            "not_checked"
+        );
+        assert_eq!(
+            report["checks"]["backend_tool_health"]["status"],
+            "not_checked"
+        );
+        assert!(!report.to_string().contains("healthy"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_mcp_check_never_starts_the_configured_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("started");
+        let script = temp.path().join("mcp-server");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .expect("write test server");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("make script executable");
+
+        let script = script.to_string_lossy();
+        let server = make_server(Some(&script), &[], None);
+        assert!(matches!(
+            doctor_check_mcp_server(&server),
+            McpServerDoctorStatus::Ok(_)
+        ));
+        assert!(!marker.exists(), "static doctor check started MCP server");
+    }
+}
+
+#[cfg(test)]
+mod doctor_live_probe_tests {
+    use super::*;
+
+    #[test]
+    fn local_provider_probe_requires_explicit_opt_in() {
+        assert!(!doctor_should_probe_api(
+            crate::config::ApiProvider::Ollama,
+            "http://127.0.0.1:11434/v1",
+            false,
+        ));
+        assert!(doctor_should_probe_api(
+            crate::config::ApiProvider::Ollama,
+            "http://127.0.0.1:11434/v1",
+            true,
+        ));
+    }
+
+    #[test]
+    fn custom_loopback_probe_also_requires_explicit_opt_in() {
+        assert!(!doctor_should_probe_api(
+            crate::config::ApiProvider::Custom,
+            "http://localhost:8000/v1",
+            false,
+        ));
+    }
+
+    #[test]
+    fn hosted_provider_preserves_the_default_live_check() {
+        assert!(doctor_should_probe_api(
+            crate::config::ApiProvider::Deepseek,
+            "https://api.deepseek.com/beta",
+            false,
         ));
     }
 }

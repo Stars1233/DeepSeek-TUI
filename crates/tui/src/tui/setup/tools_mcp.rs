@@ -58,6 +58,29 @@ struct InventoryRow {
     detail: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpInventoryScope {
+    Configuration,
+    Protocol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpInventoryRow {
+    status: InventoryStatus,
+    detail: String,
+    scope: McpInventoryScope,
+}
+
+impl McpInventoryRow {
+    fn status_label(&self) -> &'static str {
+        match (self.status, self.scope) {
+            (InventoryStatus::Healthy, McpInventoryScope::Configuration) => "configured",
+            (InventoryStatus::Healthy, McpInventoryScope::Protocol) => "protocol_ready",
+            (status, _) => status.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SetupToolsMcpFacts {
     pub(super) servers_result: String,
@@ -116,7 +139,7 @@ impl SetupToolsMcpFacts {
         let skills_path_display = display_path(&app.skills_dir);
         let plugins_path_display = display_path(&plugins_dir_for(app, config, codewhale_home));
 
-        let servers_result = format!("{} — {}", mcp.status.as_str(), mcp.detail);
+        let servers_result = format!("{} — {}", mcp.status_label(), mcp.detail);
         let skills_result = format!("{} — {}", skills.status.as_str(), skills.detail);
         let tools_result = format!("{} — {}", tools.status.as_str(), tools.detail);
         let plugins_result = format!("{} — {}", plugins.status.as_str(), plugins.detail);
@@ -124,7 +147,7 @@ impl SetupToolsMcpFacts {
 
         let result = format!(
             "mcp={}, skills={}, tools={}, plugins={}, hotbar_sources={}, overall={}, mode=read_only_safe_probe",
-            mcp.status.as_str(),
+            mcp.status_label(),
             skills.status.as_str(),
             tools.status.as_str(),
             plugins.status.as_str(),
@@ -160,20 +183,21 @@ pub(super) fn on_ramp_text(locale: Locale, facts: &SetupToolsMcpFacts) -> String
         .replace("{plugins_path}", &facts.plugins_path_display)
 }
 
-fn mcp_inventory(app: &App, project_mcp_path: &Path) -> InventoryRow {
+fn mcp_inventory(app: &App, project_mcp_path: &Path) -> McpInventoryRow {
     if let Some(snapshot) = app.mcp_snapshot.as_ref() {
         return mcp_snapshot_inventory(snapshot, &app.mcp_config_path, project_mcp_path);
     }
 
     match crate::mcp::load_config_with_workspace(&app.mcp_config_path, &app.workspace) {
         Ok(cfg) => mcp_config_inventory(&app.mcp_config_path, project_mcp_path, &cfg),
-        Err(_) => InventoryRow {
+        Err(_) => McpInventoryRow {
             status: InventoryStatus::NeedsConfig,
             detail: format!(
                 "config unreadable at {} (and project {}); open /mcp or run `codewhale doctor` — secrets not shown",
                 display_path(&app.mcp_config_path),
                 display_path(project_mcp_path)
             ),
+            scope: McpInventoryScope::Configuration,
         },
     }
 }
@@ -200,19 +224,20 @@ fn mcp_snapshot_inventory(
     snapshot: &McpManagerSnapshot,
     global_path: &Path,
     project_path: &Path,
-) -> InventoryRow {
+) -> McpInventoryRow {
     let total = snapshot.servers.len();
     let paths = mcp_path_presence(global_path, project_path);
     if total == 0 {
-        return InventoryRow {
+        return McpInventoryRow {
             status: InventoryStatus::Off,
             detail: format!(
                 "nothing configured yet ({paths}); optional — use /mcp or `codewhale mcp init` later"
             ),
+            scope: McpInventoryScope::Protocol,
         };
     }
 
-    let mut healthy = 0usize;
+    let mut protocol_ready = 0usize;
     let mut needs_config = 0usize;
     let mut off = 0usize;
     let mut names_ok: Vec<&str> = Vec::new();
@@ -222,7 +247,7 @@ fn mcp_snapshot_inventory(
     for server in &snapshot.servers {
         match classify_snapshot_server(server) {
             InventoryStatus::Healthy => {
-                healthy += 1;
+                protocol_ready += 1;
                 if names_ok.len() < 4 {
                     names_ok.push(server.name.as_str());
                 }
@@ -244,17 +269,17 @@ fn mcp_snapshot_inventory(
 
     let status = if needs_config > 0 {
         InventoryStatus::NeedsConfig
-    } else if healthy > 0 {
+    } else if protocol_ready > 0 {
         InventoryStatus::Healthy
     } else {
         InventoryStatus::Off
     };
 
     let mut detail = format!(
-        "{total} configured ({healthy} healthy, {needs_config} needs_config, {off} off; {paths})"
+        "{total} configured ({protocol_ready} protocol_ready, {needs_config} needs_config, {off} off; {paths}); backend/tool health not checked"
     );
     if !names_ok.is_empty() {
-        detail.push_str(&format!("; healthy: {}", names_ok.join(", ")));
+        detail.push_str(&format!("; protocol_ready: {}", names_ok.join(", ")));
     }
     if !names_bad.is_empty() {
         detail.push_str(&format!("; needs_config: {}", names_bad.join(", ")));
@@ -266,7 +291,11 @@ fn mcp_snapshot_inventory(
         detail.push_str("; restart required for live tool list");
     }
     detail.push_str("; /mcp for details (commands/tokens never shown here)");
-    InventoryRow { status, detail }
+    McpInventoryRow {
+        status,
+        detail,
+        scope: McpInventoryScope::Protocol,
+    }
 }
 
 fn classify_snapshot_server(server: &McpServerSnapshot) -> InventoryStatus {
@@ -283,19 +312,20 @@ fn classify_snapshot_server(server: &McpServerSnapshot) -> InventoryStatus {
     }
 }
 
-fn mcp_config_inventory(global: &Path, project: &Path, cfg: &McpConfig) -> InventoryRow {
+fn mcp_config_inventory(global: &Path, project: &Path, cfg: &McpConfig) -> McpInventoryRow {
     let total = cfg.servers.len();
     let paths = mcp_path_presence(global, project);
     if total == 0 {
-        return InventoryRow {
+        return McpInventoryRow {
             status: InventoryStatus::Off,
             detail: format!(
                 "nothing configured yet ({paths}); optional — use /mcp or `codewhale mcp init` later"
             ),
+            scope: McpInventoryScope::Configuration,
         };
     }
 
-    let mut healthy = 0usize;
+    let mut configured = 0usize;
     let mut needs_config = 0usize;
     let mut off = 0usize;
     let mut names_ok: Vec<&str> = Vec::new();
@@ -305,7 +335,7 @@ fn mcp_config_inventory(global: &Path, project: &Path, cfg: &McpConfig) -> Inven
     for (name, server) in &cfg.servers {
         match classify_config_server(server) {
             InventoryStatus::Healthy => {
-                healthy += 1;
+                configured += 1;
                 if names_ok.len() < 4 {
                     names_ok.push(name.as_str());
                 }
@@ -327,17 +357,17 @@ fn mcp_config_inventory(global: &Path, project: &Path, cfg: &McpConfig) -> Inven
 
     let status = if needs_config > 0 {
         InventoryStatus::NeedsConfig
-    } else if healthy > 0 {
+    } else if configured > 0 {
         InventoryStatus::Healthy
     } else {
         InventoryStatus::Off
     };
 
     let mut detail = format!(
-        "{total} configured ({healthy} healthy, {needs_config} needs_config, {off} off; {paths}); static probe only — servers not started"
+        "{total} configured ({configured} configuration valid, {needs_config} needs_config, {off} off; {paths}); live health not checked — servers not started"
     );
     if !names_ok.is_empty() {
-        detail.push_str(&format!("; healthy: {}", names_ok.join(", ")));
+        detail.push_str(&format!("; configuration valid: {}", names_ok.join(", ")));
     }
     if !names_bad.is_empty() {
         detail.push_str(&format!("; needs_config: {}", names_bad.join(", ")));
@@ -346,7 +376,11 @@ fn mcp_config_inventory(global: &Path, project: &Path, cfg: &McpConfig) -> Inven
         detail.push_str(&format!("; off: {}", names_off.join(", ")));
     }
     detail.push_str("; /mcp or `codewhale doctor` for full checks");
-    InventoryRow { status, detail }
+    McpInventoryRow {
+        status,
+        detail,
+        scope: McpInventoryScope::Configuration,
+    }
 }
 
 /// Safe static probe aligned with `doctor_check_mcp_server` without spawning.
@@ -675,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_mcp_reports_healthy_without_secret_details() {
+    fn configured_mcp_is_not_reported_as_live_healthy() {
         let tmp = TempDir::new().expect("tempdir");
         let home = tmp.path().join("cw-home");
         std::fs::create_dir_all(&home).expect("home");
@@ -720,10 +754,12 @@ mod tests {
         let facts = SetupToolsMcpFacts::from_app_config(&app, &Config::default(), &home);
 
         assert!(
-            facts.servers_result.contains("healthy"),
-            "configured MCP should be healthy: {}",
+            facts.servers_result.starts_with("configured"),
+            "configured MCP should report configuration evidence: {}",
             facts.servers_result
         );
+        assert!(facts.servers_result.contains("live health not checked"));
+        assert!(!facts.servers_result.contains("healthy"));
         assert!(facts.servers_result.contains("docs"));
         assert!(
             facts.skills_result.contains("healthy"),
@@ -856,6 +892,12 @@ mod tests {
         assert!(facts.servers_result.contains("needs_config"));
         assert!(facts.servers_result.contains("bad"));
         assert!(facts.servers_result.contains("ok"));
+        assert!(facts.servers_result.contains("protocol_ready"));
+        assert!(
+            facts
+                .servers_result
+                .contains("backend/tool health not checked")
+        );
         assert!(facts.needs_action);
         assert!(!facts.servers_result.contains("sk-live-secret"));
         assert!(!facts.servers_result.contains("secret-should-not-appear"));

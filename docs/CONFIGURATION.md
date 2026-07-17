@@ -1726,12 +1726,24 @@ also run `codewhale-tui setup --skills --local` to create a workspace-local
 `./skills` dir.
 
 `codewhale-tui doctor --json` prints a machine-readable report that skips the
-live API connectivity probe. Top-level keys: `version`, `config_path`,
-`config_present`, `workspace`, `api_key.source`, `base_url`,
+live API connectivity probe. Plain `doctor` keeps the existing hosted-provider
+connectivity check, but it does not contact loopback or self-hosted provider
+endpoints unless `--probe-local` is supplied. That opt-in request may start a
+desktop-managed local service such as Ollama. Top-level keys: `version`,
+`config_path`, `config_present`, `workspace`, `api_key.source`, `base_url`,
 `default_text_model`, `mcp`, `skills`, `tools`, `plugins`, `sandbox`,
 `platform`, `api_connectivity`, `capability`. CI consumers should rely on `api_key.source`
 (`env`/`config`/`missing`) rather than parsing the human-readable `doctor`
 text.
+
+MCP entries are configuration diagnostics unless an explicit MCP command is
+run. `mcp.probe_scope` is `configuration`, `mcp.live_health_checked` is false,
+and each server separates `checks.configuration` / `checks.command` from
+`checks.process_reachable`, `checks.protocol_initialized`, and
+`checks.backend_tool_health`. The latter three remain `not_checked` in doctor
+output. Run `codewhale mcp validate` to explicitly start enabled servers and
+verify protocol initialization/discovery; backend health still requires an
+appropriate explicit tool call.
 
 The `capability` key contains per-provider capability info derived from
 static knowledge (release docs, API guides) rather than live API probes.

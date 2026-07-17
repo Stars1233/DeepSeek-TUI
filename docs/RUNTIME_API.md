@@ -178,7 +178,9 @@ codewhale doctor --json
 | `memory.file_present` | bool | Whether memory file exists |
 | `mcp.config_path` | string | MCP config file path |
 | `mcp.present` | bool | Whether MCP config exists |
-| `mcp.servers` | array | Per-server health: `{name, enabled, status, detail}` |
+| `mcp.probe_scope` | string | `configuration`; doctor does not start MCP servers |
+| `mcp.live_health_checked` | bool | Always false for doctor JSON |
+| `mcp.servers` | array | Per-server configuration result plus separate `checks` for command availability, process reachability, protocol initialization, and backend/tool health; live stages are `not_checked` |
 | `skills.selected` | string | Resolved skills directory |
 | `skills.global.path` / `.present` / `.count` | — | Codewhale global skills dir (`~/.codewhale/skills`, with legacy `~/.deepseek/skills` support) |
 | `skills.agents.path` / `.present` / `.count` | — | Workspace `.agents/skills/` dir |
