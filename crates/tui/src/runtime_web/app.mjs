@@ -24,6 +24,9 @@ export const STREAM_EVENT_NAMES = [
   "agent.completed",
   "agent.list",
   "tool_call.requested",
+  "tool_call.resolved",
+  "tool_call.canceled",
+  "tool_call.timeout",
 ];
 
 export function createThreadState(threadId = "") {
@@ -37,6 +40,7 @@ export function createThreadState(threadId = "") {
     latestSeq: 0,
     approvals: new Map(),
     userInputs: new Map(),
+    dynamicToolCalls: new Map(),
   };
 }
 
@@ -70,6 +74,10 @@ export function applySnapshot(state, detail, expectedThreadId = state.threadId) 
   for (const input of Array.isArray(detail.pending_user_inputs) ? detail.pending_user_inputs : []) {
     const inputId = input?.input_id || input?.id;
     if (inputId) state.userInputs.set(inputId, input);
+  }
+  state.dynamicToolCalls = new Map();
+  for (const call of Array.isArray(detail.pending_dynamic_tool_calls) ? detail.pending_dynamic_tool_calls : []) {
+    if (call?.call_id) state.dynamicToolCalls.set(call.call_id, call);
   }
   return true;
 }
@@ -128,6 +136,14 @@ export function applyRuntimeEvent(state, envelope) {
   } else if (eventName === "user_input.answered" || eventName === "user_input.canceled") {
     const inputId = payload.input_id || payload.id;
     if (inputId) state.userInputs.delete(inputId);
+  } else if (eventName === "tool_call.requested") {
+    if (payload.call_id) state.dynamicToolCalls.set(payload.call_id, payload);
+  } else if (
+    eventName === "tool_call.resolved"
+    || eventName === "tool_call.canceled"
+    || eventName === "tool_call.timeout"
+  ) {
+    if (payload.call_id) state.dynamicToolCalls.delete(payload.call_id);
   }
   return true;
 }

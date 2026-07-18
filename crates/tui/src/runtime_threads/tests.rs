@@ -42,6 +42,22 @@ fn test_approval_timeout_ms(ms: u64) -> ApprovalTimeoutGuard {
     }
 }
 
+struct DynamicToolTimeoutGuard {
+    previous_ms: u64,
+}
+
+impl Drop for DynamicToolTimeoutGuard {
+    fn drop(&mut self) {
+        set_test_dynamic_tool_result_timeout_ms(self.previous_ms);
+    }
+}
+
+fn test_dynamic_tool_timeout_ms(ms: u64) -> DynamicToolTimeoutGuard {
+    DynamicToolTimeoutGuard {
+        previous_ms: set_test_dynamic_tool_result_timeout_ms(ms),
+    }
+}
+
 fn sample_thread(thread_id: &str) -> ThreadRecord {
     let now = Utc::now();
     ThreadRecord {
@@ -3631,6 +3647,127 @@ async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -
 }
 
 #[tokio::test]
+async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "snapshot both streamed prefixes".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "delta_snapshot".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::MessageStarted { index: 0 })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::MessageDelta {
+            index: 0,
+            content: "durable message prefix".to_string(),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ThinkingStarted { index: 1 })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ThinkingDelta {
+            index: 1,
+            content: "durable reasoning prefix".to_string(),
+        })
+        .await?;
+
+    let deltas = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let deltas = manager
+                .events_since(&thread.id, None)?
+                .into_iter()
+                .filter(|event| {
+                    event.turn_id.as_deref() == Some(&turn.id) && event.event == "item.delta"
+                })
+                .collect::<Vec<_>>();
+            if deltas.len() == 2 {
+                break Ok::<_, anyhow::Error>(deltas);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("stream deltas were not durably sequenced")??;
+
+    let detail = manager.get_thread_detail(&thread.id).await?;
+    let latest_delta_seq = deltas.iter().map(|event| event.seq).max().unwrap_or(0);
+    assert!(detail.latest_seq >= latest_delta_seq);
+    let message = detail
+        .items
+        .iter()
+        .find(|item| item.kind == TurnItemKind::AgentMessage)
+        .context("snapshot omitted the streaming message item")?;
+    let reasoning = detail
+        .items
+        .iter()
+        .find(|item| item.kind == TurnItemKind::AgentReasoning)
+        .context("snapshot omitted the streaming reasoning item")?;
+    assert_eq!(message.status, TurnItemLifecycleStatus::InProgress);
+    assert_eq!(message.detail.as_deref(), Some("durable message prefix"));
+    assert_eq!(reasoning.status, TurnItemLifecycleStatus::InProgress);
+    assert_eq!(
+        reasoning.detail.as_deref(),
+        Some("durable reasoning prefix")
+    );
+    assert_eq!(
+        manager.store.load_item(&message.id)?.detail,
+        message.detail,
+        "message prefix must already be on disk before its delta cursor"
+    );
+    assert_eq!(
+        manager.store.load_item(&reasoning.id)?.detail,
+        reasoning.detail,
+        "reasoning prefix must already be on disk before its delta cursor"
+    );
+    assert!(
+        manager
+            .events_since(&thread.id, Some(detail.latest_seq))?
+            .iter()
+            .all(|event| event.event != "item.delta"),
+        "the snapshot itself must carry every delta at or before latest_seq"
+    );
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Interrupted,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn terminal_turn_cancels_pending_user_input_and_clears_snapshot() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
@@ -3725,6 +3862,379 @@ async fn terminal_turn_cancels_pending_user_input_and_clears_snapshot() -> Resul
         }
         sleep(Duration::from_millis(20)).await;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() -> Result<()> {
+    use crate::tools::spec::DynamicToolExecutor;
+
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "run an external lookup".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "dynamic_result".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+
+    const RESULT_SECRET: &str = "dynamic-result-secret";
+    let executor = manager.clone();
+    let executor_thread_id = thread.id.clone();
+    let execution = tokio::spawn(async move {
+        DynamicToolExecutor::execute_dynamic_tool(
+            &executor,
+            Some(executor_thread_id),
+            Some("bench".to_string()),
+            "lookup".to_string(),
+            json!({ "record_id": "record-7" }),
+        )
+        .await
+    });
+
+    let pending = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let detail = manager.get_thread_detail(&thread.id).await?;
+            if let Some(call) = detail.pending_dynamic_tool_calls.first() {
+                break Ok::<_, anyhow::Error>((detail.latest_seq, call.clone()));
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("dynamic tool call did not reach the canonical snapshot")??;
+    let (snapshot_seq, call) = pending;
+    assert_eq!(call.thread_id, thread.id);
+    assert_eq!(call.turn_id, turn.id);
+    assert_eq!(call.namespace.as_deref(), Some("bench"));
+    assert_eq!(call.tool, "lookup");
+    assert_eq!(call.arguments["record_id"], "record-7");
+    let requested = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .find(|event| {
+            event.event == "tool_call.requested"
+                && event.payload.get("call_id").and_then(Value::as_str)
+                    == Some(call.call_id.as_str())
+        })
+        .context("dynamic tool request was not durable")?;
+    assert!(requested.seq <= snapshot_seq);
+    assert!(
+        manager
+            .events_since(&thread.id, Some(snapshot_seq))?
+            .iter()
+            .all(|event| event.event != "tool_call.requested"),
+        "the pending call must be recoverable from the snapshot once replay starts at latest_seq"
+    );
+
+    assert!(
+        manager
+            .deliver_dynamic_tool_result(
+                &thread.id,
+                &turn.id,
+                &call.call_id,
+                DynamicToolCallResult {
+                    success: true,
+                    content: vec![DynamicToolCallContent::InputText {
+                        text: RESULT_SECRET.to_string(),
+                    }],
+                },
+            )
+            .await?
+    );
+    let result = execution.await.context("dynamic tool task panicked")??;
+    assert_eq!(
+        result.content, RESULT_SECRET,
+        "the model-facing result changed"
+    );
+    assert!(
+        manager
+            .get_thread_detail(&thread.id)
+            .await?
+            .pending_dynamic_tool_calls
+            .is_empty()
+    );
+    let resolved = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .filter(|event| {
+            event.event == "tool_call.resolved"
+                && event.payload.get("call_id").and_then(Value::as_str)
+                    == Some(call.call_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].payload["status"], "resolved");
+    assert_eq!(resolved[0].payload["success"], true);
+    assert!(
+        !serde_json::to_string(&resolved)?.contains(RESULT_SECRET),
+        "terminal dynamic-tool lifecycle must not echo result content"
+    );
+    assert!(
+        !manager
+            .deliver_dynamic_tool_result(
+                &thread.id,
+                &turn.id,
+                &call.call_id,
+                DynamicToolCallResult {
+                    success: true,
+                    content: Vec::new(),
+                },
+            )
+            .await?,
+        "a duplicate result must not settle or emit twice"
+    );
+    assert_eq!(
+        manager
+            .events_since(&thread.id, None)?
+            .iter()
+            .filter(|event| event.event == "tool_call.resolved")
+            .count(),
+        1
+    );
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    Ok(())
+}
+
+#[test]
+fn pending_dynamic_tool_registry_rejects_duplicates_and_is_bounded() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let mut receivers = Vec::with_capacity(MAX_PENDING_DYNAMIC_TOOL_CALLS);
+    receivers.push(manager.register_pending_dynamic_tool_for_test(
+        "thread-bound",
+        "turn-bound",
+        "call-0",
+    )?);
+    assert!(
+        manager
+            .register_pending_dynamic_tool_for_test("thread-bound", "turn-bound", "call-0",)
+            .is_err(),
+        "duplicate call IDs must not replace an existing result channel"
+    );
+
+    for index in 1..MAX_PENDING_DYNAMIC_TOOL_CALLS {
+        receivers.push(manager.register_pending_dynamic_tool_for_test(
+            "thread-bound",
+            "turn-bound",
+            &format!("call-{index}"),
+        )?);
+    }
+    assert_eq!(
+        manager.pending_dynamic_tools_count(),
+        MAX_PENDING_DYNAMIC_TOOL_CALLS
+    );
+    let error = manager
+        .register_pending_dynamic_tool_for_test("thread-bound", "turn-bound", "call-over-limit")
+        .expect_err("pending dynamic tool registry exceeded its hard limit");
+    assert!(
+        error
+            .to_string()
+            .contains("pending dynamic tool call limit")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
+    use crate::tools::spec::{DynamicToolExecutor, ToolError};
+
+    let _timeout_guard = test_dynamic_tool_timeout_ms(25);
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "let an external lookup time out".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "dynamic_timeout".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+
+    let error = DynamicToolExecutor::execute_dynamic_tool(
+        &manager,
+        Some(thread.id.clone()),
+        None,
+        "slow_lookup".to_string(),
+        json!({ "marker": "request-only" }),
+    )
+    .await
+    .expect_err("dynamic tool unexpectedly resolved");
+    assert!(matches!(error, ToolError::Timeout { .. }));
+    assert!(
+        manager
+            .get_thread_detail(&thread.id)
+            .await?
+            .pending_dynamic_tool_calls
+            .is_empty()
+    );
+    let timeout_events = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .filter(|event| event.event == "tool_call.timeout")
+        .collect::<Vec<_>>();
+    assert_eq!(timeout_events.len(), 1);
+    assert_eq!(timeout_events[0].turn_id.as_deref(), Some(turn.id.as_str()));
+    assert_eq!(timeout_events[0].payload["status"], "timeout");
+    assert_eq!(timeout_events[0].payload["timeout_secs"], 0);
+    assert!(timeout_events[0].payload.get("arguments").is_none());
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()> {
+    use crate::tools::spec::DynamicToolExecutor;
+
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "cancel an external lookup with the turn".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "dynamic_cancel".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+
+    let executor = manager.clone();
+    let executor_thread_id = thread.id.clone();
+    let execution = tokio::spawn(async move {
+        DynamicToolExecutor::execute_dynamic_tool(
+            &executor,
+            Some(executor_thread_id),
+            None,
+            "cancel_lookup".to_string(),
+            json!({ "id": "pending" }),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .pending_dynamic_tool_calls
+                .is_empty()
+            {
+                break Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("dynamic call did not become pending")??;
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Interrupted,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    execution
+        .await
+        .context("dynamic tool task panicked")?
+        .expect_err("terminal turn unexpectedly resolved the dynamic tool");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let detail = manager.get_thread_detail(&thread.id).await?;
+            let canceled = manager
+                .events_since(&thread.id, None)?
+                .into_iter()
+                .filter(|event| event.event == "tool_call.canceled")
+                .collect::<Vec<_>>();
+            if detail.pending_dynamic_tool_calls.is_empty() && canceled.len() == 1 {
+                assert_eq!(canceled[0].payload["status"], "canceled");
+                assert_eq!(canceled[0].payload["terminal"], true);
+                break Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("terminal dynamic call did not disappear exactly once")??;
+    assert_eq!(
+        turn.id,
+        manager
+            .get_thread(&thread.id)
+            .await?
+            .latest_turn_id
+            .unwrap()
+    );
     Ok(())
 }
 

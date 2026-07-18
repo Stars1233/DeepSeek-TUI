@@ -56,7 +56,10 @@ use codewhale_protocol::runtime::{
 
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const MAX_ACTIVE_THREADS_DEFAULT: usize = 8;
+const MAX_PENDING_DYNAMIC_TOOL_CALLS: usize = 128;
 const SUMMARY_LIMIT: usize = 280;
+const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
+const REDACTED_USER_INPUT_RECEIPT: &str = "User input submitted";
 
 /// Sentinel delimiters wrapping the compaction summary section persisted in a
 /// thread record's `system_prompt`. The section carries the engine-rendered
@@ -139,9 +142,14 @@ const CURRENT_RUNTIME_SCHEMA_VERSION: u32 = 2;
 const RUNTIME_RESTART_REASON: &str = "Interrupted by process restart";
 const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
 const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
+const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[cfg(test)]
 static TEST_APPROVAL_DECISION_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+static TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 fn approval_decision_timeout() -> Duration {
@@ -155,9 +163,25 @@ fn approval_decision_timeout() -> Duration {
     APPROVAL_DECISION_TIMEOUT
 }
 
+fn dynamic_tool_result_timeout() -> Duration {
+    #[cfg(test)]
+    {
+        let ms = TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if ms > 0 {
+            return Duration::from_millis(ms);
+        }
+    }
+    DYNAMIC_TOOL_RESULT_TIMEOUT
+}
+
 #[cfg(test)]
 pub(crate) fn set_test_approval_decision_timeout_ms(ms: u64) -> u64 {
     TEST_APPROVAL_DECISION_TIMEOUT_MS.swap(ms, std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_dynamic_tool_result_timeout_ms(ms: u64) -> u64 {
+    TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS.swap(ms, std::sync::atomic::Ordering::SeqCst)
 }
 
 const fn default_runtime_schema_version() -> u32 {
@@ -874,6 +898,12 @@ pub struct ThreadDetail {
     /// approvals, the snapshot is authoritative across client reconnects.
     #[serde(default)]
     pub pending_user_inputs: Vec<PendingUserInputRequest>,
+    /// Client-executed dynamic tool calls that are still waiting for a result.
+    /// Keeping the typed request in the canonical snapshot lets an external
+    /// Runtime client reload from `latest_seq` without stranding a call whose
+    /// `tool_call.requested` event is already behind that cursor.
+    #[serde(default)]
+    pub pending_dynamic_tool_calls: Vec<DynamicToolCallParams>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1057,8 +1087,7 @@ pub struct RuntimeThreadManager {
     pending_approvals: Arc<parking_lot::Mutex<HashMap<String, PendingApprovalEntry>>>,
     pending_user_inputs:
         Arc<parking_lot::Mutex<HashMap<(String, String), PendingUserInputRequest>>>,
-    pending_dynamic_tools:
-        Arc<parking_lot::Mutex<HashMap<String, oneshot::Sender<DynamicToolCallResult>>>>,
+    pending_dynamic_tools: Arc<parking_lot::Mutex<HashMap<String, PendingDynamicToolEntry>>>,
     #[cfg(test)]
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
 }
@@ -1113,6 +1142,11 @@ struct PendingApprovalEntry {
     thread_id: String,
     request: PendingApprovalRequest,
     sender: oneshot::Sender<ExternalApprovalDecision>,
+}
+
+struct PendingDynamicToolEntry {
+    params: DynamicToolCallParams,
+    sender: oneshot::Sender<DynamicToolCallResult>,
 }
 
 impl RuntimeThreadManager {
@@ -1425,17 +1459,71 @@ impl RuntimeThreadManager {
 
     fn register_pending_dynamic_tool(
         &self,
-        call_id: &str,
-    ) -> oneshot::Receiver<DynamicToolCallResult> {
+        params: DynamicToolCallParams,
+    ) -> Result<oneshot::Receiver<DynamicToolCallResult>> {
         let (tx, rx) = oneshot::channel();
-        self.pending_dynamic_tools
-            .lock()
-            .insert(call_id.to_string(), tx);
-        rx
+        let mut pending = self.pending_dynamic_tools.lock();
+        if pending.len() >= MAX_PENDING_DYNAMIC_TOOL_CALLS {
+            bail!(
+                "Runtime has reached the pending dynamic tool call limit ({MAX_PENDING_DYNAMIC_TOOL_CALLS})"
+            );
+        }
+        if pending.contains_key(&params.call_id) {
+            bail!("Dynamic tool call '{}' is already pending", params.call_id);
+        }
+        pending.insert(
+            params.call_id.clone(),
+            PendingDynamicToolEntry { params, sender: tx },
+        );
+        Ok(rx)
     }
 
-    fn cancel_pending_dynamic_tool(&self, call_id: &str) {
-        self.pending_dynamic_tools.lock().remove(call_id);
+    fn take_pending_dynamic_tool(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        call_id: &str,
+    ) -> Option<PendingDynamicToolEntry> {
+        let mut pending = self.pending_dynamic_tools.lock();
+        let matches_route = pending.get(call_id).is_some_and(|entry| {
+            entry.params.thread_id == thread_id && entry.params.turn_id == turn_id
+        });
+        matches_route.then(|| pending.remove(call_id)).flatten()
+    }
+
+    fn pending_dynamic_tool_calls_for_thread(&self, thread_id: &str) -> Vec<DynamicToolCallParams> {
+        let mut calls = self
+            .pending_dynamic_tools
+            .lock()
+            .values()
+            .filter(|entry| entry.params.thread_id == thread_id)
+            .map(|entry| entry.params.clone())
+            .collect::<Vec<_>>();
+        calls.sort_by(|left, right| {
+            left.turn_id
+                .cmp(&right.turn_id)
+                .then_with(|| left.call_id.cmp(&right.call_id))
+        });
+        calls
+    }
+
+    fn clear_pending_dynamic_tools_for_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Vec<DynamicToolCallParams> {
+        let mut pending = self.pending_dynamic_tools.lock();
+        let call_ids = pending
+            .iter()
+            .filter(|(_, entry)| {
+                entry.params.thread_id == thread_id && entry.params.turn_id == turn_id
+            })
+            .map(|(call_id, _)| call_id.clone())
+            .collect::<Vec<_>>();
+        call_ids
+            .into_iter()
+            .filter_map(|call_id| pending.remove(&call_id).map(|entry| entry.params))
+            .collect()
     }
 
     pub fn deliver_external_approval(
@@ -1450,16 +1538,42 @@ impl RuntimeThreadManager {
         }
     }
 
-    pub fn deliver_dynamic_tool_result(
+    pub async fn deliver_dynamic_tool_result(
         &self,
+        thread_id: &str,
+        turn_id: &str,
         call_id: &str,
         result: DynamicToolCallResult,
-    ) -> bool {
-        let sender = self.pending_dynamic_tools.lock().remove(call_id);
-        match sender {
-            Some(tx) => tx.send(result).is_ok(),
-            None => false,
+    ) -> Result<bool> {
+        let Some(entry) = self.take_pending_dynamic_tool(thread_id, turn_id, call_id) else {
+            return Ok(false);
+        };
+        let success = result.success;
+        if entry.sender.send(result).is_err() {
+            self.emit_event(
+                thread_id,
+                Some(turn_id),
+                None,
+                "tool_call.canceled",
+                dynamic_tool_terminal_payload(
+                    &entry.params,
+                    "canceled",
+                    None,
+                    Some("receiver_closed"),
+                ),
+            )
+            .await?;
+            return Ok(false);
         }
+        self.emit_event(
+            thread_id,
+            Some(turn_id),
+            None,
+            "tool_call.resolved",
+            dynamic_tool_terminal_payload(&entry.params, "resolved", Some(success), None),
+        )
+        .await?;
+        Ok(true)
     }
 
     pub async fn submit_user_input(
@@ -1542,9 +1656,18 @@ impl RuntimeThreadManager {
     #[cfg(test)]
     pub(crate) fn register_pending_dynamic_tool_for_test(
         &self,
+        thread_id: &str,
+        turn_id: &str,
         call_id: &str,
-    ) -> oneshot::Receiver<DynamicToolCallResult> {
-        self.register_pending_dynamic_tool(call_id)
+    ) -> Result<oneshot::Receiver<DynamicToolCallResult>> {
+        self.register_pending_dynamic_tool(DynamicToolCallParams {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            call_id: call_id.to_string(),
+            namespace: Some("test".to_string()),
+            tool: "test_tool".to_string(),
+            arguments: json!({ "input": "test" }),
+        })
     }
 
     async fn remember_thread_auto_approve(&self, thread_id: &str) {
@@ -2049,6 +2172,7 @@ impl RuntimeThreadManager {
             }
         }
         let (pending_approvals, pending_user_inputs) = self.pending_requests_for_thread(id);
+        let pending_dynamic_tool_calls = self.pending_dynamic_tool_calls_for_thread(id);
         Ok(ThreadDetail {
             thread,
             turns,
@@ -2056,6 +2180,7 @@ impl RuntimeThreadManager {
             latest_seq,
             pending_approvals,
             pending_user_inputs,
+            pending_dynamic_tool_calls,
         })
     }
 
@@ -2801,6 +2926,28 @@ impl RuntimeThreadManager {
             // The engine is already gone; still drop the registrations so
             // snapshots stop advertising prompts nobody can answer.
             let _ = self.clear_pending_user_inputs_for_turn(thread_id, turn_id);
+        }
+
+        for params in self.clear_pending_dynamic_tools_for_turn(thread_id, turn_id) {
+            let mut payload =
+                dynamic_tool_terminal_payload(&params, "canceled", None, Some("turn_terminal"));
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("terminal".to_string(), json!(true));
+            }
+            if let Err(err) = self
+                .emit_event(
+                    thread_id,
+                    Some(turn_id),
+                    None,
+                    "tool_call.canceled",
+                    payload,
+                )
+                .await
+            {
+                tracing::error!(
+                    "Failed to emit dynamic-tool cancellation after monitor failure: {err}"
+                );
+            }
         }
 
         if let Some(turn) = terminal_turn
@@ -4023,6 +4170,14 @@ impl RuntimeThreadManager {
                 EngineEvent::MessageDelta { content, .. } => {
                     if let Some((item_id, text)) = current_message_item.as_mut() {
                         text.push_str(&content);
+                        // Materialize the prefix before sequencing its delta.
+                        // A snapshot whose cursor includes this event must not
+                        // still observe the empty item saved at MessageStarted,
+                        // and restart recovery must retain the partial output.
+                        let mut item = self.store.load_item(item_id)?;
+                        item.summary = summarize_text(text, SUMMARY_LIMIT);
+                        item.detail = Some(text.clone());
+                        self.store.save_item(&item)?;
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
@@ -4081,6 +4236,10 @@ impl RuntimeThreadManager {
                 EngineEvent::ThinkingDelta { content, .. } => {
                     if let Some((item_id, text)) = current_reasoning_item.as_mut() {
                         text.push_str(&content);
+                        let mut item = self.store.load_item(item_id)?;
+                        item.summary = summarize_text(text, SUMMARY_LIMIT);
+                        item.detail = Some(text.clone());
+                        self.store.save_item(&item)?;
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
@@ -4150,12 +4309,28 @@ impl RuntimeThreadManager {
                                 } else {
                                     TurnItemLifecycleStatus::Failed
                                 };
-                                item.summary = summarize_text(
-                                    &format!("{name}: {}", output.content),
-                                    SUMMARY_LIMIT,
-                                );
-                                item.detail = Some(output.content.clone());
-                                item.metadata = output.metadata.clone();
+                                if name == REQUEST_USER_INPUT_TOOL_NAME {
+                                    // The engine must return the structured
+                                    // answers to the model, but Runtime
+                                    // receipts are durable and fan out to UI
+                                    // clients. Persist only a machine-readable
+                                    // redaction marker, never answer labels or
+                                    // free-text values.
+                                    item.summary = REDACTED_USER_INPUT_RECEIPT.to_string();
+                                    item.detail = Some(REDACTED_USER_INPUT_RECEIPT.to_string());
+                                    item.metadata = Some(json!({
+                                        "tool_call_id": id,
+                                        "tool_name": REQUEST_USER_INPUT_TOOL_NAME,
+                                        "response_redacted": true,
+                                    }));
+                                } else {
+                                    item.summary = summarize_text(
+                                        &format!("{name}: {}", output.content),
+                                        SUMMARY_LIMIT,
+                                    );
+                                    item.detail = Some(output.content.clone());
+                                    item.metadata = output.metadata.clone();
+                                }
                             }
                             Err(err) => {
                                 item.status = TurnItemLifecycleStatus::Failed;
@@ -4861,6 +5036,22 @@ impl RuntimeThreadManager {
             .await?;
         }
 
+        for params in self.clear_pending_dynamic_tools_for_turn(&thread_id, &turn_id) {
+            let mut payload =
+                dynamic_tool_terminal_payload(&params, "canceled", None, Some("turn_terminal"));
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("terminal".to_string(), json!(true));
+            }
+            self.emit_event(
+                &thread_id,
+                Some(&turn_id),
+                None,
+                "tool_call.canceled",
+                payload,
+            )
+            .await?;
+        }
+
         self.emit_event(
             &thread_id,
             Some(&turn_id),
@@ -5042,6 +5233,29 @@ fn dynamic_tool_result_text(content: &[DynamicToolCallContent]) -> String {
         .join("\n")
 }
 
+fn dynamic_tool_terminal_payload(
+    params: &DynamicToolCallParams,
+    status: &str,
+    success: Option<bool>,
+    reason: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "thread_id": params.thread_id,
+        "turn_id": params.turn_id,
+        "call_id": params.call_id,
+        "status": status,
+    });
+    if let Some(object) = payload.as_object_mut() {
+        if let Some(success) = success {
+            object.insert("success".to_string(), json!(success));
+        }
+        if let Some(reason) = reason {
+            object.insert("reason".to_string(), json!(reason));
+        }
+    }
+    payload
+}
+
 #[async_trait::async_trait]
 impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
     async fn execute_dynamic_tool(
@@ -5062,8 +5276,6 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
             ))
         })?;
         let call_id = format!("call_{}", &Uuid::new_v4().to_string()[..8]);
-        let rx = self.register_pending_dynamic_tool(&call_id);
-
         let params = DynamicToolCallParams {
             thread_id: thread_id.clone(),
             turn_id: turn_id.clone(),
@@ -5072,24 +5284,27 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
             tool: name.clone(),
             arguments: input,
         };
+        let rx = self
+            .register_pending_dynamic_tool(params.clone())
+            .map_err(|err| crate::tools::spec::ToolError::execution_failed(err.to_string()))?;
         if let Err(err) = self
             .emit_event(
                 &thread_id,
                 Some(&turn_id),
                 None,
                 "tool_call.requested",
-                json!(params),
+                json!(&params),
             )
             .await
         {
-            self.cancel_pending_dynamic_tool(&call_id);
+            self.take_pending_dynamic_tool(&thread_id, &turn_id, &call_id);
             return Err(crate::tools::spec::ToolError::execution_failed(format!(
                 "failed to emit runtime dynamic tool request for '{name}': {err}"
             )));
         }
 
-        let approval_timeout = approval_decision_timeout();
-        match tokio::time::timeout(approval_timeout, rx).await {
+        let result_timeout = dynamic_tool_result_timeout();
+        match tokio::time::timeout(result_timeout, rx).await {
             Ok(Ok(result)) => {
                 let text = dynamic_tool_result_text(&result.content);
                 if result.success {
@@ -5102,13 +5317,51 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
                     }))
                 }
             }
-            Ok(Err(_recv_err)) => Err(crate::tools::spec::ToolError::execution_failed(format!(
-                "runtime dynamic tool '{name}' result channel closed"
-            ))),
+            Ok(Err(_recv_err)) => {
+                if let Some(entry) = self.take_pending_dynamic_tool(&thread_id, &turn_id, &call_id)
+                {
+                    self.emit_event(
+                        &thread_id,
+                        Some(&turn_id),
+                        None,
+                        "tool_call.canceled",
+                        dynamic_tool_terminal_payload(
+                            &entry.params,
+                            "canceled",
+                            None,
+                            Some("channel_closed"),
+                        ),
+                    )
+                    .await
+                    .map_err(|err| {
+                        crate::tools::spec::ToolError::execution_failed(err.to_string())
+                    })?;
+                }
+                Err(crate::tools::spec::ToolError::execution_failed(format!(
+                    "runtime dynamic tool '{name}' result channel closed"
+                )))
+            }
             Err(_timeout) => {
-                self.cancel_pending_dynamic_tool(&call_id);
+                if let Some(entry) = self.take_pending_dynamic_tool(&thread_id, &turn_id, &call_id)
+                {
+                    self.emit_event(&thread_id, Some(&turn_id), None, "tool_call.timeout", {
+                        let mut payload =
+                            dynamic_tool_terminal_payload(&entry.params, "timeout", None, None);
+                        if let Some(object) = payload.as_object_mut() {
+                            object.insert(
+                                "timeout_secs".to_string(),
+                                json!(result_timeout.as_secs()),
+                            );
+                        }
+                        payload
+                    })
+                    .await
+                    .map_err(|err| {
+                        crate::tools::spec::ToolError::execution_failed(err.to_string())
+                    })?;
+                }
                 Err(crate::tools::spec::ToolError::Timeout {
-                    seconds: approval_timeout.as_secs(),
+                    seconds: result_timeout.as_secs(),
                 })
             }
         }

@@ -238,6 +238,14 @@ test("gap recovery snapshot restores approval and user-input attention before re
         turn_id: "turn-1",
         request: { questions: [{ id: "choice", question: "Continue?", options: [] }] },
       }],
+      pending_dynamic_tool_calls: [{
+        thread_id: "thread-a",
+        turn_id: "turn-1",
+        call_id: "call-recovered",
+        namespace: "bench",
+        tool: "lookup",
+        arguments: { id: "7" },
+      }],
     }),
     subscribe: (threadId, sequence) => subscriptions.push([threadId, sequence]),
   });
@@ -247,6 +255,8 @@ test("gap recovery snapshot restores approval and user-input attention before re
   assert.equal(state.approvals.has("approval-recovered"), true);
   assert.equal(state.userInputs.size, 1);
   assert.equal(state.userInputs.has("input-recovered"), true);
+  assert.equal(state.dynamicToolCalls.size, 1);
+  assert.equal(state.dynamicToolCalls.get("call-recovered").tool, "lookup");
   assert.deepEqual(subscriptions, [["thread-a", 15]]);
 
   const duplicate = runtimeEvent(
@@ -425,6 +435,65 @@ test("hydrates pending attention from a reload snapshot and clears cancellation 
     runtimeEvent(8, "user_input.canceled", { id: "input-reload", terminal: true }),
   );
   assert.equal(state.userInputs.has("input-reload"), false);
+});
+
+test("dynamic tool calls hydrate and disappear exactly once across terminal variants", () => {
+  const state = createThreadState("thread-a");
+  assert.equal(applySnapshot(state, {
+    ...snapshot(),
+    pending_dynamic_tool_calls: [{
+      thread_id: "thread-a",
+      turn_id: "turn-1",
+      call_id: "call-snapshot",
+      tool: "snapshot_lookup",
+      arguments: { id: "snapshot" },
+    }],
+  }), true);
+  assert.equal(state.dynamicToolCalls.get("call-snapshot").tool, "snapshot_lookup");
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(8, "tool_call.requested", {
+      thread_id: "thread-a",
+      turn_id: "turn-1",
+      call_id: "call-live",
+      tool: "live_lookup",
+      arguments: { id: "live" },
+    }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.size, 2);
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(9, "tool_call.resolved", { call_id: "call-snapshot", status: "resolved" }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.has("call-snapshot"), false);
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(9, "tool_call.resolved", { call_id: "call-snapshot", status: "resolved" }),
+  ), false);
+  assert.equal(state.dynamicToolCalls.size, 1);
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(10, "tool_call.canceled", { call_id: "call-live", status: "canceled" }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.size, 0);
+
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(11, "tool_call.requested", {
+      call_id: "call-timeout",
+      tool: "slow_lookup",
+      arguments: {},
+    }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.has("call-timeout"), true);
+  assert.equal(applyRuntimeEvent(
+    state,
+    runtimeEvent(12, "tool_call.timeout", { call_id: "call-timeout", status: "timeout" }),
+  ), true);
+  assert.equal(state.dynamicToolCalls.size, 0);
 });
 
 test("preserves drafts per thread without browser storage", () => {

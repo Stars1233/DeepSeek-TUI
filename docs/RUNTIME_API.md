@@ -298,11 +298,12 @@ work; resolve approvals; and answer Runtime user-input requests. Selection
 loads `GET /v1/threads/{id}` first, then opens the replayable event stream with
 `since_seq=latest_seq`; reconnection advances from the newest accepted sequence
 and drops duplicates or events from a stale selection. The thread detail
-snapshot includes `pending_approvals` and `pending_user_inputs`; clients must
-hydrate those fields before subscribing so a reload cannot strand a prompt
-whose `*.required` event is at or before `latest_seq`. Resolution is also
-published as `approval.decided`, `user_input.answered`, or
-`user_input.canceled` for already-connected clients.
+snapshot includes `pending_approvals`, `pending_user_inputs`, and
+`pending_dynamic_tool_calls`; clients must hydrate those fields before
+subscribing so a reload cannot strand work whose request event is at or before
+`latest_seq`. Resolution is also published as `approval.decided`,
+`user_input.answered`, `user_input.canceled`, `tool_call.resolved`,
+`tool_call.canceled`, or `tool_call.timeout` for already-connected clients.
 
 Model, mode, permission posture, workspace, and branch are display-only in this
 client. Files/Changes, PTY/terminal, preview, artifacts, provider login/model
@@ -417,6 +418,17 @@ accept an empty string to clear a previously-set value. Added in v0.8.10 (#562):
 **User input**
 - `POST /v1/user-input/{thread_id}/{input_id}` with body
   `{ "answers": [{ "id": "question-id", "label": "Choice", "value": "Choice" }] }`
+
+Submitted values are delivered to the active model turn but are deliberately
+excluded from durable Runtime items and events. The settled tool item contains
+only a neutral receipt and a machine-readable `response_redacted` marker.
+
+**Client-executed dynamic tools**
+- `POST /v1/threads/{thread_id}/turns/{turn_id}/tool-calls/{call_id}/result`
+
+The thread and turn in the result route must match the pending call. A call is
+settled at most once; wrong-route and duplicate results return 404. Terminal
+lifecycle events carry identifiers and status only, never tool result content.
 
 **Events** (SSE replay + live stream)
 - `GET /v1/threads/{id}/events?since_seq=<u64>`

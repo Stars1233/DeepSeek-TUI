@@ -2034,7 +2034,7 @@ async fn interrupt_thread_turn(
 
 async fn deliver_dynamic_tool_result(
     State(state): State<RuntimeApiState>,
-    Path((id, _turn_id, call_id)): Path<(String, String, String)>,
+    Path((id, turn_id, call_id)): Path<(String, String, String)>,
     Json(result): Json<DynamicToolCallResult>,
 ) -> Result<StatusCode, ApiError> {
     state
@@ -2044,7 +2044,9 @@ async fn deliver_dynamic_tool_result(
         .map_err(map_thread_err)?;
     if state
         .runtime_threads
-        .deliver_dynamic_tool_result(&call_id, result)
+        .deliver_dynamic_tool_result(&id, &turn_id, &call_id, result)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
     {
         Ok(StatusCode::ACCEPTED)
     } else {

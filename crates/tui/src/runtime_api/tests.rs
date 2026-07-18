@@ -348,6 +348,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         latest_seq: 0,
         pending_approvals: Vec::new(),
         pending_user_inputs: Vec::new(),
+        pending_dynamic_tool_calls: Vec::new(),
     };
 
     let messages = messages_from_thread_detail(&detail);
@@ -423,6 +424,7 @@ fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
         latest_seq: 0,
         pending_approvals: Vec::new(),
         pending_user_inputs: Vec::new(),
+        pending_dynamic_tool_calls: Vec::new(),
     };
     let config = Config {
         provider: Some("lm-studio".to_string()),
@@ -2231,7 +2233,7 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
     let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
     let Some((addr, runtime_threads, handle)) =
         spawn_test_server_with_root_token_mobile_workspace_and_overrides(
-            root,
+            root.clone(),
             sessions_dir,
             None,
             false,
@@ -2288,36 +2290,58 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
                 route: None,
             })
             .await?;
+        let request = crate::tools::user_input::UserInputRequest {
+            questions: vec![crate::tools::user_input::UserInputQuestion {
+                header: "Continue".to_string(),
+                id: "choice".to_string(),
+                question: "Continue the compatibility turn?".to_string(),
+                options: vec![
+                    crate::tools::user_input::UserInputOption {
+                        label: "Continue".to_string(),
+                        description: "Finish the turn".to_string(),
+                    },
+                    crate::tools::user_input::UserInputOption {
+                        label: "Stop".to_string(),
+                        description: "Cancel the turn".to_string(),
+                    },
+                ],
+                allow_free_text: false,
+                multi_select: false,
+            }],
+        };
+        harness
+            .tx_event
+            .send(EngineEvent::ToolCallStarted {
+                id: "input_compat".to_string(),
+                name: "request_user_input".to_string(),
+                input: serde_json::to_value(&request)?,
+            })
+            .await?;
         harness
             .tx_event
             .send(EngineEvent::UserInputRequired {
                 id: "input_compat".to_string(),
-                request: crate::tools::user_input::UserInputRequest {
-                    questions: vec![crate::tools::user_input::UserInputQuestion {
-                        header: "Continue".to_string(),
-                        id: "choice".to_string(),
-                        question: "Continue the compatibility turn?".to_string(),
-                        options: vec![
-                            crate::tools::user_input::UserInputOption {
-                                label: "Continue".to_string(),
-                                description: "Finish the turn".to_string(),
-                            },
-                            crate::tools::user_input::UserInputOption {
-                                label: "Stop".to_string(),
-                                description: "Cancel the turn".to_string(),
-                            },
-                        ],
-                        allow_free_text: false,
-                        multi_select: false,
-                    }],
-                },
+                request,
             })
             .await?;
         let submission = harness.recv_user_input_submission().await;
+        let tool_result = submission
+            .as_ref()
+            .map(|(_, response)| crate::tools::spec::ToolResult::json(response))
+            .transpose()?
+            .context("compatibility user input was canceled before tool completion")?;
         let _ = submission_tx.send(submission);
         wait_for_completion_release
             .await
             .context("compatibility interaction test dropped completion release")?;
+        harness
+            .tx_event
+            .send(EngineEvent::ToolCallComplete {
+                id: "input_compat".to_string(),
+                name: "request_user_input".to_string(),
+                result: Ok(tool_result),
+            })
+            .await?;
         harness
             .tx_event
             .send(EngineEvent::MessageStarted { index: 0 })
@@ -2490,6 +2514,60 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
     assert!(
         !serde_json::to_string(&frames)?.contains(SECRET_ANSWER),
         "submitted answer leaked into compatibility SSE"
+    );
+    let detail = runtime_threads.get_thread_detail(&thread_id).await?;
+    let serialized_detail = serde_json::to_string(&detail)?;
+    assert!(
+        !serialized_detail.contains(SECRET_ANSWER),
+        "submitted answer leaked into the thread snapshot"
+    );
+    let redacted_item = detail
+        .items
+        .iter()
+        .find(|item| {
+            item.metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("tool_name"))
+                .and_then(Value::as_str)
+                == Some("request_user_input")
+        })
+        .context("request_user_input Runtime receipt was not persisted")?;
+    assert_eq!(
+        redacted_item.detail.as_deref(),
+        Some("User input submitted")
+    );
+    assert_eq!(
+        redacted_item
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("response_redacted"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    let durable_events = runtime_threads.events_since(&thread_id, None)?;
+    assert!(
+        !serde_json::to_string(&durable_events)?.contains(SECRET_ANSWER),
+        "submitted answer leaked into the durable Runtime event log"
+    );
+    let leaked_file = ignore::WalkBuilder::new(root.join("runtime"))
+        .hidden(false)
+        .build()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .find_map(|entry| {
+            fs::read_to_string(entry.path())
+                .ok()
+                .filter(|contents| contents.contains(SECRET_ANSWER))
+                .map(|_| entry.path().to_path_buf())
+        });
+    assert!(
+        leaked_file.is_none(),
+        "submitted answer leaked into Runtime file {}",
+        leaked_file
+            .as_deref()
+            .map(std::path::Path::display)
+            .map(|path| path.to_string())
+            .unwrap_or_default()
     );
 
     handle.abort();
@@ -4769,7 +4847,17 @@ async fn dynamic_tool_result_endpoint_delivers_to_runtime() -> Result<()> {
         .json()
         .await?;
     let thread_id = thread["id"].as_str().context("thread id")?;
-    let rx = runtime_threads.register_pending_dynamic_tool_for_test("call_1");
+    let rx =
+        runtime_threads.register_pending_dynamic_tool_for_test(thread_id, "turn_1", "call_1")?;
+
+    let wrong_turn = client
+        .post(format!(
+            "http://{addr}/v1/threads/{thread_id}/turns/turn_wrong/tool-calls/call_1/result"
+        ))
+        .json(&json!({ "success": false }))
+        .send()
+        .await?;
+    assert_eq!(wrong_turn.status(), StatusCode::NOT_FOUND);
 
     let resp = client
         .post(format!(
@@ -4786,6 +4874,31 @@ async fn dynamic_tool_result_endpoint_delivers_to_runtime() -> Result<()> {
     let received = tokio::time::timeout(Duration::from_secs(1), rx).await??;
     assert!(received.success);
     assert_eq!(received.content.len(), 1);
+    let resolved = runtime_threads
+        .events_since(thread_id, None)?
+        .into_iter()
+        .filter(|event| event.event == "tool_call.resolved")
+        .collect::<Vec<_>>();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].payload["call_id"], "call_1");
+    assert!(resolved[0].payload.get("content").is_none());
+
+    let duplicate = client
+        .post(format!(
+            "http://{addr}/v1/threads/{thread_id}/turns/turn_1/tool-calls/call_1/result"
+        ))
+        .json(&json!({ "success": true }))
+        .send()
+        .await?;
+    assert_eq!(duplicate.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        runtime_threads
+            .events_since(thread_id, None)?
+            .iter()
+            .filter(|event| event.event == "tool_call.resolved")
+            .count(),
+        1
+    );
 
     handle.abort();
     Ok(())
