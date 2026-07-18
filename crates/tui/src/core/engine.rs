@@ -749,6 +749,27 @@ impl Engine {
         .trim()
     }
 
+    fn permission_question_discipline(
+        approval_mode: crate::tui::approval::ApprovalMode,
+    ) -> &'static str {
+        use crate::tui::approval::ApprovalMode;
+
+        match approval_mode {
+            ApprovalMode::Suggest => {
+                "Tool approvals and user decisions are separate. Ask a concise question when an unresolved choice materially affects authority, cost, requested scope, or outcome; otherwise continue under the active approval policy."
+            }
+            ApprovalMode::Auto => {
+                "Proceed on reversible implementation details and minimize interruptions. Ask one concise question before an unresolved choice materially changes authority, cost, requested scope, or outcome; do not suppress a necessary question merely because a tool can run automatically."
+            }
+            ApprovalMode::Bypass => {
+                "Tool calls do not need approval, but Full Access does not authorize invented intent. Ask one concise, deliberate question when a consequential choice cannot be recovered safely from context; otherwise proceed autonomously within the current sandbox, repository, and managed-policy boundaries."
+            }
+            ApprovalMode::Never => {
+                "Remain read-only. Ask when a missing user decision blocks a truthful plan or investigation; do not imply that this permission boundary can be bypassed."
+            }
+        }
+    }
+
     pub(super) async fn emit_compaction_started(
         &mut self,
         id: String,
@@ -2269,6 +2290,15 @@ impl Engine {
             format!(
                 "Current mode policy:\n{}",
                 Self::mode_runtime_instructions(self.current_mode)
+            ),
+            format!(
+                "Current permission posture: {}",
+                self.session.approval_mode.permission_chip_label()
+            ),
+            "Current permission policy source: effective runtime authority".to_string(),
+            format!(
+                "Current question discipline: {}",
+                Self::permission_question_discipline(self.session.approval_mode)
             ),
             format!("Input provenance: {}", provenance.as_str()),
             format!(

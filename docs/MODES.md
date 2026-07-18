@@ -98,9 +98,10 @@ thread resume semantics.
 - Clear the current input if text is present.
 - Otherwise it is a no-op.
 
-## Approval Mode
+## Permission Posture
 
-You can override approval behavior at runtime:
+Permission posture controls tool approval, not whether the model may invent a
+missing user decision. Cycle it with `Shift+Tab`, or edit it at runtime:
 
 ```text
 /config
@@ -109,9 +110,22 @@ You can override approval behavior at runtime:
 
 Legacy note: `/set approval_mode ...` was retired in favor of `/config`.
 
-- `suggest` (default): uses the per-mode rules above.
-- `auto`: auto-approves all tools without changing the visible TUI mode.
-- `never`: blocks any tool that isn't considered safe/read-only.
+- `suggest` (**Ask**, default): tool approvals may interrupt, and Codewhale asks
+  when an unresolved user choice materially changes authority, cost, scope, or
+  outcome.
+- `auto` (**Auto-Review**): reversible implementation details proceed with
+  fewer interruptions, while consequential missing choices still produce one
+  concise question.
+- `bypass` (**Full Access**): tool calls do not show approval prompts, but this
+  never grants authority to invent intent. Codewhale asks deliberately when a
+  consequential choice cannot be recovered safely from context, and otherwise
+  proceeds autonomously within sandbox, repository, and managed-policy bounds.
+- `never`: blocks any tool that is not considered safe/read-only.
+
+The effective posture and its question discipline are projected into every
+turn from the same runtime authority that gates tools. A mode/posture change is
+therefore visible to the next turn. Runtime-generated or child input is narrowed
+before the metadata is built and cannot claim standing auto-approval authority.
 
 ## Small-Screen Status Behavior
 

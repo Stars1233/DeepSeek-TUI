@@ -6977,6 +6977,101 @@ fn turn_metadata_includes_plan_mode_policy() {
 }
 
 #[test]
+fn turn_metadata_projects_effective_permission_question_discipline() {
+    use crate::tui::approval::ApprovalMode;
+
+    let cases = [
+        (
+            ApprovalMode::Suggest,
+            "Ask",
+            "Tool approvals and user decisions are separate",
+        ),
+        (
+            ApprovalMode::Auto,
+            "Auto-Review",
+            "Proceed on reversible implementation details",
+        ),
+        (
+            ApprovalMode::Bypass,
+            "Full Access",
+            "Full Access does not authorize invented intent",
+        ),
+        (ApprovalMode::Never, "Never", "Remain read-only"),
+    ];
+
+    for (approval_mode, posture, question_marker) in cases {
+        let tmp = tempdir().expect("tempdir");
+        let config = EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let (mut engine, _handle) = Engine::new(config, &Config::default());
+        engine.session.approval_mode = approval_mode;
+
+        let message = engine.user_text_message_with_turn_metadata("continue".to_string());
+        let ContentBlock::Text { text, .. } = message
+            .content
+            .last()
+            .expect("turn metadata must be present")
+        else {
+            panic!("expected text turn metadata");
+        };
+
+        assert!(
+            text.contains(&format!("Current permission posture: {posture}")),
+            "{posture}: {text}"
+        );
+        assert!(
+            text.contains("Current permission policy source: effective runtime authority"),
+            "{posture}: {text}"
+        );
+        assert!(text.contains(question_marker), "{posture}: {text}");
+    }
+}
+
+#[test]
+fn turn_metadata_uses_provenance_narrowed_permission_posture() {
+    use crate::tui::approval::ApprovalMode;
+
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let authority = effective_input_policy(
+        UserInputProvenance::SubAgentHandoff,
+        AppMode::Yolo,
+        "continue from child",
+        true,
+        true,
+        true,
+        ApprovalMode::Bypass,
+    );
+    engine.apply_runtime_mode_policy(&authority);
+
+    let message = engine.runtime_text_message_with_turn_metadata(
+        "continue from child".to_string(),
+        UserInputProvenance::SubAgentHandoff,
+    );
+    let ContentBlock::Text { text, .. } = message
+        .content
+        .last()
+        .expect("turn metadata must be present")
+    else {
+        panic!("expected text turn metadata");
+    };
+
+    assert!(text.contains("Current mode: agent"), "{text}");
+    assert!(text.contains("Current permission posture: Ask"), "{text}");
+    assert!(!text.contains("Current permission posture: Full Access"));
+    assert!(
+        text.contains("Input authority: non_authoritative"),
+        "{text}"
+    );
+}
+
+#[test]
 fn current_mode_field_assignment_takes_effect_synchronously() {
     // Basic unit-level invariant: the current_mode field mutates as expected.
     // Op::ChangeMode dispatch through the run loop is exercised by the
