@@ -175,6 +175,7 @@ jobs:
           bash .github/scripts/update-homebrew-tap.test.sh
           node .github/scripts/release-workflows.test.js
           node --test scripts/release/assemble-release-assets.test.js
+          node --test scripts/release/ensure-release-assets-absent.test.js
 
   lint:
     name: Lint

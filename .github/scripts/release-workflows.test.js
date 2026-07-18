@@ -105,6 +105,13 @@ assert.match(release, /uses: \.\/\.github\/workflows\/release-artifacts\.yml/);
 assert.doesNotMatch(release, /^  (build|bundle|windows-installer):/m);
 assert.match(release, /name: codewhale-release-assets\n\s+path: artifacts/);
 assert.match(release, /files: artifacts\/\*/);
+assert.equal(
+  (release.match(/ensure-release-assets-absent\.js/g) || []).length,
+  2,
+  "public release must refuse existing assets before work and immediately before upload",
+);
+assert.match(release, /overwrite_files:\s*false/);
+assert.match(release, /fail_on_unmatched_files:\s*true/);
 
 assert.match(runbook, /release[- ]candidate/i);
 assert.match(runbook, /expected_sha/);

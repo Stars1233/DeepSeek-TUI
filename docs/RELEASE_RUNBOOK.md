@@ -243,7 +243,10 @@ and fails branch-only release sources before assets are published.
      `gh workflow run release.yml --ref vX.Y.Z -f version=X.Y.Z`.
    - Never dispatch from `main`, and do not start a duplicate while the
      tag-triggered run is merely delayed. The workflow serializes runs for the
-     same tag, but a duplicate still rebuilds public artifacts unnecessarily.
+     same tag. It also refuses to start release work when that tag already owns
+     any GitHub Release asset, rechecks immediately before upload, and disables
+     the release action's overwrite behavior. A normal rerun must never replace
+     public bytes.
 4. Wait for the GitHub Release workflow and all public assets to finish, then
    fetch the release tag and run the public asset gate. Do not publish any
    Cargo or npm package until it passes:
@@ -410,8 +413,13 @@ If the workflow failed for the release tag, use the exact-tag rerun or
   - rerun `./scripts/release/publish-crates.sh publish`
   - already-published crate versions will be skipped
 - GitHub assets missing or checksum manifest incomplete:
-  - fix `.github/workflows/release.yml`
-  - retag or upload corrected assets before `npm publish`
+  - fix `.github/workflows/release.yml`, but do not rerun it over an existing
+    asset set and do not delete assets merely to make the guard pass
+  - if any asset may have been public or consumed, cut a new patch version
+  - only after explicit maintainer approval and proof that no downstream
+    publication or consumer treated the failed asset set as public may a
+    deliberately scoped recovery remove the failed release before an exact-tag
+    rerun; record that exception in the release packet
 - npm packaging-only problem:
   - bump only the npm package version
   - keep `codewhaleBinaryVersion` on the last known-good Rust release

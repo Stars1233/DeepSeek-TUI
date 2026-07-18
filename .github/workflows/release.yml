@@ -100,6 +100,11 @@ jobs:
           ./scripts/release/check-versions.sh
       - name: Require release source on main
         run: ./scripts/release/ensure-release-on-main.sh "${{ steps.release.outputs.sha }}"
+      - name: Refuse an existing public asset set
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: node scripts/release/ensure-release-assets-absent.js "${GITHUB_REPOSITORY}" "${TAG}"
 
   parity:
     needs: resolve
@@ -285,12 +290,19 @@ jobs:
             "https://github.com/${GITHUB_REPOSITORY}.git" \
             "${TAG}" \
             "${EXPECTED_SHA}"
+      - name: Reconfirm public asset set is still empty
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: node repo/scripts/release/ensure-release-assets-absent.js "${GITHUB_REPOSITORY}" "${TAG}"
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
           files: artifacts/*
           prerelease: false
           body_path: release-body.md
+          overwrite_files: false
+          fail_on_unmatched_files: true
 
   homebrew:
     needs: [release, resolve]
