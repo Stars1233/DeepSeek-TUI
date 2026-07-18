@@ -64,6 +64,13 @@ test("install script remains parseable before the Node support guard runs", () =
   assert.equal(installScript.includes("?."), false);
 });
 
+test("native shortcut has its own platform asset and installed path", () => {
+  const paths = _internal.binaryPaths();
+  assert.match(paths.codew.asset, /^codew-/);
+  assert.equal(path.basename(paths.codew.target), process.platform === "win32" ? "codew.exe" : "codew");
+  assert.notEqual(paths.codew.target, paths.codewhale.target);
+});
+
 test("install failure hint explains release base override for blocked GitHub downloads", () => {
   const previous = process.env.DEEPSEEK_TUI_RELEASE_BASE_URL;
   delete process.env.DEEPSEEK_TUI_RELEASE_BASE_URL;

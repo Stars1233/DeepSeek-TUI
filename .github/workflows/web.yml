@@ -3,14 +3,8 @@ name: Web Frontend
 on:
   push:
     branches: [master, main]
-    paths:
-      - 'web/**'
-      - '.github/workflows/web.yml'
   pull_request:
     branches: [master, main]
-    paths:
-      - 'web/**'
-      - '.github/workflows/web.yml'
   workflow_dispatch:
 
 permissions:
@@ -49,10 +43,14 @@ jobs:
         # Fails CI when docs-map.ts references non-existent repo files or
         # when website version / command snippets are stale.
         run: npm run check:docs
+      - name: Run tests
+        run: npm test
       - name: Run ESLint
         run: npm run lint
       - name: TypeScript type check
         run: npx tsc --noEmit
+      - name: Build production site
+        run: npm run build
 
   deploy:
     name: Deploy to Cloudflare

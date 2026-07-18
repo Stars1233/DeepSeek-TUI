@@ -39,13 +39,14 @@ cat <<EOF
 
 ## Install
 
-### Recommended — npm (one command, both binaries)
+### Recommended — npm (one command, all three entrypoints)
 
 \`\`\`bash
 npm install -g codewhale
 \`\`\`
 
-The wrapper downloads the matched runtime binaries from this Release and places them in the same directory.
+The wrapper downloads the matched \`codewhale\`, \`codew\`, and \`codewhale-tui\`
+binaries from this Release and places them in the same directory.
 
 ### Docker / GHCR
 
@@ -107,14 +108,14 @@ Download the checksum manifests from this Release and verify:
 
 \`\`\`bash
 # Linux — archive bundles
-sha256sum -c codewhale-bundles-sha256.txt
+sha256sum -c codewhale-bundles-sha256.txt --ignore-missing
 
 # Linux — individual binaries
-sha256sum -c codewhale-artifacts-sha256.txt
+sha256sum -c codewhale-artifacts-sha256.txt --ignore-missing
 
 # macOS
-shasum -a 256 -c codewhale-bundles-sha256.txt
-shasum -a 256 -c codewhale-artifacts-sha256.txt
+shasum -a 256 -c codewhale-bundles-sha256.txt --ignore-missing
+shasum -a 256 -c codewhale-artifacts-sha256.txt --ignore-missing
 \`\`\`
 
 ## What's in ${tag}

@@ -81,6 +81,12 @@ set -euo pipefail
 : >"${PREPARE_RELEASE_TEST_MARKERS}/check-versions"
 EOF
 
+  cat >"${root}/scripts/release/check-ohos-deps.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+: >"${PREPARE_RELEASE_TEST_MARKERS}/check-ohos-deps"
+EOF
+
   cat >"${root}/web/scripts/derive-facts.mjs" <<'EOF'
 import { writeFileSync } from "node:fs";
 
@@ -90,6 +96,7 @@ EOF
   chmod +x \
     "${root}/bin/cargo" \
     "${root}/scripts/release/prepare-release.sh" \
+    "${root}/scripts/release/check-ohos-deps.sh" \
     "${root}/scripts/release/check-versions.sh" \
     "${root}/scripts/sync-changelog.sh"
 }
@@ -118,12 +125,49 @@ if grep -R -E -- '--tag v[0-9]+\.[0-9]+\.[0-9]+' \
   echo "tag-free localized README unexpectedly gained a release tag" >&2
   exit 1
 fi
-for marker in cargo sync-changelog derive-facts check-versions; do
+for marker in cargo sync-changelog derive-facts check-versions check-ohos-deps; do
   [[ -f "${success_markers}/${marker}" ]] || {
     echo "prepare-release did not reach ${marker}" >&2
     exit 1
   }
 done
+
+same_root="${tmp_dir}/same"
+same_markers="${tmp_dir}/same-markers"
+same_log="${tmp_dir}/same.log"
+make_fixture "${same_root}"
+mkdir -p "${same_markers}"
+cat >"${same_root}/CHANGELOG.md" <<'EOF'
+## [Unreleased]
+
+## [0.8.68] - 2026-07-18
+
+### Changed
+
+- Test already-prepared release.
+EOF
+
+PREPARE_RELEASE_TEST_MARKERS="${same_markers}" \
+  PATH="${same_root}/bin:${PATH}" \
+  "${same_root}/scripts/release/prepare-release.sh" 0.8.68 \
+  >"${same_log}"
+
+grep -Fq \
+  'Workspace is already at 0.8.68; refreshing generated release state and rerunning gates.' \
+  "${same_log}"
+for marker in sync-changelog derive-facts check-versions check-ohos-deps; do
+  [[ -f "${same_markers}/${marker}" ]] || {
+    echo "same-version prepare-release did not reach ${marker}" >&2
+    exit 1
+  }
+done
+if [[ -f "${same_markers}/cargo" ]]; then
+  echo "same-version prepare-release unexpectedly mutated Cargo.lock" >&2
+  exit 1
+fi
+grep -Fq 'version = "0.8.68"' "${same_root}/Cargo.toml"
+grep -Fq 'version = "0.8.68"' "${same_root}/crates/example/Cargo.toml"
+grep -Fq '"version": "0.8.68"' "${same_root}/npm/codewhale/package.json"
 
 stale_root="${tmp_dir}/stale"
 stale_markers="${tmp_dir}/stale-markers"

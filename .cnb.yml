@@ -64,6 +64,7 @@
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version
+        ./target/release/codew --version
         ./target/release/codewhale-tui --version
 
 .linux_release_preflight: &linux_release_preflight
@@ -103,6 +104,7 @@
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version
+        ./target/release/codew --version
         ./target/release/codewhale-tui --version
 
 main:

@@ -205,7 +205,8 @@ curl -L -O https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhal
 sha256sum -c codewhale-artifacts-sha256.txt --ignore-missing
 ```
 
-On macOS, use `shasum -a 256 -c codewhale-artifacts-sha256.txt` instead of
+On macOS, use
+`shasum -a 256 -c codewhale-artifacts-sha256.txt --ignore-missing` instead of
 `sha256sum`.
 
 If antivirus software flags an official release binary, treat it as unresolved
@@ -458,7 +459,8 @@ curl -L -o /tmp/codewhale-artifacts-sha256.txt \
 ( cd ~/.local/bin && sha256sum -c /tmp/codewhale-artifacts-sha256.txt --ignore-missing )
 ```
 
-(Use `shasum -a 256 -c` instead of `sha256sum` on macOS.)
+(Use `shasum -a 256 -c /tmp/codewhale-artifacts-sha256.txt --ignore-missing`
+instead of `sha256sum -c` on macOS.)
 
 ### Roll back to a previous release
 

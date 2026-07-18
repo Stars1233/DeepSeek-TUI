@@ -21,7 +21,7 @@ against it:
 
 ```bash
 # Verify a downloaded CNB binary against the CNB manifest
-sha256sum -c codewhale-artifacts-sha256.txt
+sha256sum -c codewhale-artifacts-sha256.txt --ignore-missing
 ```
 
 ## How it works

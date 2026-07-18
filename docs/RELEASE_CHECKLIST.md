@@ -65,8 +65,10 @@ generic checklist does not enumerate.
       `npm/codewhale/package.json` (`version` + `codewhaleBinaryVersion`),
       the README install-tag examples, refreshes `Cargo.lock`, regenerates
       `crates/tui/CHANGELOG.md` and `web/lib/facts.generated.ts`, and ends
-      by running `check-versions.sh`. Write the CHANGELOG entry **before**
-      running it.
+      by running the version and OHOS gates. Write the CHANGELOG entry
+      **before** running it. The helper is safe to rerun at the requested
+      workspace version; it skips replacements but refreshes both generated
+      files and reruns the gates.
 - [ ] `npm/deepseek-tui/package.json` remains private/compatibility-only and
       is **not** bumped or published.
 - [ ] `./scripts/release/check-versions.sh` reports

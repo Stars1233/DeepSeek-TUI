@@ -10,8 +10,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 src_dir="${1:-${repo_root}/target/release}"
 
-if [[ ! -x "${src_dir}/codewhale" || ! -x "${src_dir}/codewhale-tui" ]]; then
-  echo "ERROR: expected executable codewhale and codewhale-tui in ${src_dir}" >&2
+if [[ ! -x "${src_dir}/codewhale" || ! -x "${src_dir}/codew" || ! -x "${src_dir}/codewhale-tui" ]]; then
+  echo "ERROR: expected executable codewhale, codew, and codewhale-tui in ${src_dir}" >&2
   echo "Build first: cargo build --release -p codewhale-cli -p codewhale-tui --locked" >&2
   exit 1
 fi
@@ -30,16 +30,19 @@ else
 fi
 
 cli_version="$("${src_dir}/codewhale" --version)"
+shim_version="$("${src_dir}/codew" --version)"
 tui_version="$("${src_dir}/codewhale-tui" --version)"
 short_sha="${source_sha:0:12}"
-if [[ "${cli_version}" != *"${short_sha}"* || "${tui_version}" != *"${short_sha}"* ]]; then
+if [[ "${cli_version}" != *"${short_sha}"* || "${shim_version}" != *"${short_sha}"* || "${tui_version}" != *"${short_sha}"* ]]; then
   echo "ERROR: release binaries do not embed current HEAD ${short_sha}" >&2
   echo "  codewhale: ${cli_version}" >&2
+  echo "  codew: ${shim_version}" >&2
   echo "  codewhale-tui: ${tui_version}" >&2
   echo "Rebuild this checkout before installing." >&2
   exit 1
 fi
 cli_sha="$(shasum -a 256 "${src_dir}/codewhale" | awk '{print $1}')"
+shim_sha="$(shasum -a 256 "${src_dir}/codew" | awk '{print $1}')"
 tui_sha="$(shasum -a 256 "${src_dir}/codewhale-tui" | awk '{print $1}')"
 
 default_install_dirs="${HOME}/.cargo/bin:${HOME}/.local/bin"
@@ -73,21 +76,39 @@ installed=()
 for dest in "${dest_dirs[@]}"; do
   mkdir -p "${dest}"
   install_binary "${src_dir}/codewhale" "${dest}/codewhale"
+  install_binary "${src_dir}/codew" "${dest}/codew"
   install_binary "${src_dir}/codewhale-tui" "${dest}/codewhale-tui"
-  ln -sfn "${dest}/codewhale" "${dest}/codew"
   installed+=("${dest}/codewhale" "${dest}/codewhale-tui" "${dest}/codew")
 done
 
-path_tui="$(zsh -lc 'command -v codewhale-tui' 2>/dev/null || true)"
-if [[ -z "${path_tui}" || ! -x "${path_tui}" ]]; then
-  echo "ERROR: fresh login shell cannot resolve codewhale-tui" >&2
-  exit 1
-fi
-path_tui_sha="$(shasum -a 256 "${path_tui}" | awk '{print $1}')"
-if [[ "${path_tui_sha}" != "${tui_sha}" ]]; then
-  echo "ERROR: fresh-shell codewhale-tui is not the installed build: ${path_tui}" >&2
-  exit 1
-fi
+verify_fresh_shell_binary() {
+  local command_name="$1"
+  local expected_sha="$2"
+  local command_path
+  local command_sha
+  local command_version
+
+  command_path="$(zsh -lc "command -v ${command_name}" 2>/dev/null || true)"
+  if [[ -z "${command_path}" || ! -x "${command_path}" ]]; then
+    echo "ERROR: fresh login shell cannot resolve ${command_name}" >&2
+    return 1
+  fi
+  command_sha="$(shasum -a 256 "${command_path}" | awk '{print $1}')"
+  if [[ "${command_sha}" != "${expected_sha}" ]]; then
+    echo "ERROR: fresh-shell ${command_name} is not the installed build: ${command_path}" >&2
+    return 1
+  fi
+  command_version="$(zsh -lc "${command_name} --version" 2>/dev/null || true)"
+  if [[ "${command_version}" != *"${short_sha}"* ]]; then
+    echo "ERROR: fresh-shell ${command_name} does not report current HEAD ${short_sha}" >&2
+    return 1
+  fi
+  printf '%s\n' "${command_path}"
+}
+
+path_cli="$(verify_fresh_shell_binary codewhale "${cli_sha}")"
+path_shim="$(verify_fresh_shell_binary codew "${shim_sha}")"
+path_tui="$(verify_fresh_shell_binary codewhale-tui "${tui_sha}")"
 
 default_receipt_root="${HOME}/.codewhale/dogfood-receipts"
 if [[ -d "/Volumes/VIXinSSD/CW/backups" ]]; then
@@ -104,8 +125,12 @@ receipt="${receipt_root}/${timestamp}-${source_sha:0:12}.txt"
   echo "source_dir=${src_dir}"
   echo "codewhale_version=${cli_version}"
   echo "codewhale_sha256=${cli_sha}"
+  echo "codew_version=${shim_version}"
+  echo "codew_sha256=${shim_sha}"
   echo "codewhale_tui_version=${tui_version}"
   echo "codewhale_tui_sha256=${tui_sha}"
+  echo "fresh_shell_codewhale=${path_cli}"
+  echo "fresh_shell_codew=${path_shim}"
   echo "fresh_shell_codewhale_tui=${path_tui}"
   printf 'installed_path=%s\n' "${installed[@]}"
 } >"${receipt}"

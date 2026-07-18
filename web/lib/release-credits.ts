@@ -35,4 +35,5 @@ export const RELEASE_CONTRIBUTORS: string[] = [
 export const RELEASE_HELPERS: string[] = [
   "@AiurArtanis",
   "@seanthefuturegorilla",
+  "@SparkofSpike",
 ];

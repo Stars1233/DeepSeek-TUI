@@ -81,7 +81,6 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
-cargo publish --dry-run --locked --allow-dirty -p codewhale-tui
 ./scripts/release/publish-crates.sh dry-run
 ```
 
@@ -100,11 +99,11 @@ without unpublished workspace dependencies and a packaging preflight for depende
 workspace crates. That avoids false negatives from crates.io not yet containing the
 new workspace version while still validating package contents before publish.
 
-For npm wrapper verification, build the two shipped binaries and run the
+For npm wrapper verification, build the three shipped entrypoints and run the
 cross-platform smoke harness. This packs the npm wrapper, installs it into a
-clean temporary project, serves local release assets over HTTP, and checks both
-the dispatcher-to-TUI path (`codewhale doctor --help`) and the direct TUI
-entrypoint (`codewhale-tui --help`).
+clean temporary project, serves local release assets over HTTP, and checks the
+dispatcher-to-TUI path (`codewhale doctor --help`), the installed native shortcut
+(`codew --version`), and the direct TUI entrypoint (`codewhale-tui --help`).
 
 ```bash
 cargo build --release --locked -p codewhale-cli -p codewhale-tui
@@ -231,7 +230,9 @@ and fails branch-only release sources before assets are published.
    `./scripts/release/prepare-release.sh X.Y.Z` — it bumps every
    version-bearing file (workspace + crate pins + npm wrapper + README
    install tags), refreshes the lockfile and generated files, and runs
-   `check-versions.sh`.
+   the version and OHOS gates. It is safe to rerun after the workspace already
+   equals `X.Y.Z`: the second run skips replacements, refreshes the packaged
+   changelog and web facts, and reruns both gates.
 2. Run `./scripts/release/publish-crates.sh dry-run` locally; it must be clean.
 3. Merge the release PR into `main` before tagging. After the same-version
    queue is frozen and `main` is at the intended source SHA, create `vX.Y.Z`

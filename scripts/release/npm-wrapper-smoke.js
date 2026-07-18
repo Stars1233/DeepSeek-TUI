@@ -182,6 +182,10 @@ async function main() {
       cwd: installDir,
       env,
     });
+    await runCommand("npx", ["--no-install", "codew", "--version"], {
+      cwd: installDir,
+      env,
+    });
     await runCommand("npx", ["--no-install", "codewhale-tui", "--help"], {
       cwd: installDir,
       env,

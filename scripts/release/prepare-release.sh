@@ -24,17 +24,14 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo}"
 
 old="$(grep -E '^version = "' Cargo.toml | head -n1 | sed -E 's/^version = "([^"]+)".*/\1/')"
-if [[ "${old}" == "${new}" ]]; then
-  echo "workspace is already at ${new}; nothing to bump"
-  exit 0
-fi
-echo "Bumping ${old} -> ${new}"
-
 if ! grep -q "^## \[${new}\]" CHANGELOG.md; then
   echo "warning: CHANGELOG.md has no '## [${new}]' entry yet — add it before tagging" >&2
 fi
 
-OLD_VERSION="${old}" NEW_VERSION="${new}" python3 - <<'PY'
+if [[ "${old}" != "${new}" ]]; then
+  echo "Bumping ${old} -> ${new}"
+
+  OLD_VERSION="${old}" NEW_VERSION="${new}" python3 - <<'PY'
 import os, pathlib, re, sys
 
 old, new = os.environ["OLD_VERSION"], os.environ["NEW_VERSION"]
@@ -142,8 +139,11 @@ bump(
 )
 PY
 
-echo "Refreshing Cargo.lock..."
-cargo update --workspace --offline >/dev/null
+  echo "Refreshing Cargo.lock..."
+  cargo update --workspace --offline >/dev/null
+else
+  echo "Workspace is already at ${new}; refreshing generated release state and rerunning gates."
+fi
 
 echo "Regenerating crates/tui/CHANGELOG.md slice..."
 ./scripts/sync-changelog.sh
@@ -153,4 +153,5 @@ node web/scripts/derive-facts.mjs
 
 echo "Validating..."
 ./scripts/release/check-versions.sh
+./scripts/release/check-ohos-deps.sh
 echo "Done. Review 'git diff', commit, and follow docs/RELEASE_CHECKLIST.md."
