@@ -358,7 +358,7 @@ textarea::placeholder {
   gap: 12px 20px;
   padding: 15px 24px 13px;
   border-bottom: 1px solid var(--line);
-  background: rgba(6, 16, 18, 0.72);
+  background: rgba(8, 17, 28, 0.72);
   backdrop-filter: blur(14px);
 }
 
@@ -428,10 +428,10 @@ textarea::placeholder {
   margin: 12px auto 0;
   width: min(760px, calc(100% - 32px));
   padding: 9px 12px;
-  border: 1px solid rgba(255, 134, 178, 0.28);
+  border: 1px solid rgba(255, 122, 89, 0.34);
   border-radius: 9px;
-  background: rgba(43, 21, 34, 0.42);
-  color: #ffdbe8;
+  background: rgba(48, 25, 21, 0.48);
+  color: var(--warning);
   font-size: 11px;
   line-height: 1.45;
 }

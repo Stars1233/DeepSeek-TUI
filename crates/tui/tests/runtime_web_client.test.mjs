@@ -45,6 +45,12 @@ function runtimeEvent(sequence, event, payload = {}, overrides = {}) {
   };
 }
 
+function cssDeclarations(styles, selectorPattern) {
+  const match = styles.match(new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`));
+  assert.ok(match, `missing CSS rule matching ${selectorPattern}`);
+  return match[1];
+}
+
 test("embedded web client uses the Blue Stage semantic palette", async () => {
   const [styles, html] = await Promise.all([
     readFile(new URL("../src/runtime_web/styles.css", import.meta.url), "utf8"),
@@ -64,10 +70,26 @@ test("embedded web client uses the Blue Stage semantic palette", async () => {
   ]) {
     assert.match(styles, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-  assert.match(styles, /\.primary-button,[\s\S]*background: var\(--action\)/);
-  assert.match(styles, /\.status-pip\.running[\s\S]*background: var\(--live\)/);
-  assert.match(styles, /\.message\.user \.message-body[\s\S]*rgba\(246, 196, 83/);
-  assert.match(styles, /\.attention-card[\s\S]*rgba\(246, 196, 83/);
+  assert.match(
+    cssDeclarations(styles, "\\.primary-button,\\s*\\.send-button"),
+    /background: var\(--action\)/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.status-pip\\.running"),
+    /background: var\(--live\)/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.message\\.user \\.message-body"),
+    /background: rgba\(246, 196, 83/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.attention-card"),
+    /border: 1px solid rgba\(246, 196, 83/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.status-banner"),
+    /color: var\(--warning\)/,
+  );
   assert.match(html, /name="theme-color" content="#03070d"/);
 });
 
