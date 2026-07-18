@@ -775,6 +775,28 @@ fn back_from_provider_onboarding(app: &mut App) {
     app.status_message = None;
 }
 
+async fn submit_keyless_onboarding_provider(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+) -> bool {
+    let provider = app.onboarding_provider;
+    if !onboarding::onboarding_provider_allows_empty_api_key(config, provider) {
+        return false;
+    }
+    if !switch_provider(app, engine_handle, config, provider, None).await {
+        return false;
+    }
+
+    app.api_key_input.clear();
+    app.api_key_cursor = 0;
+    app.onboarding_needs_api_key = false;
+    app.api_key_env_only = false;
+    app.offline_mode = false;
+    onboarding::advance_onboarding_after_api_key(app);
+    true
+}
+
 fn surface_prompt_override_notices(app: &mut App) {
     for notice in prompts::take_prompt_override_notices() {
         app.add_message(HistoryCell::System {
@@ -4092,7 +4114,7 @@ async fn run_event_loop(
                 if app.onboarding == OnboardingState::ApiKey {
                     // Paste into API key input
                     app.insert_api_key_str(text);
-                    onboarding::sync_api_key_validation_status(app, false);
+                    onboarding::sync_api_key_validation_status(app, config, false);
                 } else if app.is_history_search_active() {
                     app.history_search_insert_str(text);
                 } else if app.view_stack.handle_paste(text) {
@@ -4554,9 +4576,22 @@ async fn run_event_loop(
                         OnboardingState::ApiKey => {
                             let key = app.api_key_input.trim().to_string();
                             if let onboarding::ApiKeyValidation::Reject(message) =
-                                onboarding::validate_api_key_for_onboarding(&key)
+                                onboarding::validate_api_key_for_onboarding(
+                                    config,
+                                    app.onboarding_provider,
+                                    &key,
+                                )
                             {
                                 app.status_message = Some(message);
+                                continue;
+                            }
+                            if key.is_empty() {
+                                let _ = submit_keyless_onboarding_provider(
+                                    app,
+                                    &mut engine_handle,
+                                    config,
+                                )
+                                .await;
                                 continue;
                             }
                             match app.submit_api_key() {
@@ -4637,21 +4672,21 @@ async fn run_event_loop(
                     }
                     KeyCode::Backspace if app.onboarding == OnboardingState::ApiKey => {
                         app.delete_api_key_char();
-                        onboarding::sync_api_key_validation_status(app, false);
+                        onboarding::sync_api_key_validation_status(app, config, false);
                     }
                     KeyCode::Char('h')
                         if key_shortcuts::is_ctrl_h_backspace(&key)
                             && app.onboarding == OnboardingState::ApiKey =>
                     {
                         app.delete_api_key_char();
-                        onboarding::sync_api_key_validation_status(app, false);
+                        onboarding::sync_api_key_validation_status(app, config, false);
                     }
                     _ if key_shortcuts::is_paste_shortcut(&key)
                         && app.onboarding == OnboardingState::ApiKey =>
                     {
                         // Cmd+V / Ctrl+V paste (bracketed paste handled above)
                         if app.paste_api_key_from_clipboard() {
-                            onboarding::sync_api_key_validation_status(app, false);
+                            onboarding::sync_api_key_validation_status(app, config, false);
                         }
                     }
                     KeyCode::Char(c)
@@ -4659,7 +4694,7 @@ async fn run_event_loop(
                             && key_shortcuts::is_text_input_key(&key) =>
                     {
                         app.insert_api_key_char(c);
-                        onboarding::sync_api_key_validation_status(app, false);
+                        onboarding::sync_api_key_validation_status(app, config, false);
                     }
                     _ => {}
                 }
@@ -8598,7 +8633,7 @@ async fn switch_provider(
     config: &mut Config,
     target: ApiProvider,
     model_override: Option<String>,
-) {
+) -> bool {
     let previous_provider = app.api_provider;
     let previous_identity = app.provider_identity_for_persistence().to_string();
     let requested_identity = config.provider_identity_for(target);
@@ -8646,7 +8681,7 @@ async fn switch_provider(
                         target.display_name()
                     ));
                     app.needs_redraw = true;
-                    return;
+                    return false;
                 }
             }
             *config = previous_config;
@@ -8660,7 +8695,7 @@ async fn switch_provider(
                 "Route rejected before provider switch: {}.",
                 target.as_str()
             ));
-            return;
+            return false;
         }
     };
     let validated_route = match resolved_route.validate() {
@@ -8674,7 +8709,7 @@ async fn switch_provider(
                     requested_identity, previous_identity
                 ),
             });
-            return;
+            return false;
         }
     };
     let target_identity_record = validated_route.identity.clone();
@@ -8787,6 +8822,7 @@ async fn switch_provider(
     if persisted {
         record_provider_model_setup_progress(app, config);
     }
+    true
 }
 
 struct ProviderFallbackRollback {

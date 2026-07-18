@@ -325,13 +325,17 @@ impl SetupRuntimeFacts {
             format!("{}; retry or open /provider", readiness.label())
         } else if app.api_provider == crate::config::ApiProvider::OpenaiCodex {
             format!("{}; run codex login or open /provider", readiness.label())
-        } else if let Some(url) = app.api_provider.credential_url() {
+        } else if let Some(url) = app.api_provider.credential_help().credential_url {
             format!(
                 "{}; credentials: {url}; open /provider to repair the route",
                 readiness.label()
             )
         } else {
-            format!("{}; open /provider to repair the route", readiness.label())
+            format!(
+                "{}; {}; open /provider to repair the route",
+                readiness.label(),
+                app.api_provider.credential_help().guidance
+            )
         };
         let provider_result = format!(
             "provider={}, model={}, auth={}, health={}",

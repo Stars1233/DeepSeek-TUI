@@ -9857,26 +9857,68 @@ async fn numeric_plan_choice_still_queues_follow_up_when_busy() {
 
 #[test]
 fn api_key_validation_warns_without_blocking_unusual_formats() {
+    let config = Config::default();
     assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding(""),
+        crate::tui::onboarding::validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "",),
         crate::tui::onboarding::ApiKeyValidation::Reject(_)
     ));
     assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding("sk short"),
+        crate::tui::onboarding::validate_api_key_for_onboarding(
+            &config,
+            ApiProvider::Deepseek,
+            "sk short",
+        ),
         crate::tui::onboarding::ApiKeyValidation::Reject(_)
     ));
     assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding("short-key"),
+        crate::tui::onboarding::validate_api_key_for_onboarding(
+            &config,
+            ApiProvider::Deepseek,
+            "short-key",
+        ),
         crate::tui::onboarding::ApiKeyValidation::Accept { warning: Some(_) }
     ));
     assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding("averylongkeywithoutdash123456"),
+        crate::tui::onboarding::validate_api_key_for_onboarding(
+            &config,
+            ApiProvider::Deepseek,
+            "averylongkeywithoutdash123456",
+        ),
         crate::tui::onboarding::ApiKeyValidation::Accept { warning: Some(_) }
     ));
     assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding("sk-valid-format-1234567890"),
+        crate::tui::onboarding::validate_api_key_for_onboarding(
+            &config,
+            ApiProvider::Deepseek,
+            "sk-valid-format-1234567890",
+        ),
         crate::tui::onboarding::ApiKeyValidation::Accept { warning: None }
     ));
+}
+
+#[tokio::test]
+async fn onboarding_empty_key_activates_and_persists_keyless_local_provider() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::ApiKey;
+    app.onboarding_needs_api_key = true;
+    app.onboarding_provider = ApiProvider::Ollama;
+    app.trust_mode = true;
+    app.api_key_input.clear();
+    let mut config = Config::default();
+    let mut engine = mock_engine_handle();
+
+    assert!(submit_keyless_onboarding_provider(&mut app, &mut engine.handle, &mut config).await);
+
+    assert_eq!(app.api_provider, ApiProvider::Ollama);
+    assert_eq!(config.provider.as_deref(), Some("ollama"));
+    assert_eq!(app.onboarding, OnboardingState::Tips);
+    assert!(!app.onboarding_needs_api_key);
+    assert!(!app.api_key_env_only);
+    assert!(!app.offline_mode);
+    let config_path = std::env::var("DEEPSEEK_CONFIG_PATH").expect("isolated config path");
+    let saved = std::fs::read_to_string(config_path).expect("persisted provider config");
+    assert!(saved.contains("provider = \"ollama\""), "{saved}");
 }
 
 #[test]

@@ -201,46 +201,24 @@ impl ApiProvider {
         }
     }
 
+    /// Canonical credential acquisition metadata shared by provider surfaces.
+    #[must_use]
+    pub fn credential_help(self) -> codewhale_config::provider::CredentialHelp {
+        self.metadata().map_or_else(
+            || {
+                codewhale_config::provider::provider_for_kind(
+                    codewhale_config::ProviderKind::Deepseek,
+                )
+                .credential_help()
+            },
+            codewhale_config::provider::Provider::credential_help,
+        )
+    }
+
     /// Official provider page for creating or locating credentials.
     #[must_use]
     pub fn credential_url(self) -> Option<&'static str> {
-        Some(match self {
-            Self::Deepseek | Self::DeepseekCN | Self::DeepseekAnthropic => {
-                "https://platform.deepseek.com/api_keys"
-            }
-            Self::NvidiaNim => "https://build.nvidia.com/settings/api-keys",
-            Self::Openai => "https://platform.openai.com/api-keys",
-            Self::Atlascloud => "https://atlascloud.ai/docs/en/api-keys",
-            Self::WanjieArk => "https://docs.wanjiedata.com/maas/maas-openapi-v1.html",
-            Self::Volcengine => "https://console.volcengine.com/ark",
-            Self::Openrouter => "https://openrouter.ai/settings/keys",
-            Self::XiaomiMimo => "https://platform.xiaomimimo.com/token-plan",
-            Self::Novita => "https://novita.ai/docs/guides/quickstart",
-            Self::Fireworks => "https://fireworks.ai/account/api-keys",
-            Self::Siliconflow | Self::SiliconflowCn => "https://cloud.siliconflow.com/account/ak",
-            Self::Arcee => "https://docs.arcee.ai/other/create-your-first-api-key",
-            Self::Moonshot => "https://platform.kimi.ai/",
-            Self::Huggingface => "https://huggingface.co/settings/tokens",
-            Self::Together => "https://api.together.ai/settings/api-keys",
-            Self::Qianfan => "https://console.bce.baidu.com/iam/#/iam/accesslist",
-            Self::Anthropic => "https://console.anthropic.com/settings/keys",
-            Self::Openmodel => "https://docs.openmodel.ai/en/docs/guides/api-key",
-            Self::Zai => "https://z.ai/model-api",
-            Self::Stepfun => "https://platform.stepfun.ai/",
-            Self::Minimax | Self::MinimaxAnthropic => {
-                "https://platform.minimax.io/docs/guides/quickstart-preparation"
-            }
-            Self::Deepinfra => "https://deepinfra.com/dash/api_keys",
-            Self::Sakana => "https://api.sakana.ai/",
-            Self::LongCat => "https://longcat.chat/platform",
-            Self::OpencodeGo => "https://opencode.ai/zen/",
-            Self::Meta => "https://developer.meta.com/ai/",
-            Self::Xai => "https://console.x.ai/",
-            Self::OpenaiCodex | Self::Sglang | Self::Vllm | Self::Ollama => return None,
-            // Custom endpoints have no canonical credential page; the user
-            // supplies the key via their own `api_key_env`.
-            Self::Custom => return None,
-        })
+        self.credential_help().credential_url
     }
 
     /// All providers in stable `ProviderKind::ALL` order.
@@ -4932,7 +4910,7 @@ impl Config {
                  \"https://api.kimi.com/coding/v1\" and model = \"kimi-for-coding\".",
                 provider
                     .credential_url()
-                    .unwrap_or("https://platform.kimi.ai/"),
+                    .unwrap_or("https://platform.kimi.ai/console/api-keys"),
                 provider.env_vars_label(),
                 provider_config_table_name(provider)?
             ),

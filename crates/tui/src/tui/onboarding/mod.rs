@@ -30,6 +30,8 @@ pub const ONBOARDING_PROVIDER_OPTIONS: &[(char, ApiProvider)] = &[
     ('6', ApiProvider::Moonshot),
     ('7', ApiProvider::Siliconflow),
     ('8', ApiProvider::Ollama),
+    ('9', ApiProvider::Sglang),
+    ('0', ApiProvider::Vllm),
 ];
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
@@ -211,14 +213,37 @@ pub enum ApiKeyValidation {
     Reject(String),
 }
 
-/// Validate an API key entered during onboarding. Whitespace-only or
-/// whitespace-containing keys are rejected; short or hyphen-less keys
-/// are accepted with a warning so unusual provider key formats still
-/// work.
+/// Whether onboarding may activate `provider` without saving an API key.
+///
+/// Keep this aligned with the runtime's self-hosted provider contract. A local
+/// server can still opt into bearer authentication with
+/// `auth_mode = "api_key"`, in which case onboarding must require a key too.
 #[must_use]
-pub fn validate_api_key_for_onboarding(api_key: &str) -> ApiKeyValidation {
+pub fn onboarding_provider_allows_empty_api_key(
+    config: &crate::config::Config,
+    provider: ApiProvider,
+) -> bool {
+    provider.is_self_hosted()
+        && !crate::config::auth_mode_requires_api_key(
+            config.auth_mode_for_provider(provider).as_deref(),
+        )
+}
+
+/// Validate an API key entered during onboarding. Empty input is accepted only
+/// for a truly keyless self-hosted route. Other whitespace-only or
+/// whitespace-containing keys are rejected; short or hyphen-less keys are
+/// accepted with a warning so unusual provider key formats still work.
+#[must_use]
+pub fn validate_api_key_for_onboarding(
+    config: &crate::config::Config,
+    provider: ApiProvider,
+    api_key: &str,
+) -> ApiKeyValidation {
     let trimmed = api_key.trim();
     if trimmed.is_empty() {
+        if onboarding_provider_allows_empty_api_key(config, provider) {
+            return ApiKeyValidation::Accept { warning: None };
+        }
         return ApiKeyValidation::Reject("API key cannot be empty.".to_string());
     }
     if trimmed.contains(char::is_whitespace) {
@@ -351,13 +376,17 @@ fn provider_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
 /// `app.status_message`. `show_empty_error` reports the "cannot be empty"
 /// message even when the input has not been touched yet (used right
 /// before submission); otherwise an empty input clears the status bar.
-pub fn sync_api_key_validation_status(app: &mut App, show_empty_error: bool) {
+pub fn sync_api_key_validation_status(
+    app: &mut App,
+    config: &crate::config::Config,
+    show_empty_error: bool,
+) {
     if app.api_key_input.trim().is_empty() && !show_empty_error {
         app.status_message = None;
         return;
     }
 
-    match validate_api_key_for_onboarding(&app.api_key_input) {
+    match validate_api_key_for_onboarding(config, app.onboarding_provider, &app.api_key_input) {
         ApiKeyValidation::Accept { warning } => {
             app.status_message = warning;
         }
@@ -370,7 +399,7 @@ pub fn sync_api_key_validation_status(app: &mut App, show_empty_error: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, ProviderConfig, ProvidersConfig};
     use crate::localization::Locale;
     use crate::tui::app::{App, TuiOptions};
     use std::path::PathBuf;
@@ -488,27 +517,79 @@ mod tests {
 
     #[test]
     fn validate_rejects_empty_or_whitespace() {
+        let config = Config::default();
         assert!(matches!(
-            validate_api_key_for_onboarding(""),
+            validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, ""),
             ApiKeyValidation::Reject(_)
         ));
         assert!(matches!(
-            validate_api_key_for_onboarding("   "),
+            validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "   "),
             ApiKeyValidation::Reject(_)
         ));
         assert!(matches!(
-            validate_api_key_for_onboarding("sk live abc"),
+            validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "sk live abc"),
             ApiKeyValidation::Reject(_)
         ));
     }
 
     #[test]
+    fn validate_accepts_empty_for_every_keyless_self_hosted_provider() {
+        let config = Config::default();
+        for provider in [ApiProvider::Ollama, ApiProvider::Sglang, ApiProvider::Vllm] {
+            assert_eq!(
+                validate_api_key_for_onboarding(&config, provider, ""),
+                ApiKeyValidation::Accept { warning: None },
+                "{} should keep its keyless runtime contract",
+                provider.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_local_api_key_auth_keeps_empty_input_blocking() {
+        let config = Config {
+            providers: Some(ProvidersConfig {
+                ollama: ProviderConfig {
+                    auth_mode: Some("api_key".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            validate_api_key_for_onboarding(&config, ApiProvider::Ollama, ""),
+            ApiKeyValidation::Reject(_)
+        ));
+    }
+
+    #[test]
+    fn provider_options_cover_the_complete_self_hosted_set() {
+        let mut advertised = ONBOARDING_PROVIDER_OPTIONS
+            .iter()
+            .map(|(_, provider)| *provider)
+            .filter(|provider| provider.is_self_hosted())
+            .collect::<Vec<_>>();
+        let mut supported = ApiProvider::all()
+            .iter()
+            .copied()
+            .filter(|provider| provider.is_self_hosted())
+            .collect::<Vec<_>>();
+        advertised.sort_by_key(|provider| provider.as_str());
+        supported.sort_by_key(|provider| provider.as_str());
+
+        assert_eq!(advertised, supported);
+    }
+
+    #[test]
     fn validate_warns_on_short_or_no_hyphen_keys_but_accepts() {
-        match validate_api_key_for_onboarding("abc123") {
+        let config = Config::default();
+        match validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "abc123") {
             ApiKeyValidation::Accept { warning: Some(_) } => {}
             _ => panic!("expected accept-with-warning"),
         }
-        match validate_api_key_for_onboarding("abcdefghijklmnop") {
+        match validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "abcdefghijklmnop") {
             ApiKeyValidation::Accept { warning: Some(_) } => {}
             _ => panic!("expected accept-with-warning"),
         }
@@ -516,8 +597,9 @@ mod tests {
 
     #[test]
     fn validate_accepts_well_formed_key() {
+        let config = Config::default();
         assert_eq!(
-            validate_api_key_for_onboarding("sk-1234567890abcdef"),
+            validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "sk-1234567890abcdef",),
             ApiKeyValidation::Accept { warning: None }
         );
     }

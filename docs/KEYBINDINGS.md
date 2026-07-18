@@ -156,7 +156,8 @@ tmux's `load-buffer -w` path when running inside tmux.
 |----------------------|-----------------------------------------------------|
 | `Enter`              | Advance to next step (Welcome → Language → API/trust gates → setup checkpoint) |
 | `Esc`                | Step back one screen                                |
-| `1`–`7`              | Pick a language (Language step)                    |
+| `1`–`9`              | Pick a language (Language step)                    |
+| `0`–`9`              | Pick a provider (Provider step; SGLang, vLLM, and Ollama are keyless by default) |
 | `y` / `Y`            | Trust the workspace (Trust step)                   |
 | `n` / `N`            | Skip the trust prompt                              |
 

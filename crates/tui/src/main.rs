@@ -4476,7 +4476,7 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
     let provider = config.api_provider();
     let auth_source = resolve_api_key_source(config);
     let auth_present_or_local = crate::config::has_api_key_for(config, provider);
-    let credential_url = provider.credential_url();
+    let credential_help = provider.credential_help();
 
     json!({
         "provider": {
@@ -4490,8 +4490,12 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
             "present_or_local": auth_present_or_local,
             "source": doctor_api_key_source_label(auth_source),
             "env_vars": provider.env_vars(),
-            "credential_url": credential_url,
-            "oauth_only": provider == crate::config::ApiProvider::OpenaiCodex,
+            "credential_mode": credential_help.acquisition.as_str(),
+            "credential_url": credential_help.credential_url,
+            "credential_docs_url": credential_help.docs_url,
+            "credential_guidance": credential_help.guidance,
+            "oauth_only": credential_help.acquisition
+                == codewhale_config::provider::CredentialAcquisition::OAuth,
         },
         "health": {
             "live_validation": false,
@@ -9887,6 +9891,10 @@ mod doctor_setup_state_tests {
             "https://platform.deepseek.com/api_keys"
         );
         assert_eq!(
+            report["provider_model"]["auth"]["credential_mode"],
+            "api_key"
+        );
+        assert_eq!(
             report["provider_model"]["auth"]["env_vars"][0],
             "DEEPSEEK_API_KEY"
         );
@@ -9959,6 +9967,10 @@ mod doctor_setup_state_tests {
             crate::config::ApiProvider::OpenaiCodex.as_str()
         );
         assert!(codex_report["provider_model"]["auth"]["credential_url"].is_null());
+        assert_eq!(
+            codex_report["provider_model"]["auth"]["credential_mode"],
+            "oauth"
+        );
         assert_eq!(codex_report["provider_model"]["auth"]["oauth_only"], true);
         assert_eq!(
             codex_report["provider_model"]["health"]["next_action"],
@@ -9976,10 +9988,37 @@ mod doctor_setup_state_tests {
             true
         );
         assert!(local_report["provider_model"]["auth"]["credential_url"].is_null());
+        assert_eq!(
+            local_report["provider_model"]["auth"]["credential_mode"],
+            "local_optional"
+        );
         assert_eq!(local_report["provider_model"]["auth"]["oauth_only"], false);
         assert_eq!(
             local_report["provider_model"]["health"]["next_action"],
             "/model"
+        );
+
+        let kimi_config = Config {
+            provider: Some("moonshot".to_string()),
+            ..Config::default()
+        };
+        let kimi_report = doctor_setup_report_json(&kimi_config, &workspace);
+        assert_eq!(
+            kimi_report["provider_model"]["auth"]["credential_url"],
+            "https://platform.kimi.ai/console/api-keys"
+        );
+        assert_eq!(
+            kimi_report["provider_model"]["auth"]["credential_docs_url"],
+            "https://platform.kimi.ai/docs/overview"
+        );
+        assert_eq!(
+            kimi_report["provider_model"]["auth"]["credential_mode"],
+            "api_key"
+        );
+        assert!(
+            kimi_report["provider_model"]["auth"]["credential_guidance"]
+                .as_str()
+                .is_some_and(|guidance| guidance.contains("OAuth is not available"))
         );
     }
 

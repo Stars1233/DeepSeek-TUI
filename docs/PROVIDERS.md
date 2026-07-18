@@ -214,41 +214,50 @@ endpoint.
 
 ## Credential Links
 
-Provider setup surfaces should link users to provider-owned credential pages
-instead of leaving them to search from a missing-key error. The runtime copy uses
-the same links where possible.
+Provider setup surfaces use the same typed credential metadata as onboarding,
+`/provider`, `/links`, setup receipts, and doctor output. A missing URL is
+intentional: local, OAuth-only, and user-defined routes show their supported
+configuration path instead of guessing a vendor page.
 
 | Provider ID | Credential or console link |
 | --- | --- |
-| `deepseek` | [DeepSeek API keys](https://platform.deepseek.com/api_keys) |
+| `deepseek`, `deepseek-anthropic` | [DeepSeek API keys](https://platform.deepseek.com/api_keys) |
 | `nvidia-nim` | [NVIDIA NIM API keys](https://build.nvidia.com/settings/api-keys) |
 | `openai` | [OpenAI API keys](https://platform.openai.com/api-keys) |
 | `atlascloud` | [Atlas Cloud API keys](https://atlascloud.ai/docs/en/api-keys) |
 | `wanjie-ark` | [Wanjie MaaS APIKEY docs](https://docs.wanjiedata.com/maas/maas-openapi-v1.html) |
-| `volcengine` | [Volcengine Ark console](https://console.volcengine.com/ark) |
+| `volcengine` | [Volcengine Ark API keys](https://console.volcengine.com/ark/apiKey) |
 | `openrouter` | [OpenRouter keys](https://openrouter.ai/settings/keys) |
 | `xiaomi-mimo` | [Xiaomi MiMo Token Plan](https://platform.xiaomimimo.com/token-plan) |
-| `novita` | [Novita quickstart](https://novita.ai/docs/guides/quickstart) |
-| `fireworks` | [Fireworks API keys](https://fireworks.ai/account/api-keys) |
-| `siliconflow`, `siliconflow-CN` | [SiliconFlow API keys](https://cloud.siliconflow.com/account/ak) |
+| `novita` | [Novita key management](https://novita.ai/en/settings/key-management) |
+| `fireworks` | [Fireworks API keys](https://fireworks.ai/api-keys) |
+| `siliconflow` | [SiliconFlow global API keys](https://cloud.siliconflow.com/account/ak) |
+| `siliconflow-CN` | [SiliconFlow China API keys](https://cloud.siliconflow.cn/account/ak) |
 | `arcee` | [Arcee API key guide](https://docs.arcee.ai/other/create-your-first-api-key) |
-| `moonshot` | [Kimi Open Platform](https://platform.kimi.ai/) |
+| `moonshot` | [Kimi API Keys](https://platform.kimi.ai/console/api-keys) |
 | `zai` | [Z.ai model API](https://z.ai/model-api) |
 | `stepfun` | [StepFun Open Platform](https://platform.stepfun.ai/) |
-| `minimax` | [MiniMax prerequisites](https://platform.minimax.io/docs/guides/quickstart-preparation) |
-| `minimax-anthropic` | [MiniMax prerequisites](https://platform.minimax.io/docs/guides/quickstart-preparation) |
+| `minimax`, `minimax-anthropic` | [MiniMax interface keys](https://platform.minimax.io/user-center/basic-information/interface-key) |
 | `huggingface` | [Hugging Face tokens](https://huggingface.co/settings/tokens) |
 | `deepinfra` | [DeepInfra API keys](https://deepinfra.com/dash/api_keys) |
 | `together` | [Together API keys](https://api.together.ai/settings/api-keys) |
+| `qianfan` | [Baidu Cloud access keys](https://console.bce.baidu.com/iam/#/iam/accesslist) |
 | `anthropic` | [Anthropic API keys](https://console.anthropic.com/settings/keys) |
-| `openmodel` | [OpenModel API key guide](https://docs.openmodel.ai/en/docs/guides/api-key) |
+| `openmodel` | [OpenModel console](https://console.openmodel.ai/) ([authentication guide](https://docs.openmodel.ai/en/docs/getting-started/authentication)) |
 | `openai-codex` | Reuses `codex login`; no Codewhale API key is stored. |
-| `sglang`, `vllm`, `ollama` | Local OpenAI-compatible endpoints can run without an API key on localhost. |
-| `sakana` | [Sakana AI API](https://api.sakana.ai/) |
+| `sglang`, `vllm`, `ollama` | Local OpenAI-compatible endpoints are keyless by default; configure a key only when the server requires one. |
+| `sakana` | [Sakana AI API keys](https://console.sakana.ai/api-keys) ([get started](https://console.sakana.ai/get-started)) |
 | `longcat` | [Meituan LongCat platform](https://longcat.chat/platform) |
-| `opencode-go` | [OpenCode Go](https://opencode.ai/docs/go/) |
+| `opencode-go` | [OpenCode Zen](https://opencode.ai/zen/) |
 | `meta` | [Meta Model API](https://developer.meta.com/ai/) |
-| `xai` | [xAI Console](https://console.x.ai/) |
+| `xai` | [xAI Console](https://console.x.ai/) for an API key, or deliberately select the supported Grok OAuth mode. |
+| `custom` | Set the named provider's `base_url` and `api_key_env` or `api_key`; no canonical vendor credential page exists. |
+
+For Kimi, the official [quickstart](https://platform.kimi.ai/docs/overview)
+directs users to sign in, open **API Keys**, create and copy a key, and keep it
+secret. Codewhale links straight to that console and accepts the copied key; it
+does not present first-class Kimi OAuth as working while #4417 remains blocked
+on a vendor-registered Codewhale identity.
 
 ## Shipped Providers
 

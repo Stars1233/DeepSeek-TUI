@@ -2074,9 +2074,13 @@ impl ProviderPickerView {
                 Style::default().fg(palette::TEXT_MUTED),
             ))]
         };
-        if !oauth_provider && let Some(url) = row.provider.credential_url() {
+        if !oauth_provider {
+            let help = row.provider.credential_help();
             hint_lines.push(Line::from(Span::styled(
-                format!("Credentials: {url}"),
+                help.credential_url.map_or_else(
+                    || format!("Credentials: {}", help.guidance),
+                    |url| format!("Credentials: {url}"),
+                ),
                 Style::default().fg(palette::TEXT_MUTED),
             )));
         };
@@ -3163,6 +3167,21 @@ mod tests {
 
         assert!(rendered.contains("NVIDIA_API_KEY / NVIDIA_NIM_API_KEY / DEEPSEEK_API_KEY"));
         assert!(rendered.contains("https://build.nvidia.com/settings/api-keys"));
+    }
+
+    #[test]
+    fn kimi_key_entry_uses_the_direct_api_key_console_without_oauth_copy() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        move_to_provider(&mut picker, ApiProvider::Moonshot);
+        picker.handle_key(key(KeyCode::Enter));
+
+        let rendered = render_text(&picker, 120, 20);
+
+        assert!(rendered.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(rendered.contains("paste key here"));
+        assert!(!rendered.contains("OAuth"));
+        assert!(!rendered.contains("device login"));
     }
 
     #[test]
