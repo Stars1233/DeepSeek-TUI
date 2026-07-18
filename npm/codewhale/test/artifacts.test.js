@@ -68,6 +68,7 @@ test("known platforms are unaffected by alias map", () => {
     ["linux", "x64", "codewhale-linux-x64"],
     ["darwin", "arm64", "codewhale-macos-arm64"],
     ["win32", "x64", "codewhale-windows-x64.exe"],
+    ["win32", "arm64", "codewhale-windows-arm64.exe"],
   ]) {
     withMockedOs(platform, arch, () => {
       const { detectBinaryNames } = require(ARTIFACTS_PATH);
@@ -75,6 +76,19 @@ test("known platforms are unaffected by alias map", () => {
       assert.equal(result.codewhale, expectedCodeWhale);
     });
   }
+});
+
+test("Windows arm64 resolves the complete native binary family", () => {
+  withMockedOs("win32", "arm64", () => {
+    const { detectBinaryNames } = require(ARTIFACTS_PATH);
+    assert.deepEqual(detectBinaryNames(), {
+      platform: "win32",
+      arch: "arm64",
+      codewhale: "codewhale-windows-arm64.exe",
+      tui: "codewhale-tui-windows-arm64.exe",
+      codew: "codew-windows-arm64.exe",
+    });
+  });
 });
 
 test("linux riscv64 reports the temporary upstream binding blocker", () => {
@@ -108,12 +122,16 @@ test("release asset inventory includes binaries, archives, installer, and manife
   assert.ok(assetNames.includes("codewhale-tui-windows-x64.exe"));
   assert.ok(assetNames.includes("codew-windows-x64.exe"));
   assert.ok(assetNames.includes("codewhale.bat"));
+  assert.ok(assetNames.includes("codewhale-windows-arm64.exe"));
+  assert.ok(assetNames.includes("codewhale-tui-windows-arm64.exe"));
+  assert.ok(assetNames.includes("codew-windows-arm64.exe"));
   assert.ok(assetNames.includes("codewhale-android-arm64"));
   assert.ok(assetNames.includes("codewhale-tui-android-arm64"));
   assert.ok(assetNames.includes("codew-android-arm64"));
   assert.ok(!assetNames.includes("codewhale-linux-riscv64"));
   assert.ok(releaseAssetNames.includes("codew-windows-x64.exe"));
   assert.ok(releaseAssetNames.includes("codewhale.bat"));
+  assert.ok(releaseAssetNames.includes("codew-windows-arm64.exe"));
   assert.ok(releaseAssetNames.includes("codew-android-arm64"));
   for (const bundle of BUNDLE_ASSET_NAMES) {
     assert.ok(releaseAssetNames.includes(bundle));

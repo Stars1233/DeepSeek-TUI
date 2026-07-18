@@ -28,6 +28,7 @@ grep -Fq -- "## Contributors" <<<"${body}"
 grep -Fq -- "[@example](https://github.com/example)" <<<"${body}"
 grep -Fq -- 'codewhale-home:/home/codewhale/.codewhale' <<<"${body}"
 grep -Fq -- 'codewhale-android-arm64.tar.gz' <<<"${body}"
+grep -Fq -- 'codewhale-windows-arm64.zip' <<<"${body}"
 grep -Fq -- 'The image ships the `codewhale` dispatcher, `codew` shim, and `codewhale-tui` runtime.' <<<"${body}"
 if grep -Fq -- "### Contributors" <<<"${body}"; then
   echo "nested contributor heading leaked into generated release body" >&2

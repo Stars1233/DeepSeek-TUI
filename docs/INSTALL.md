@@ -37,6 +37,7 @@ onward. Linux RISC-V prebuilts are temporarily paused because the locked
 | macOS        | x64          |     ✅      |       ✅        | `codewhale-macos-x64`, `codew-macos-x64`, `codewhale-tui-macos-x64`        |
 | macOS        | arm64 (M-series) | ✅      |       ✅        | `codewhale-macos-arm64`, `codew-macos-arm64`, `codewhale-tui-macos-arm64`    |
 | Windows      | x64          |     ✅      |       ✅        | `codewhale-windows-x64.exe`, `codew-windows-x64.exe`, `codewhale-tui-windows-x64.exe` |
+| Windows      | arm64        |     ✅      |       ✅        | `codewhale-windows-arm64.exe`, `codew-windows-arm64.exe`, `codewhale-tui-windows-arm64.exe` |
 | Linux x64 on musl (Alpine) | ✅ (static) |    ✅      |       ✅        | static `codewhale-tui-linux-x64` (musl) asset           |
 | Other Linux (musl non-x64, other arches) | — | ❌¹ | ✅² | build from source                                     |
 | FreeBSD / OpenBSD              | — |   ❌      |       ✅²       | build from source                                     |
@@ -510,6 +511,11 @@ when you need the newest version immediately.
 A standalone NSIS-based installer is available starting with v0.8.50 for
 Windows users who prefer a traditional double-click setup (no npm, no Scoop, no
 Cargo required).
+
+The NSIS installer currently contains the Windows x64 binaries. Windows ARM64
+users should install through npm running under native ARM64 Node.js or download
+`codewhale-windows-arm64.zip` from the same release; both paths then use native
+ARM64 binaries.
 
 **Download** `CodeWhaleSetup.exe` from the
 [Releases page](https://github.com/Hmbown/CodeWhale/releases/latest).

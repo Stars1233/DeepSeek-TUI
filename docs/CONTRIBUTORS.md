@@ -55,6 +55,9 @@ notes, and relevant issue/PR comments.
   fix direction (#4489)
 - **[redjade75723](https://github.com/redjade75723)** — the persistent Windows
   PTY failure report that exposed lossy high-bit exit-status handling (#4100)
+- **[w1w218](https://github.com/w1w218)** — the Windows ARM64 release request
+  and cross-compilation report that led to native release, npm, updater, and
+  archive support (#4267)
 
 </details>
 

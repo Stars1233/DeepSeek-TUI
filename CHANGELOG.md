@@ -40,6 +40,11 @@ site's draft, feed, login, and content-watch boundaries.
   of this narrow route until Codewhale supports per-model wire selection
   (#1481 by @seanthefuturegorilla; implementation harvested from PR #773 by
   @zhangweiii and PR #1050 by @sternelee).
+- Publish native Windows ARM64 `codewhale`, `codew`, and `codewhale-tui`
+  binaries, npm selection, updater support, and standard/portable release
+  archives. Build and smoke them on GitHub's native Windows 11 ARM runner,
+  and move Linux ARM64 release builds to the native Ubuntu ARM runner to
+  remove the slower multi-arch cross-link setup (#4267 by @w1w218).
 
 ### Fixed
 
@@ -85,6 +90,13 @@ site's draft, feed, login, and content-watch boundaries.
   (#4380).
 - Avoid blocked reader joins after Windows process kills so terminated shell
   sessions cannot hang their readers (#4383).
+- Give stdin-less observer hooks immediate EOF and contain timed-out hook
+  process trees so descendants and pipe readers cannot leak after the parent
+  shell exits (#4489 by @luismateusvargas).
+- Preserve the full unsigned Windows PTY process status instead of collapsing
+  every high-bit exception or NTSTATUS to `2147483647`, including decimal and
+  hexadecimal diagnostic metadata for device retests (#4100 by
+  @redjade75723).
 - Keep the Hotbar Setup action list synchronized with keyboard focus when the
   selection moves beyond the visible rows, including Down past `/export`
   (#4418).
@@ -128,6 +140,13 @@ Thank you to the contributors whose code, reports, and reviews shaped v0.9.1:
   (PR #4470).
 - [@shenyongqing](https://github.com/shenyongqing) — the original HarmonyOS
   bindgen approach (PR #4384), carried into the landed implementation.
+- [@luismateusvargas](https://github.com/luismateusvargas) — the Windows hook
+  process-leak reproduction, process-tree analysis, and EOF fix direction
+  (#4489).
+- [@redjade75723](https://github.com/redjade75723) — the persistent Windows PTY
+  report that exposed lossy high-bit process-status handling (#4100).
+- [@w1w218](https://github.com/w1w218) — the Windows ARM64 release request and
+  real-device motivation (#4267).
 
 ## [0.9.0] - 2026-07-16
 

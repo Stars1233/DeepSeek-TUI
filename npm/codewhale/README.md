@@ -67,7 +67,7 @@ Prebuilt binaries for the GitHub release are downloaded automatically:
 - Linux arm64
 - Android arm64 (Termux)
 - macOS x64 / arm64
-- Windows x64
+- Windows x64 / arm64
 
 HarmonyOS PC (`openharmony`) is treated as `linux`, so it gets the Linux
 binaries matching your CPU architecture (x64 or arm64). Linux riscv64 prebuilts

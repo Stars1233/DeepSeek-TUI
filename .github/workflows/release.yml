@@ -176,7 +176,7 @@ jobs:
             cli_artifact: codewhale-linux-x64
             shim_artifact: codew-linux-x64
             tui_artifact: codewhale-tui-linux-x64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux-arm64
             cli_binary: codewhale
@@ -221,6 +221,15 @@ jobs:
             cli_artifact: codewhale-windows-x64.exe
             shim_artifact: codew-windows-x64.exe
             tui_artifact: codewhale-tui-windows-x64.exe
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows-arm64
+            cli_binary: codewhale.exe
+            shim_binary: codew.exe
+            tui_binary: codewhale-tui.exe
+            cli_artifact: codewhale-windows-arm64.exe
+            shim_artifact: codew-windows-arm64.exe
+            tui_artifact: codewhale-tui-windows-arm64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -230,8 +239,6 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - name: Install Rust target
-        run: rustup target add --toolchain stable ${{ matrix.target }}
       - uses: mozilla-actions/sccache-action@v0.0.10
         id: sccache
         # A cache bootstrap failure must degrade to an uncached build, never
@@ -247,8 +254,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install Linux ARM64 system dependencies
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           for i in 1 2 3 4 5; do
             sudo apt-get update && break
@@ -264,21 +271,6 @@ jobs:
           sudo apt-get install -y musl-tools
           rustup target add --toolchain stable x86_64-unknown-linux-musl
           cargo build --release --locked --target x86_64-unknown-linux-musl -p codewhale-cli -p codewhale-tui
-      - name: Install AArch64 cross-compilation toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu' && runner.os == 'Linux'
-        run: |
-          . /etc/os-release
-          sudo tee /etc/apt/sources.list.d/arm64.sources <<SRC
-          Types: deb
-          URIs: http://ports.ubuntu.com/ubuntu-ports/
-          Suites: ${UBUNTU_CODENAME} ${UBUNTU_CODENAME}-updates ${UBUNTU_CODENAME}-security
-          Components: main universe
-          Architectures: arm64
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-          SRC
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/arm64.sources -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
-          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross libdbus-1-dev:arm64 pkg-config
       - name: Configure Android NDK linker
         if: matrix.target == 'aarch64-linux-android' && runner.os == 'Linux'
         shell: bash
@@ -328,11 +320,15 @@ jobs:
         shell: bash
         env:
           DEEPSEEK_BUILD_SHA: ${{ needs.resolve.outputs.sha }}
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          PKG_CONFIG_ALLOW_CROSS: 1
-          PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
         run: cargo build --release --locked --target ${{ matrix.target }} -p codewhale-cli -p codewhale-tui
+      - name: Smoke native ARM binaries
+        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: |
+          bin_dir="target/${{ matrix.target }}/release"
+          "${bin_dir}/${{ matrix.cli_binary }}" --version
+          "${bin_dir}/${{ matrix.shim_binary }}" --version
+          "${bin_dir}/${{ matrix.tui_binary }}" --version
       - name: Stage binaries
         shell: bash
         run: |
@@ -388,7 +384,7 @@ jobs:
           : > "$MANIFEST"
 
           bundle() {
-            local platform="$1"   # linux-x64, linux-arm64, android-arm64, macos-x64, macos-arm64, windows-x64
+            local platform="$1"   # linux-x64, linux-arm64, android-arm64, macos-x64, macos-arm64, windows-x64, windows-arm64
             local cli_src="$2"    # artifact name for codewhale binary
             local shim_src="$3"   # artifact name for codew shim
             local tui_src="$4"    # artifact name for codewhale-tui binary
@@ -465,6 +461,12 @@ jobs:
             codewhale-windows-x64.exe codew-windows-x64.exe codewhale-tui-windows-x64.exe zip ""
           bundle windows-x64 \
             codewhale-windows-x64.exe codew-windows-x64.exe codewhale-tui-windows-x64.exe zip "portable"
+
+          # Platform: windows-arm64 (standard + portable)
+          bundle windows-arm64 \
+            codewhale-windows-arm64.exe codew-windows-arm64.exe codewhale-tui-windows-arm64.exe zip ""
+          bundle windows-arm64 \
+            codewhale-windows-arm64.exe codew-windows-arm64.exe codewhale-tui-windows-arm64.exe zip "portable"
 
           echo ""
           echo "=== Archive checksums ==="

@@ -245,6 +245,11 @@ const REQUIRED_RELEASE_ASSETS: &[&str] = &[
     "codewhale-windows-x64.exe",
     "codewhale-windows-x64-portable.zip",
     "codewhale-windows-x64.zip",
+    "codew-windows-arm64.exe",
+    "codewhale-tui-windows-arm64.exe",
+    "codewhale-windows-arm64.exe",
+    "codewhale-windows-arm64-portable.zip",
+    "codewhale-windows-arm64.zip",
 ];
 
 fn is_session_approved_for_tool(app: &App, tool_name: &str, grouping_key: &str) -> bool {

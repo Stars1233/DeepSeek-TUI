@@ -80,6 +80,8 @@ Each archive below contains the \`codewhale\` dispatcher, \`codew\` shim, and \`
 | Windows x64 (installer) | \`CodeWhaleSetup.exe\` | NSIS setup |
 | Windows x64 | \`codewhale-windows-x64.zip\` | \`install.bat\` |
 | Windows x64 (portable) | \`codewhale-windows-x64-portable.zip\` | — |
+| Windows ARM64 | \`codewhale-windows-arm64.zip\` | \`install.bat\` |
+| Windows ARM64 (portable) | \`codewhale-windows-arm64-portable.zip\` | — |
 
 **Unix (Linux / macOS):**
 \`\`\`bash
@@ -90,7 +92,8 @@ cd codewhale-<platform>
 
 **Windows:**
 - For the installer path, run \`CodeWhaleSetup.exe\`; it installs \`codewhale.exe\`, \`codew.exe\`, and \`codewhale-tui.exe\` under \`%LOCALAPPDATA%\\Programs\\CodeWhale\\bin\` and adds that directory to the current-user PATH.
-- Extract \`codewhale-windows-x64.zip\`
+- Extract the archive for your machine: \`codewhale-windows-x64.zip\` or
+  \`codewhale-windows-arm64.zip\`
 - Run \`install.bat\` (copies to \`%USERPROFILE%\\bin\`)
 - Add \`%USERPROFILE%\\bin\` to your PATH
 

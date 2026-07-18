@@ -23,6 +23,8 @@ const BUNDLE_ASSET_NAMES = [
   "codewhale-macos-arm64.tar.gz",
   "codewhale-windows-x64.zip",
   "codewhale-windows-x64-portable.zip",
+  "codewhale-windows-arm64.zip",
+  "codewhale-windows-arm64-portable.zip",
 ];
 
 const ASSET_MATRIX = {
@@ -39,6 +41,7 @@ const ASSET_MATRIX = {
   },
   win32: {
     x64: ["codewhale-windows-x64.exe", "codewhale-tui-windows-x64.exe", "codew-windows-x64.exe", "codewhale.bat"],
+    arm64: ["codewhale-windows-arm64.exe", "codewhale-tui-windows-arm64.exe", "codew-windows-arm64.exe"],
   },
 };
 

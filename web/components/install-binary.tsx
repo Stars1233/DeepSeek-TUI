@@ -1,9 +1,49 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  detectFromBrowserSignals,
+  type Arch,
+  type UserAgentArchitecture,
+} from "@/lib/install-platform";
 import { InstallCodeBlock } from "./install-code-block";
 
-type Arch = "macos-arm64" | "macos-x64" | "linux-x64" | "linux-arm64" | "windows-x64";
+function windowsSnippet(arch: "x64" | "arm64"): string {
+  return `# PowerShell
+$ErrorActionPreference = "Stop"
+$dest = "$Env:USERPROFILE\\bin"
+New-Item -ItemType Directory -Force $dest | Out-Null
+$manifest = Invoke-WebRequest https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
+
+Invoke-WebRequest \`
+  -Uri https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-windows-${arch}.exe \`
+  -OutFile "$dest\\codewhale.exe"
+Invoke-WebRequest \`
+  -Uri https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-tui-windows-${arch}.exe \`
+  -OutFile "$dest\\codewhale-tui.exe"
+
+$expected = @{}
+$manifest.Content -split "\`n" | ForEach-Object {
+  $parts = $_.Trim() -split "\\s+"
+  if ($parts.Length -ge 2) { $expected[$parts[1]] = $parts[0].ToUpperInvariant() }
+}
+if ((Get-FileHash "$dest\\codewhale.exe" -Algorithm SHA256).Hash -ne $expected["codewhale-windows-${arch}.exe"]) { throw "codewhale.exe checksum mismatch" }
+if ((Get-FileHash "$dest\\codewhale-tui.exe" -Algorithm SHA256).Hash -ne $expected["codewhale-tui-windows-${arch}.exe"]) { throw "codewhale-tui.exe checksum mismatch" }
+
+$Env:Path = "$dest;$Env:Path"`;
+}
+
+function windowsVerify(arch: "x64" | "arm64"): string {
+  return `# PowerShell
+$manifest = Invoke-WebRequest https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
+$expected = @{}
+$manifest.Content -split "\`n" | ForEach-Object {
+  $parts = $_.Trim() -split "\\s+"
+  if ($parts.Length -ge 2) { $expected[$parts[1]] = $parts[0].ToUpperInvariant() }
+}
+if ((Get-FileHash "$Env:USERPROFILE\\bin\\codewhale.exe" -Algorithm SHA256).Hash -ne $expected["codewhale-windows-${arch}.exe"]) { throw "codewhale.exe checksum mismatch" }
+if ((Get-FileHash "$Env:USERPROFILE\\bin\\codewhale-tui.exe" -Algorithm SHA256).Hash -ne $expected["codewhale-tui-windows-${arch}.exe"]) { throw "codewhale-tui.exe checksum mismatch" }`;
+}
 
 const SNIPPETS: Record<Arch, string> = {
   "macos-arm64": `curl -fsSL -O https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
@@ -40,28 +80,8 @@ curl -fsSL -o codewhale-tui \\
 grep -E ' (codewhale|codewhale-tui)-linux-arm64$' codewhale-artifacts-sha256.txt | sha256sum -c -
 chmod +x codewhale codewhale-tui
 sudo mv codewhale codewhale-tui /usr/local/bin/`,
-  "windows-x64": `# PowerShell
-$ErrorActionPreference = "Stop"
-$dest = "$Env:USERPROFILE\\bin"
-New-Item -ItemType Directory -Force $dest | Out-Null
-$manifest = Invoke-WebRequest https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
-
-Invoke-WebRequest \`
-  -Uri https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-windows-x64.exe \`
-  -OutFile "$dest\\codewhale.exe"
-Invoke-WebRequest \`
-  -Uri https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-tui-windows-x64.exe \`
-  -OutFile "$dest\\codewhale-tui.exe"
-
-$expected = @{}
-$manifest.Content -split "\`n" | ForEach-Object {
-  $parts = $_.Trim() -split "\\s+"
-  if ($parts.Length -ge 2) { $expected[$parts[1]] = $parts[0].ToUpperInvariant() }
-}
-if ((Get-FileHash "$dest\\codewhale.exe" -Algorithm SHA256).Hash -ne $expected["codewhale-windows-x64.exe"]) { throw "codewhale.exe checksum mismatch" }
-if ((Get-FileHash "$dest\\codewhale-tui.exe" -Algorithm SHA256).Hash -ne $expected["codewhale-tui-windows-x64.exe"]) { throw "codewhale-tui.exe checksum mismatch" }
-
-$Env:Path = "$dest;$Env:Path"`,
+  "windows-x64": windowsSnippet("x64"),
+  "windows-arm64": windowsSnippet("arm64"),
 };
 
 const VERIFY: Record<Arch, string> = {
@@ -69,15 +89,8 @@ const VERIFY: Record<Arch, string> = {
   "macos-x64": `grep -E ' (codewhale|codewhale-tui)-macos-x64$' codewhale-artifacts-sha256.txt | shasum -a 256 -c -`,
   "linux-x64": `grep -E ' (codewhale|codewhale-tui)-linux-x64$' codewhale-artifacts-sha256.txt | sha256sum -c -`,
   "linux-arm64": `grep -E ' (codewhale|codewhale-tui)-linux-arm64$' codewhale-artifacts-sha256.txt | sha256sum -c -`,
-  "windows-x64": `# PowerShell
-$manifest = Invoke-WebRequest https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
-$expected = @{}
-$manifest.Content -split "\`n" | ForEach-Object {
-  $parts = $_.Trim() -split "\\s+"
-  if ($parts.Length -ge 2) { $expected[$parts[1]] = $parts[0].ToUpperInvariant() }
-}
-if ((Get-FileHash "$Env:USERPROFILE\\bin\\codewhale.exe" -Algorithm SHA256).Hash -ne $expected["codewhale-windows-x64.exe"]) { throw "codewhale.exe checksum mismatch" }
-if ((Get-FileHash "$Env:USERPROFILE\\bin\\codewhale-tui.exe" -Algorithm SHA256).Hash -ne $expected["codewhale-tui-windows-x64.exe"]) { throw "codewhale-tui.exe checksum mismatch" }`,
+  "windows-x64": windowsVerify("x64"),
+  "windows-arm64": windowsVerify("arm64"),
 };
 
 const LABELS: Record<Arch, string> = {
@@ -86,17 +99,30 @@ const LABELS: Record<Arch, string> = {
   "linux-x64": "Linux · x64",
   "linux-arm64": "Linux · arm64",
   "windows-x64": "Windows · x64",
+  "windows-arm64": "Windows · arm64",
 };
 
-function detect(): Arch {
+interface NavigatorWithUserAgentData extends Navigator {
+  userAgentData?: {
+    getHighEntropyValues(hints: string[]): Promise<UserAgentArchitecture>;
+  };
+}
+
+async function detect(): Promise<Arch> {
   if (typeof navigator === "undefined") return "macos-arm64";
-  const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes("win")) return "windows-x64";
-  if (ua.includes("linux")) {
-    if (ua.includes("aarch64") || ua.includes("arm64")) return "linux-arm64";
-    return "linux-x64";
+  const browserNavigator = navigator as NavigatorWithUserAgentData;
+  let architecture: UserAgentArchitecture | undefined;
+  if (navigator.userAgent.toLowerCase().includes("win")) {
+    try {
+      architecture = await browserNavigator.userAgentData?.getHighEntropyValues([
+        "architecture",
+        "bitness",
+      ]);
+    } catch {
+      // The manual platform buttons and frozen-UA fallback remain available.
+    }
   }
-  return "macos-arm64";
+  return detectFromBrowserSignals(navigator.userAgent, architecture);
 }
 
 interface Props {
@@ -108,7 +134,15 @@ interface Props {
 export function InstallBinary({ copyLabel, copiedLabel, verifyHeading = "Verify checksum" }: Props) {
   const [arch, setArch] = useState<Arch>("macos-arm64");
 
-  useEffect(() => { setArch(detect()); }, []);
+  useEffect(() => {
+    let active = true;
+    void detect().then((detected) => {
+      if (active) setArch(detected);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <div>
