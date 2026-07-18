@@ -1123,7 +1123,11 @@ fn hash_bundle(
     manifest_bytes: &[u8],
 ) -> Result<(String, BTreeMap<PathBuf, String>), String> {
     let mut hasher = Sha256::new();
-    hasher.update(b"codewhale-plugin-content-v1\0plugin.toml\0");
+    // v2 length-frames every variable-length field. The v1 delimiter-only
+    // stream was structurally ambiguous across file-record boundaries.
+    // Changing the domain invalidates every ambiguous v1 receipt.
+    hasher.update(b"codewhale-plugin-content-v2\0plugin.toml\0");
+    hasher.update((manifest_bytes.len() as u64).to_le_bytes());
     hasher.update(manifest_bytes);
     let mut budget = HashBudget::default();
     // Hash the complete bundle, not only declared component roots. Local MCP
@@ -1174,6 +1178,7 @@ fn hash_path(
         for entry in entries {
             hash_path(root, &entry.path(), hasher, budget)?;
         }
+        hasher.update(b"E\0");
         #[cfg(windows)]
         ensure_windows_path_still_opened(path, &directory_guard)?;
     } else if metadata.is_file() {
@@ -1189,9 +1194,15 @@ fn hash_path(
             .map_err(|e| format!("failed to read component file {}: {e}", path.display()))?;
         #[cfg(windows)]
         ensure_windows_path_still_opened(path, &file)?;
+        let expected_len = file
+            .metadata()
+            .map_err(|e| format!("failed to inspect component file {}: {e}", path.display()))?
+            .len();
+        hasher.update(expected_len.to_le_bytes());
         let mut file_hasher = Sha256::new();
         file_hasher.update(b"codewhale-plugin-file-bytes-v1\0");
         let mut buffer = [0_u8; 64 * 1024];
+        let mut actual_len = 0_u64;
         loop {
             let read = file
                 .read(&mut buffer)
@@ -1199,6 +1210,7 @@ fn hash_path(
             if read == 0 {
                 break;
             }
+            actual_len = actual_len.saturating_add(read as u64);
             budget.bytes = budget.bytes.saturating_add(read as u64);
             if budget.bytes > MAX_HASHED_BYTES {
                 return Err(format!(
@@ -1208,7 +1220,12 @@ fn hash_path(
             hasher.update(&buffer[..read]);
             file_hasher.update(&buffer[..read]);
         }
-        hasher.update(b"\0");
+        if actual_len != expected_len {
+            return Err(format!(
+                "component file {} changed length while being reviewed",
+                path.display()
+            ));
+        }
         budget
             .file_hashes
             .insert(relative.to_path_buf(), hex_digest(file_hasher.finalize()));
@@ -1368,6 +1385,61 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn legacy_v1_hash_path(root: &Path, path: &Path, hasher: &mut Sha256) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let relative = path.strip_prefix(root).unwrap();
+        hash_permissions(&metadata, hasher);
+        if metadata.is_dir() {
+            hasher.update(b"D\0");
+            super::super::path_identity::hash_os_path(
+                hasher,
+                b"bundle-relative-directory",
+                relative,
+            );
+            let mut entries = fs::read_dir(path)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            entries.sort_by_key(fs::DirEntry::file_name);
+            for entry in entries {
+                legacy_v1_hash_path(root, &entry.path(), hasher);
+            }
+        } else {
+            hasher.update(b"F\0");
+            super::super::path_identity::hash_os_path(hasher, b"bundle-relative-file", relative);
+            hasher.update(fs::read(path).unwrap());
+            hasher.update(b"\0");
+        }
+    }
+
+    #[cfg(unix)]
+    fn legacy_v1_bundle_hash(root: &Path, manifest_bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"codewhale-plugin-content-v1\0plugin.toml\0");
+        hasher.update(manifest_bytes);
+        legacy_v1_hash_path(root, root, &mut hasher);
+        hex_digest(hasher.finalize())
+    }
+
+    #[cfg(unix)]
+    fn legacy_v1_unix_file_prefix(relative: &Path) -> Vec<u8> {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let domain = b"bundle-relative-file";
+        let path = relative.as_os_str().as_bytes();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"unix-executable\0");
+        bytes.push(0); // non-executable regular file
+        bytes.extend_from_slice(b"F\0codewhale-os-path-v1\0");
+        bytes.extend_from_slice(&(domain.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(domain);
+        bytes.extend_from_slice(b"unix-bytes\0");
+        bytes.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(path);
+        bytes
+    }
+
     fn write_manifest(root: &Path, extra: &str) -> PathBuf {
         fs::create_dir_all(root.join("skills/example")).unwrap();
         fs::write(
@@ -1424,6 +1496,45 @@ mod tests {
         let changed = PluginManifest::validate_from_path(&right_manifest).unwrap();
         assert_ne!(right_hash.content_hash, changed.content_hash);
         assert_eq!(right_hash.capability_hash, changed.capability_hash);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_hash_v2_distinguishes_a_file_body_from_an_embedded_file_record() {
+        let one_file = tempfile::tempdir().unwrap();
+        let two_files = tempfile::tempdir().unwrap();
+        let manifest = b"schema_version = 1\n[plugin]\nname = \"framing\"\nversion = \"1.0.0\"\n";
+        for root in [one_file.path(), two_files.path()] {
+            fs::write(root.join("plugin.toml"), manifest).unwrap();
+        }
+
+        let first_body = b"first-file-body";
+        let second_body = b"second-file-body";
+        fs::write(two_files.path().join("a.bin"), first_body).unwrap();
+        fs::write(two_files.path().join("b.bin"), second_body).unwrap();
+
+        // Reproduce the former ambiguous record boundary so this fixture
+        // proves the v2 domain and framing are both required.
+        let mut embedded_record = first_body.to_vec();
+        embedded_record.push(0);
+        embedded_record.extend(legacy_v1_unix_file_prefix(Path::new("b.bin")));
+        embedded_record.extend_from_slice(second_body);
+        fs::write(one_file.path().join("a.bin"), embedded_record).unwrap();
+
+        assert_eq!(
+            legacy_v1_bundle_hash(one_file.path(), manifest),
+            legacy_v1_bundle_hash(two_files.path(), manifest),
+            "fixture must reproduce the v1 structural collision"
+        );
+
+        let one = PluginManifest::validate_from_path(&one_file.path().join("plugin.toml")).unwrap();
+        let two =
+            PluginManifest::validate_from_path(&two_files.path().join("plugin.toml")).unwrap();
+        assert_ne!(
+            one.content_hash, two.content_hash,
+            "v2 length framing must uniquely bind the reviewed tree structure"
+        );
+        assert_eq!(one.capability_hash, two.capability_hash);
     }
 
     // Darwin rejects these malformed bytes at the filesystem boundary. The
