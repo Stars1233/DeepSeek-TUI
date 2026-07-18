@@ -5997,9 +5997,16 @@ model = "qwen-2.5-7b"
         store.config.providers.xai.oauth_credential_generation = Some(generation.to_string());
         store.save().unwrap();
         let credentials = home.join("credentials");
-        std::fs::create_dir_all(&credentials).unwrap();
-        std::fs::write(credentials.join(generation), "xai-generation").unwrap();
-        std::fs::write(credentials.join("xai-auth.json"), "legacy-xai").unwrap();
+        codewhale_config::with_xai_oauth_lifecycle_lock(|owned| {
+            owned.write(generation, b"xai-generation", false)?;
+            owned.write(
+                codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME,
+                b"legacy-xai",
+                false,
+            )?;
+            Ok(())
+        })
+        .expect("seed Codewhale-owned xAI credentials");
         std::fs::write(credentials.join("other-provider.json"), "preserve").unwrap();
 
         let secrets = no_keyring_secrets();
