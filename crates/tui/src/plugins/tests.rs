@@ -79,6 +79,14 @@ fn trust_and_enablement_are_separate_atomic_state_transitions() {
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
+            fs::metadata(config.state_path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
             fs::metadata(&config.state_path)
                 .unwrap()
                 .permissions()
@@ -221,6 +229,15 @@ fn malformed_state_is_fail_closed_and_never_overwritten() {
     let config = config(tmp.path());
     write_plugin(&config, "");
     fs::create_dir_all(config.state_path.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(
+            config.state_path.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
     fs::write(&config.state_path, "{ malformed").unwrap();
 
     let mut registry = discover_with_config(&config);
@@ -384,6 +401,11 @@ fn discovery_does_not_rewrite_existing_state_or_lock_permissions() {
     let config = config(tmp.path());
     write_plugin(&config, "");
     fs::create_dir_all(config.state_path.parent().unwrap()).unwrap();
+    fs::set_permissions(
+        config.state_path.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     fs::write(
         &config.state_path,
         "{\"schema_version\":1,\"plugins\":{}}\n",
@@ -418,6 +440,53 @@ fn discovery_does_not_rewrite_existing_state_or_lock_permissions() {
 
 #[cfg(unix)]
 #[test]
+fn discovery_rejects_an_insecure_state_parent_without_mutating_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    write_plugin(&config, "");
+    let state_parent = config.state_path.parent().unwrap();
+    fs::create_dir_all(state_parent).unwrap();
+    let state_body = b"{\"schema_version\":1,\"plugins\":{}}\n";
+    fs::write(&config.state_path, state_body).unwrap();
+    fs::set_permissions(state_parent, fs::Permissions::from_mode(0o777)).unwrap();
+
+    let registry = discover_with_config(&config);
+
+    assert!(registry.state_error().is_some());
+    assert_eq!(fs::read(&config.state_path).unwrap(), state_body);
+    assert_eq!(
+        fs::metadata(state_parent).unwrap().permissions().mode() & 0o777,
+        0o777,
+        "read-only discovery must not repair directory permissions"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn trust_hardens_an_existing_owned_state_parent() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    write_plugin(&config, "");
+    let state_parent = config.state_path.parent().unwrap();
+    fs::create_dir_all(state_parent).unwrap();
+    fs::set_permissions(state_parent, fs::Permissions::from_mode(0o777)).unwrap();
+    let mut registry = discover_with_config(&config);
+    assert!(registry.state_error().is_none());
+
+    registry.trust("demo").unwrap();
+
+    assert_eq!(
+        fs::metadata(state_parent).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn discovery_rejects_linked_state_and_lock_without_touching_targets() {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
@@ -426,6 +495,11 @@ fn discovery_rejects_linked_state_and_lock_without_touching_targets() {
         let config = config(tmp.path());
         write_plugin(&config, "");
         fs::create_dir_all(config.state_path.parent().unwrap()).unwrap();
+        fs::set_permissions(
+            config.state_path.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         let target = tmp.path().join(format!("{linked_entry}-target"));
         fs::write(&target, "{\"schema_version\":1,\"plugins\":{}}\n").unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();

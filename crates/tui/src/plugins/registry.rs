@@ -460,7 +460,16 @@ impl PluginRegistry {
 
 fn load_state(path: &Path) -> Result<PluginStateFile, String> {
     let lock_path = state_lock_path(path);
-    if path_entry_exists(&lock_path)? {
+    let lock_exists = path_entry_exists(&lock_path)?;
+    let state_exists = path_entry_exists(path)?;
+    if lock_exists || state_exists {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or_else(|| "Plugin state path must have a private parent directory".to_string())?;
+        validate_plugin_state_directory_for_read(parent)?;
+    }
+    if lock_exists {
         let lock_file = open_state_lock(&lock_path, false)?;
         let lock = fd_lock::RwLock::new(lock_file);
         let _guard = lock
@@ -521,11 +530,98 @@ fn save_state_with_hardener(
     // it under the stable state path. Post-publish hardening leaves a Windows
     // race in which another local principal can open the inherited DACL.
     harden_temporary(temporary.path())?;
+    persist_plugin_state(temporary, path)
+}
+
+#[cfg(unix)]
+fn persist_plugin_state(temporary: tempfile::NamedTempFile, path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     temporary
         .persist(path)
         .map_err(|error| error.error)
         .map_err(|error| format!("failed to atomically persist {}: {error}", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "Plugin state path must have a private parent directory".to_string())?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)
+        .map_err(|error| {
+            format!("failed to open plugin state directory for durability sync: {error}")
+        })?;
+    directory.sync_all().map_err(|error| {
+        format!(
+            "plugin state was published but its directory durability could not be confirmed: {error}"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn persist_plugin_state(mut temporary: tempfile::NamedTempFile, path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TEMPORARY, MOVEFILE_REPLACE_EXISTING,
+        MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
+    };
+    use windows::core::PCWSTR;
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let temporary_path = temporary.path().to_path_buf();
+    let temporary_wide = wide_path(&temporary_path);
+    let destination_wide = wide_path(path);
+    // NamedTempFile marks the source as temporary. Clear only that temporary
+    // caching hint before publication, matching tempfile's own persistence
+    // contract while retaining the owner-only DACL applied above.
+    unsafe {
+        SetFileAttributesW(
+            PCWSTR::from_raw(temporary_wide.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+        )
+    }
+    .map_err(|error| {
+        format!("failed to prepare private plugin state temp file for publication: {error}")
+    })?;
+
+    if let Err(error) = unsafe {
+        MoveFileExW(
+            PCWSTR::from_raw(temporary_wide.as_ptr()),
+            PCWSTR::from_raw(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } {
+        // Restore tempfile's cleanup hint on the still-private source. The
+        // stable state path remains untouched when MoveFileExW fails.
+        let _ = unsafe {
+            SetFileAttributesW(
+                PCWSTR::from_raw(temporary_wide.as_ptr()),
+                FILE_ATTRIBUTE_TEMPORARY,
+            )
+        };
+        return Err(format!(
+            "failed to atomically and durably persist {}: {error}",
+            path.display()
+        ));
+    }
+
+    // The old temporary pathname no longer exists. Disarm path cleanup before
+    // the retained file handle is closed on drop.
+    temporary.disable_cleanup(true);
     Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn persist_plugin_state(temporary: tempfile::NamedTempFile, path: &Path) -> Result<(), String> {
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .map(|_| ())
+        .map_err(|error| format!("failed to atomically persist {}: {error}", path.display()))
 }
 
 fn state_lock_path(path: &Path) -> PathBuf {
@@ -657,8 +753,74 @@ fn harden_plugin_state_directory(path: &Path) -> Result<(), String> {
     set_windows_owner_only_acl(path)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn harden_plugin_state_directory(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| {
+            format!("failed to open plugin state directory without following links: {error}")
+        })?;
+    let metadata = directory
+        .metadata()
+        .map_err(|error| format!("failed to inspect opened plugin state directory: {error}"))?;
+    // SAFETY: geteuid has no pointer or lifetime preconditions.
+    let effective_uid = unsafe { libc::geteuid() };
+    if !metadata.is_dir() || metadata.uid() != effective_uid {
+        return Err(
+            "Plugin state directory must be a directory owned by the current user".to_string(),
+        );
+    }
+    directory
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("failed to restrict plugin state directory: {error}"))?;
+    let hardened = directory
+        .metadata()
+        .map_err(|error| format!("failed to verify restricted plugin state directory: {error}"))?;
+    if hardened.permissions().mode() & 0o7777 != 0o700 {
+        return Err("Plugin state directory did not become owner-only".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn harden_plugin_state_directory(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_plugin_state_directory_for_read(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| {
+            format!("failed to open plugin state directory without following links: {error}")
+        })?;
+    let metadata = directory
+        .metadata()
+        .map_err(|error| format!("failed to inspect opened plugin state directory: {error}"))?;
+    // SAFETY: geteuid has no pointer or lifetime preconditions.
+    let effective_uid = unsafe { libc::geteuid() };
+    if !metadata.is_dir()
+        || metadata.uid() != effective_uid
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(
+            "Plugin state directory must be current-user-owned and inaccessible to group or other users"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_plugin_state_directory_for_read(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -728,6 +890,7 @@ fn stage_bundle(state_path: &Path, plugin: &LoadedPlugin) -> Result<PathBuf, Str
         .ok_or_else(|| "plugin state path has no parent directory".to_string())?;
     fs::create_dir_all(state_parent)
         .map_err(|e| format!("failed to create plugin state directory: {e}"))?;
+    harden_plugin_state_directory(state_parent)?;
     let destination = runtime_stage_path(state_path, &plugin.id, &plugin.content_hash);
     if destination.exists() {
         if !staged_bundle_matches(&destination, &plugin.content_hash, &plugin.capability_hash) {
@@ -796,6 +959,7 @@ fn ensure_private_runtime_parent(state_path: &Path, parent: &Path) -> Result<(),
         .ok_or_else(|| "plugin state path has no parent directory".to_string())?;
     fs::create_dir_all(configured_base)
         .map_err(|e| format!("failed to create plugin state directory: {e}"))?;
+    harden_plugin_state_directory(configured_base)?;
     let base_metadata = fs::symlink_metadata(configured_base)
         .map_err(|e| format!("failed to inspect plugin state directory: {e}"))?;
     if metadata_is_link_or_reparse(&base_metadata) || !base_metadata.is_dir() {
@@ -1491,6 +1655,15 @@ pub fn verify_plugin_authority(authority: &PluginAuthority) -> Result<(), String
 /// is in flight. Full source/stage hashing is intentionally done before each
 /// dispatch; the watcher only needs to notice the locked state transition.
 pub fn verify_plugin_state_authority(authority: &PluginAuthority) -> Result<(), String> {
+    let state_parent = authority
+        .state_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "Plugin authority state has no private parent directory".to_string())?;
+    validate_plugin_state_directory_for_read(state_parent).map_err(|_| {
+        "Plugin authority state directory is not private; the bundle is disabled fail-closed"
+            .to_string()
+    })?;
     let lock_path = state_lock_path(&authority.state_path);
     let lock_file = open_state_lock(&lock_path, false).map_err(|_| {
         "Plugin authority state lock is missing; review and enable the bundle again".to_string()
@@ -1524,7 +1697,29 @@ pub fn verify_plugin_state_authority(authority: &PluginAuthority) -> Result<(), 
 
 #[cfg(test)]
 mod state_publication_tests {
-    use super::{PluginStateFile, save_state_with_hardener};
+    use super::{PluginStateFile, harden_plugin_state_file, save_state_with_hardener};
+
+    #[test]
+    fn successful_state_publication_replaces_the_stable_file_without_temp_debris() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state.json");
+        std::fs::write(&state_path, b"old-authoritative-state").unwrap();
+
+        save_state_with_hardener(
+            &state_path,
+            &PluginStateFile::default(),
+            harden_plugin_state_file,
+        )
+        .unwrap();
+
+        let published = std::fs::read_to_string(&state_path).unwrap();
+        assert!(published.contains("\"schema_version\": 1"));
+        let entries = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, [std::ffi::OsString::from("state.json")]);
+    }
 
     #[test]
     fn failed_temp_hardening_never_publishes_new_plugin_state() {
