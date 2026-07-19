@@ -35,22 +35,22 @@ pub fn apply(
     change: WorkGraphChange,
     ctx: ChangeCtx,
 ) -> Result<(WorkGraphSnapshot, ChangeReceipt), ValidationReport> {
-    if let Some(key) = &ctx.idempotency_key {
-        if g.seen_keys.contains(key) {
-            // Duplicate runtime event: acknowledge without effect.
-            let receipt = ChangeReceipt {
-                change_id: ChangeId::derive(
-                    &ctx.session_id,
-                    &format!("noop:{}:{}", key.binding.as_str(), key.seq),
-                ),
-                revision: g.revision,
-                summary: format!("{} (duplicate)", change.kind_name()),
-                applied_at: ctx.now,
-                idempotency_key: Some(key.clone()),
-                no_op: true,
-            };
-            return Ok((g.clone(), receipt));
-        }
+    if let Some(key) = &ctx.idempotency_key
+        && g.seen_keys.contains(key)
+    {
+        // Duplicate runtime event: acknowledge without effect.
+        let receipt = ChangeReceipt {
+            change_id: ChangeId::derive(
+                &ctx.session_id,
+                &format!("noop:{}:{}", key.binding.as_str(), key.seq),
+            ),
+            revision: g.revision,
+            summary: format!("{} (duplicate)", change.kind_name()),
+            applied_at: ctx.now,
+            idempotency_key: Some(key.clone()),
+            no_op: true,
+        };
+        return Ok((g.clone(), receipt));
     }
 
     let mut next = apply_pure(g, &change, &ctx)?;
@@ -284,10 +284,10 @@ fn reconcile(
             CancelOutcome::NotFound | CancelOutcome::StaleUnknown => Some(NodeState::Stale),
         },
     };
-    if let Some(state) = new_state {
-        if !node.state.is_terminal() {
-            node.state = state;
-        }
+    if let Some(state) = new_state
+        && !node.state.is_terminal()
+    {
+        node.state = state;
     }
     node.updated_at = now;
     Ok(())

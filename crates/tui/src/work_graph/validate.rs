@@ -225,13 +225,14 @@ fn check_v2_live_operations_rooted(snapshot: &WorkGraphSnapshot, out: &mut Vec<V
                 continue;
             }
             for edge in &snapshot.edges {
-                if matches!(edge.kind, EdgeKind::Contains) && &edge.to == current {
-                    if let Some(parent) = snapshot.node(&edge.from) {
-                        if matches!(parent.kind, NodeKind::Objective | NodeKind::PlanStep) {
-                            rooted = true;
-                        }
-                        frontier.push(&parent.id);
+                if matches!(edge.kind, EdgeKind::Contains)
+                    && &edge.to == current
+                    && let Some(parent) = snapshot.node(&edge.from)
+                {
+                    if matches!(parent.kind, NodeKind::Objective | NodeKind::PlanStep) {
+                        rooted = true;
                     }
+                    frontier.push(&parent.id);
                 }
             }
             if rooted {
@@ -400,17 +401,17 @@ fn check_v8_history_bounded_monotonic(snapshot: &WorkGraphSnapshot, out: &mut Ve
     }
     let mut previous: Option<u64> = None;
     for receipt in snapshot.history.iter() {
-        if let Some(prev) = previous {
-            if receipt.revision <= prev {
-                out.push(Violation {
-                    code: ValidationCode::V8,
-                    message: format!(
-                        "history revisions not strictly increasing ({} then {})",
-                        prev, receipt.revision
-                    ),
-                });
-                break;
-            }
+        if let Some(prev) = previous
+            && receipt.revision <= prev
+        {
+            out.push(Violation {
+                code: ValidationCode::V8,
+                message: format!(
+                    "history revisions not strictly increasing ({} then {})",
+                    prev, receipt.revision
+                ),
+            });
+            break;
         }
         previous = Some(receipt.revision);
     }

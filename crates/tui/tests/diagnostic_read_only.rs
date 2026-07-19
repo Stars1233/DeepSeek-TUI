@@ -1,14 +1,16 @@
 //! Process-level regression coverage for read-only diagnostic commands.
 
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use axum::body::Bytes;
+use axum::http::HeaderMap;
+use axum::routing::post;
+use axum::{Json, Router};
 use codewhale_secrets::{FileKeyringStore, KeyringStore};
 use tempfile::TempDir;
 
@@ -161,6 +163,7 @@ fn doctor_json_does_not_inherit_an_ambient_legacy_secret_from_an_explicit_home()
         )
         .env("DEEPSEEK_TUI_VERSION", env!("CARGO_PKG_VERSION"));
     preserve_host_rustup_home(&mut command);
+    preserve_host_platform_runtime(&mut command);
 
     let output = command.output().expect("run isolated doctor --json");
     assert!(
@@ -198,7 +201,8 @@ fn doctor_text_probe_uses_a_legacy_key_without_migrating_it() {
         .set("deepseek", "diagnostic-legacy-key")
         .expect("seed legacy secret");
     let legacy_before = fs::read(&legacy).expect("read legacy secret before doctor");
-    let (base_url, request) = one_request_completion_server();
+    let server = CompletionServer::start();
+    let base_url = server.base_url();
     let config = workspace.join("doctor.toml");
     fs::write(
         &config,
@@ -228,15 +232,19 @@ fn doctor_text_probe_uses_a_legacy_key_without_migrating_it() {
         "stdout:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let request = request
-        .recv_timeout(Duration::from_secs(5))
-        .expect("doctor must make one local probe request")
-        .expect("local probe request");
-    assert!(
-        request
-            .to_ascii_lowercase()
-            .contains("authorization: bearer diagnostic-legacy-key"),
-        "doctor probe must use the legacy credential without printing it; request:\n{request}"
+    let requests = server.received_requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "doctor must make one local probe request"
+    );
+    let authorization = requests[0]
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    assert_eq!(
+        authorization,
+        Some("Bearer diagnostic-legacy-key"),
+        "doctor probe must use the legacy credential without printing it"
     );
     assert!(
         !primary.exists(),
@@ -418,6 +426,7 @@ fn run_sealed_diagnostic<const N: usize>(args: [&str; N]) -> Output {
         )
         .env("DEEPSEEK_TUI_VERSION", env!("CARGO_PKG_VERSION"));
     preserve_host_rustup_home(&mut command);
+    preserve_host_platform_runtime(&mut command);
 
     let output = command.output().expect("run sealed diagnostic");
     assert!(
@@ -454,67 +463,111 @@ fn diagnostic_command(workspace: &std::path::Path, home: &std::path::Path) -> Co
         )
         .env("DEEPSEEK_TUI_VERSION", env!("CARGO_PKG_VERSION"));
     preserve_host_rustup_home(&mut command);
+    preserve_host_platform_runtime(&mut command);
     command
 }
 
-fn one_request_completion_server() -> (String, mpsc::Receiver<Result<String, String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local probe server");
-    let address = listener.local_addr().expect("local probe server address");
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let result = (|| -> Result<String, String> {
-            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .map_err(|error| error.to_string())?;
-            let request = read_http_request(&mut stream)?;
-            let body = "{\"id\":\"doctor\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
-                .map_err(|error| error.to_string())?;
-            stream.flush().map_err(|error| error.to_string())?;
-            Ok(request)
-        })();
-        let _ = sender.send(result);
-    });
-    (format!("http://{address}/v1"), receiver)
+struct CompletionServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<HeaderMap>>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    owner: Option<thread::JoinHandle<()>>,
 }
 
-fn read_http_request(stream: &mut std::net::TcpStream) -> Result<String, String> {
-    let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 1024];
-    let header_end = loop {
-        let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
-        if read == 0 {
-            return Err("connection closed before HTTP headers arrived".to_string());
+impl CompletionServer {
+    fn start() -> Self {
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let (shutdown, shutdown_receiver) = tokio::sync::oneshot::channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = Arc::clone(&requests);
+        let owner = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("local probe runtime");
+            runtime.block_on(async move {
+                let app = Router::new().route(
+                    "/v1/chat/completions",
+                    post(move |headers: HeaderMap, body: Bytes| {
+                        let requests = Arc::clone(&server_requests);
+                        async move {
+                            // Extracting Bytes makes Axum drain the complete request body
+                            // before replying. Preserve only headers for the credential
+                            // assertion; the request payload itself is intentionally dropped.
+                            drop(body);
+                            requests
+                                .lock()
+                                .expect("local probe request lock")
+                                .push(headers);
+                            Json(serde_json::json!({
+                                "id": "doctor",
+                                "object": "chat.completion",
+                                "created": 0,
+                                "model": "deepseek-chat",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "ok"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            }))
+                        }
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await;
+                let listener = listener.expect("bind local probe server");
+                let address = listener.local_addr().expect("local probe address");
+                ready_sender
+                    .send(format!("http://{address}/v1"))
+                    .expect("publish local probe address");
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_receiver.await;
+                    })
+                    .await
+                    .expect("serve local probe request");
+            });
+        });
+        let base_url = ready_receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("local probe server must start");
+        Self {
+            base_url,
+            requests,
+            shutdown: Some(shutdown),
+            owner: Some(owner),
         }
-        bytes.extend_from_slice(&chunk[..read]);
-        if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-            break index + 4;
-        }
-        if bytes.len() > 32 * 1024 {
-            return Err("HTTP headers exceeded test limit".to_string());
-        }
-    };
-    let headers = String::from_utf8_lossy(&bytes[..header_end]);
-    let content_length = headers
-        .lines()
-        .find_map(|line| line.split_once(':'))
-        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    while bytes.len() < header_end + content_length {
-        let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
-        if read == 0 {
-            return Err("connection closed before HTTP body arrived".to_string());
-        }
-        bytes.extend_from_slice(&chunk[..read]);
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+
+    fn base_url(&self) -> String {
+        self.base_url.clone()
+    }
+
+    fn received_requests(&self) -> Vec<HeaderMap> {
+        self.requests
+            .lock()
+            .expect("local probe request lock")
+            .clone()
+    }
+}
+
+impl Drop for CompletionServer {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(owner) = self.owner.take() {
+            let result = owner.join();
+            if !thread::panicking() {
+                result.expect("stop local probe server");
+            }
+        }
+    }
 }
 
 /// A rustup shim may initialize its own toolchain state below `$HOME` when
@@ -531,6 +584,19 @@ fn preserve_host_rustup_home(command: &mut Command) {
         });
     if let Some(rustup_home) = rustup_home {
         command.env("RUSTUP_HOME", rustup_home);
+    }
+}
+
+/// `env_clear` is part of these tests' credential-isolation boundary, but a
+/// Windows child still needs the non-secret OS root variables used to locate
+/// platform networking components. Without them a reqwest client can fail its
+/// loopback connection before the local fixture ever receives a request.
+fn preserve_host_platform_runtime(_command: &mut Command) {
+    #[cfg(windows)]
+    for name in ["SystemRoot", "WINDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            _command.env(name, value);
+        }
     }
 }
 
