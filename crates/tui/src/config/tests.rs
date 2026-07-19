@@ -5606,6 +5606,59 @@ fn nvidia_nim_provider_normalizes_deepseek_v4_flash_alias() -> Result<()> {
 }
 
 #[test]
+fn vendor_locked_providers_reject_foreign_root_default_model() {
+    let _lock = lock_test_env();
+    for (provider, expected) in [
+        ("xai", DEFAULT_XAI_MODEL),
+        ("openai", DEFAULT_OPENAI_MODEL),
+        ("moonshot", DEFAULT_MOONSHOT_MODEL),
+    ] {
+        let config = Config {
+            provider: Some(provider.to_string()),
+            default_text_model: Some("deepseek-v4-pro".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.default_model(),
+            expected,
+            "a root DeepSeek default must not leak onto the official {provider} endpoint"
+        );
+    }
+}
+
+#[test]
+fn xai_custom_endpoint_keeps_root_default_model_pass_through() {
+    let _lock = lock_test_env();
+    let mut providers = ProvidersConfig::default();
+    providers.xai.base_url = Some("https://proxy.example.test/v1".to_string());
+    let config = Config {
+        provider: Some("xai".to_string()),
+        default_text_model: Some("deepseek-v4-pro".to_string()),
+        providers: Some(providers),
+        ..Default::default()
+    };
+    assert_eq!(
+        config.default_model(),
+        "deepseek-v4-pro",
+        "custom compatible endpoints may serve any model id"
+    );
+}
+
+#[test]
+fn xai_explicit_provider_model_is_honored_over_vendor_default() {
+    let _lock = lock_test_env();
+    let mut providers = ProvidersConfig::default();
+    providers.xai.model = Some("grok-4.5-mini".to_string());
+    let config = Config {
+        provider: Some("xai".to_string()),
+        default_text_model: Some("deepseek-v4-pro".to_string()),
+        providers: Some(providers),
+        ..Default::default()
+    };
+    assert_eq!(config.default_model(), "grok-4.5-mini");
+}
+
+#[test]
 fn nvidia_nim_env_overrides_provider_and_credentials() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()

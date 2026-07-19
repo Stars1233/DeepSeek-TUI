@@ -4447,15 +4447,32 @@ impl Config {
         if provider == ApiProvider::XiaomiMimo {
             return DEFAULT_XIAOMI_MIMO_MODEL.to_string();
         }
+        // A root DeepSeek-family default must not leak onto a vendor-locked
+        // official endpoint that can never serve it (the provider then
+        // rejects every request, e.g. `deepseek-v4-pro` on api.x.ai). Custom
+        // base URLs keep full pass-through: a compatible proxy may
+        // legitimately serve any model id.
+        let foreign_root_default = |model: &str| {
+            !self.active_provider_preserves_custom_base_url_model()
+                && matches!(
+                    provider,
+                    ApiProvider::Xai | ApiProvider::Openai | ApiProvider::Moonshot
+                )
+                && normalize_model_name(model).is_some()
+        };
         if let Some(model) = self.default_text_model.as_deref()
             && (provider_passes_model_through(provider)
                 || self.active_provider_preserves_custom_base_url_model())
+            && !foreign_root_default(model)
         {
             return model.trim().to_string();
         }
         if let Some(model) = self.default_text_model.as_deref()
             && !root_deepseek_model_is_foreign_to_direct_provider(provider, model)
             && let Some(normalized) = normalize_model_name_for_provider(provider, model)
+            // A wire-slug translation (e.g. the Moonshot map) resolves the
+            // foreign default to a native model; an identity result does not.
+            && (!foreign_root_default(model) || !normalized.eq_ignore_ascii_case(model.trim()))
         {
             return normalized;
         }
