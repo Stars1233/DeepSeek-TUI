@@ -1,7 +1,12 @@
 import Link from "next/link";
 import { InstallCodeBlock } from "@/components/install-code-block";
 import { Whale } from "@/components/whale";
-import { DOC_TOPICS, REPO_DOCS_BASE, type DocTopic } from "@/lib/docs-map";
+import {
+  DOC_TOPICS,
+  docTopicHref,
+  docTopicIsExternal,
+  type DocTopic,
+} from "@/lib/docs-map";
 import { getFacts } from "@/lib/facts";
 
 const START_TOPIC_IDS = ["install", "guide", "configuration", "modes"];
@@ -15,35 +20,17 @@ function topics(ids: string[]): DocTopic[] {
   });
 }
 
-const TOPIC_PAGE_OVERRIDES: Record<string, string> = {
-  install: "install",
-  providers: "models",
-};
-
-function topicIsExternal(topic: DocTopic): boolean {
-  return !topic.hasPage && !(topic.id in TOPIC_PAGE_OVERRIDES);
-}
-
-function topicHref(topic: DocTopic, locale: string): string {
-  const override = TOPIC_PAGE_OVERRIDES[topic.id];
-  if (override) return `/${locale}/${override}`;
-  if (topic.hasPage) return `/${locale}/docs/${topic.slug}`;
-
-  const source = Array.isArray(topic.repoSource) ? topic.repoSource[0] : topic.repoSource;
-  return `${REPO_DOCS_BASE}/${source}`;
-}
-
 function TopicList({ items, locale }: { items: DocTopic[]; locale: string }) {
   const isZh = locale === "zh";
 
   return (
     <div className="portal-topic-list">
       {items.map((topic) => {
-        const external = topicIsExternal(topic);
+        const external = docTopicIsExternal(topic);
         return (
           <Link
             key={topic.id}
-            href={topicHref(topic, locale)}
+            href={docTopicHref(topic, locale)}
             target={external ? "_blank" : undefined}
             rel={external ? "noreferrer" : undefined}
           >

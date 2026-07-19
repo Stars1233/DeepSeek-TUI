@@ -3,7 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { docsTopicIsCurrent } from "@/lib/docs-navigation";
-import { getTopicsByCategory, REPO_DOCS_BASE, type DocTopic } from "@/lib/docs-map";
+import {
+  docTopicHref,
+  docTopicIsExternal,
+  getTopicsByCategory,
+} from "@/lib/docs-map";
 
 const CATEGORY_LABELS: Record<string, { en: string; zh: string }> = {
   "getting-started": { en: "Getting started", zh: "入门" },
@@ -12,12 +16,6 @@ const CATEGORY_LABELS: Record<string, { en: string; zh: string }> = {
   extending: { en: "Extending", zh: "扩展" },
   operations: { en: "Operations", zh: "运维" },
 };
-
-function topicHref(topic: DocTopic, locale: string): string {
-  if (topic.hasPage) return `/${locale}/docs/${topic.slug}`;
-  const source = Array.isArray(topic.repoSource) ? topic.repoSource[0] : topic.repoSource;
-  return `${REPO_DOCS_BASE}/${source}`;
-}
 
 export function DocsSidebar({ locale }: { locale: string }) {
   const isZh = locale === "zh";
@@ -44,12 +42,13 @@ export function DocsSidebar({ locale }: { locale: string }) {
               <ul>
                 {topics.map((topic) => {
                   const isCurrent = docsTopicIsCurrent(topic, locale, pathname);
+                  const isExternal = docTopicIsExternal(topic);
                   return (
                     <li key={topic.id}>
                       <Link
-                        href={topicHref(topic, locale)}
-                        target={topic.hasPage ? undefined : "_blank"}
-                        rel={topic.hasPage ? undefined : "noreferrer"}
+                        href={docTopicHref(topic, locale)}
+                        target={isExternal ? "_blank" : undefined}
+                        rel={isExternal ? "noreferrer" : undefined}
                         aria-current={isCurrent ? "page" : undefined}
                         className={
                           isCurrent
@@ -58,7 +57,7 @@ export function DocsSidebar({ locale }: { locale: string }) {
                         }
                       >
                         <span>{isZh ? topic.label.zh : topic.label.en}</span>
-                        {!topic.hasPage && <span aria-hidden="true">↗</span>}
+                        {isExternal && <span aria-hidden="true">↗</span>}
                       </Link>
                     </li>
                   );

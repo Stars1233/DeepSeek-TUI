@@ -24,6 +24,8 @@ export interface DocTopic {
   repoSource: string | string[];
   /** Whether this topic has a dedicated website page (vs. linking out). */
   hasPage: boolean;
+  /** Locale-relative website path when the page lives outside `/docs/<slug>`. */
+  sitePath?: string;
   /** Category for grouping in the sidebar. */
   category: "getting-started" | "core-concepts" | "reference" | "extending" | "operations";
 }
@@ -38,7 +40,8 @@ export const DOC_TOPICS: DocTopic[] = [
       zh: "npm、Cargo、Homebrew、Docker、Nix、Scoop、CNB 镜像及平台说明。",
     },
     repoSource: "docs/INSTALL.md",
-    hasPage: false,
+    hasPage: true,
+    sitePath: "install",
     category: "getting-started",
   },
   {
@@ -74,7 +77,8 @@ export const DOC_TOPICS: DocTopic[] = [
       zh: "支持的提供商、模型切换、本地运行时（vLLM、Ollama、SGLang）和模型实验室。",
     },
     repoSource: ["docs/PROVIDERS.md", "docs/MODEL_LAB.md"],
-    hasPage: false,
+    hasPage: true,
+    sitePath: "models",
     category: "reference",
   },
   {
@@ -174,6 +178,18 @@ export const DOC_TOPICS: DocTopic[] = [
     category: "extending",
   },
   {
+    id: "web",
+    slug: "web",
+    label: { en: "Browser Client", zh: "浏览器客户端" },
+    description: {
+      en: "Run the embedded browser client on loopback, with its one-time bootstrap and session boundaries.",
+      zh: "仅在本机回环地址运行内置浏览器客户端，了解一次性引导与会话边界。",
+    },
+    repoSource: "docs/WEB.md",
+    hasPage: false,
+    category: "extending",
+  },
+  {
     id: "fleet",
     slug: "fleet",
     label: { en: "Fleet / Workflow", zh: "Fleet / Workflow" },
@@ -230,6 +246,19 @@ export function getTopicsByCategory(): Map<string, DocTopic[]> {
     map.set(t.category, group);
   }
   return map;
+}
+
+/** Resolve a topic to its on-site route or canonical repository document. */
+export function docTopicHref(topic: DocTopic, locale: string): string {
+  if (topic.sitePath) return `/${locale}/${topic.sitePath}`;
+  if (topic.hasPage) return `/${locale}/docs/${topic.slug}`;
+  const source = Array.isArray(topic.repoSource) ? topic.repoSource[0] : topic.repoSource;
+  return `${REPO_DOCS_BASE}/${source}`;
+}
+
+/** Whether following a topic leaves codewhale.net for the source document. */
+export function docTopicIsExternal(topic: DocTopic): boolean {
+  return !topic.hasPage;
 }
 
 /** Repo source base URL for generating direct links. */

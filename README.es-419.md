@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:120251f534ca -->
+<!-- source: README.md sha256:f76ebd048ff1 -->
 # Codewhale
 
 **Un runtime. Todos los modelos. Tu máquina.**
@@ -53,6 +53,7 @@ y tus sesiones se conservan — mira [docs/REBRAND.md](docs/REBRAND.md).
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
+codewhale web                            # local browser client on 127.0.0.1
 ```
 
 En la TUI: `/model` cambia proveedor y modelo juntos, `/fleet` ejecuta un
@@ -68,6 +69,8 @@ normal de aprobación.
 - [docs/FLEET.md](docs/FLEET.md) — fleets, el libro mayor y resume
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks y la
   constitution
+- [docs/WEB.md](docs/WEB.md) — cliente de navegador integrado solo en loopback
+  y su límite de autenticación de un solo uso
 
 Todo lo demás — modos, atajos de teclado, detalles del sandbox, MCP, la API
 del runtime, arquitectura — está en [docs](docs) y en

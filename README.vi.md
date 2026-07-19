@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:120251f534ca -->
+<!-- source: README.md sha256:f76ebd048ff1 -->
 # Codewhale
 
 **Một runtime. Mọi model. Máy của bạn.**
@@ -51,6 +51,7 @@ session của bạn được giữ nguyên — xem [docs/REBRAND.md](docs/REBRAN
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
+codewhale web                            # local browser client on 127.0.0.1
 ```
 
 Trong TUI: `/model` đổi provider và model cùng lúc, `/fleet` chạy một đội
@@ -65,6 +66,8 @@ Access, và `!` chạy một lệnh shell qua đường phê duyệt bình thư�
 - [docs/FLEET.md](docs/FLEET.md) — fleet, sổ cái và resume
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hook và
   constitution
+- [docs/WEB.md](docs/WEB.md) — trình duyệt nhúng chỉ chạy trên loopback và
+  ranh giới xác thực dùng một lần
 
 Mọi thứ còn lại — chế độ, phím tắt, chi tiết sandbox, MCP, runtime API, kiến
 trúc — nằm trong [docs](docs) và trên [codewhale.net](https://codewhale.net/).

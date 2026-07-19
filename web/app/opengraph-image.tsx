@@ -16,7 +16,7 @@ export default function OpengraphImage() {
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
-          backgroundColor: "#F7F8FA",
+          backgroundColor: "#F4F7FB",
           padding: "72px 84px",
           fontFamily: "sans-serif",
         }}
@@ -29,7 +29,7 @@ export default function OpengraphImage() {
             fontSize: 26,
             letterSpacing: 0,
             textTransform: "uppercase",
-            color: "#69748A",
+            color: "#5B6780",
           }}
         >
           <div style={{ width: 28, height: 14, borderRadius: "50% 45% 45% 50%", backgroundColor: "#F6C453" }} />
@@ -40,7 +40,7 @@ export default function OpengraphImage() {
             style={{
               fontSize: 116,
               fontWeight: 700,
-              color: "#1B2230",
+              color: "#14213A",
               letterSpacing: 0,
             }}
           >
@@ -51,15 +51,15 @@ export default function OpengraphImage() {
               marginTop: 28,
               fontSize: 38,
               lineHeight: 1.35,
-              color: "#4C5567",
+              color: "#455168",
               maxWidth: 980,
             }}
           >
             {IDENTITY_PHRASE}
           </div>
         </div>
-        <div style={{ display: "flex", width: "100%", height: 14, backgroundColor: "#081221" }}>
-          <div style={{ width: "32%", height: "100%", backgroundColor: "#9FC5D2" }} />
+        <div style={{ display: "flex", width: "100%", height: 14, backgroundColor: "#03070D" }}>
+          <div style={{ width: "32%", height: "100%", backgroundColor: "#6AAEF2" }} />
         </div>
       </div>
     ),

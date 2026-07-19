@@ -50,6 +50,7 @@ sessions carry over — see [docs/REBRAND.md](docs/REBRAND.md).
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
+codewhale web                            # local browser client on 127.0.0.1
 ```
 
 In the TUI: `/model` switches provider and model together, `/fleet` runs a
@@ -64,6 +65,8 @@ team of workers, `/restore` undoes a turn, `Tab` cycles Plan / Act / Operate,
 - [docs/FLEET.md](docs/FLEET.md) — fleets, the ledger, and resume
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks, and
   the constitution
+- [docs/WEB.md](docs/WEB.md) — the loopback-only embedded browser client and
+  its one-time authentication boundary
 
 Everything else — modes, keybindings, sandbox details, MCP, the runtime API,
 architecture — is in [docs](docs) and on

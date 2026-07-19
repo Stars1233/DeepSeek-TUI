@@ -2,7 +2,12 @@
 
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import Link from "next/link";
-import { DOC_TOPICS, REPO_DOCS_BASE, type DocTopic } from "@/lib/docs-map";
+import {
+  DOC_TOPICS,
+  docTopicHref,
+  docTopicIsExternal,
+  type DocTopic,
+} from "@/lib/docs-map";
 import { docTopicHaystack } from "@/lib/search-utils";
 
 /* ------------------------------------------------------------------ */
@@ -20,14 +25,6 @@ const CATEGORY_LABELS: Record<string, { en: string; zh: string }> = {
 /* ------------------------------------------------------------------ */
 /*  Link / source helpers (mirrored from the original page.tsx)       */
 /* ------------------------------------------------------------------ */
-
-function topicHref(topic: DocTopic, locale: string): string {
-  if (topic.hasPage) {
-    return `/${locale}/docs/${topic.slug}`;
-  }
-  const src = Array.isArray(topic.repoSource) ? topic.repoSource[0] : topic.repoSource;
-  return `${REPO_DOCS_BASE}/${src}`;
-}
 
 function topicSources(topic: DocTopic): string[] {
   return Array.isArray(topic.repoSource) ? topic.repoSource : [topic.repoSource];
@@ -74,9 +71,9 @@ function TopicRow({
   query: string;
 }) {
   const isZh = locale === "zh";
-  const href = topicHref(topic, locale);
+  const href = docTopicHref(topic, locale);
   const sources = topicSources(topic);
-  const isExternal = !topic.hasPage;
+  const isExternal = docTopicIsExternal(topic);
 
   return (
     <Link

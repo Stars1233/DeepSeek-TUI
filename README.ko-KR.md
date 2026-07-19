@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:120251f534ca -->
+<!-- source: README.md sha256:f76ebd048ff1 -->
 # Codewhale
 
 **하나의 런타임. 모든 모델. 당신의 컴퓨터.**
@@ -53,6 +53,7 @@ GitHub에 접근할 수 없는 사용자를 위한 CNB 미러는
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
+codewhale web                            # local browser client on 127.0.0.1
 ```
 
 TUI 안에서: `/model`은 프로바이더와 모델을 함께 전환하고, `/fleet`은
@@ -68,6 +69,8 @@ Ask / Auto-Review / Full Access 승인 태세를 순환하며, `!`는 일반 승
 - [docs/FLEET.md](docs/FLEET.md) — Fleet, 원장, 재개
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, 훅,
   constitution
+- [docs/WEB.md](docs/WEB.md) — 루프백 전용 내장 브라우저 클라이언트와 일회성
+  인증 경계
 
 나머지 — 모드, 키 바인딩, 샌드박스 세부 사항, MCP, 런타임 API, 아키텍처 —
 는 [docs](docs)와 [codewhale.net](https://codewhale.net/)에 있습니다.
