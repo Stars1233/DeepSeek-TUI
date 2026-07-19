@@ -269,7 +269,7 @@ impl SearchBackend for ConfiguredSearchBackend<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -378,6 +378,70 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn first_attempt_budget_overrides_the_default_fair_share() {
+        struct DeadlineBackend {
+            observed_budget: Arc<Mutex<Option<Duration>>>,
+        }
+
+        #[async_trait]
+        impl SearchBackend for DeadlineBackend {
+            fn id(&self) -> BackendId {
+                BackendId::Volcengine
+            }
+
+            fn capabilities(&self) -> QueryCapabilities {
+                QueryCapabilities::count_only()
+            }
+
+            async fn search(
+                &self,
+                _query: &SearchQuery,
+                deadline: Instant,
+            ) -> Result<BackendSearch, ToolError> {
+                *self.observed_budget.lock().expect("budget lock") =
+                    Some(deadline.saturating_duration_since(Instant::now()));
+                Ok(BackendSearch {
+                    backend: BackendId::Volcengine,
+                    source: "volcengine".to_string(),
+                    backend_detail: None,
+                    results: vec![result()],
+                    degraded: Vec::new(),
+                    note: None,
+                })
+            }
+        }
+
+        let observed_budget = Arc::new(Mutex::new(None));
+        let volcengine = DeadlineBackend {
+            observed_budget: Arc::clone(&observed_budget),
+        };
+        let fallback = FakeBackend {
+            id: BackendId::DuckDuckGo,
+            result: Ok(vec![result()]),
+        };
+        let first_attempt_budget = Duration::from_millis(1_500);
+        let response = run_backend_chain(
+            &[&volcengine, &fallback],
+            &query(),
+            Instant::now() + Duration::from_secs(2),
+            Some(first_attempt_budget),
+        )
+        .await
+        .expect("the first backend should complete inside its dedicated budget");
+
+        assert_eq!(response.raw.backend, BackendId::Volcengine);
+        let observed = observed_budget
+            .lock()
+            .expect("budget lock")
+            .expect("first backend must observe a deadline");
+        assert!(
+            observed > Duration::from_millis(1_250),
+            "dedicated first-attempt budget should exceed the default one-second fair share: {observed:?}"
+        );
+        assert!(observed <= first_attempt_budget);
     }
 
     #[tokio::test]
