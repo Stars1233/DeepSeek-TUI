@@ -3005,10 +3005,16 @@ impl Engine {
             if self.config.features.enabled(Feature::Mcp) {
                 always_load.insert("start_mcp_server".to_string());
             }
+            let bypass = input_policy.auto_approve
+                || input_policy.approval_mode == crate::tui::approval::ApprovalMode::Bypass;
             let mut catalog = build_model_tool_catalog_with_surface(
                 registry.to_api_tools_with_cache(true),
                 mcp_tools,
-                input_policy.mode,
+                if bypass {
+                    AppMode::Yolo
+                } else {
+                    input_policy.mode
+                },
                 &always_load,
                 capability.tool_surface_budget,
             );
