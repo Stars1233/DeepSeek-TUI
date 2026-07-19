@@ -729,6 +729,8 @@ max_subagents = 10 # optional (1-20)
 # default = "prompt"     # allow | deny | prompt
 # allow = ["api.deepseek.com", "github.com", ".githubusercontent.com"]
 # deny = []
+# proxy = ["github.com", ".githubusercontent.com"]
+# proxy_fake_ip_cidrs = ["198.18.0.0/15"] # requires both matching host and address
 # audit = true            # one line per call to ~/.codewhale/audit.log
 
 # ─────────────────────────────────────────────────────────────────────────────────

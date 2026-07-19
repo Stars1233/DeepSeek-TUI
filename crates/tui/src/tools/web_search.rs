@@ -1480,122 +1480,17 @@ mod tests {
         parse_baidu_results, parse_bocha_results, parse_searxng_results, parse_sofya_results,
         sanitize_error_body, searxng_search_url, truncate_error_body, volcengine_extract_text,
     };
-    use crate::tools::web::scrape::{
-        ScrapedSearchResult, decode_html_entities, is_likely_spam_results, normalize_bing_url,
-        root_domain,
-    };
+    use crate::tools::web::scrape::{decode_html_entities, normalize_bing_url};
     use serde_json::json;
 
     // Regression guard: Bing /ck/a redirect hrefs are HTML-entity-encoded
     // (`&amp;`). normalize_bing_url must decode entities before extracting the
     // `u=` base64 payload, otherwise the real URL is never recovered and the
-    // result's root domain collapses to bing.com (then dropped as spam → 0
-    // results for the default Bing backend).
+    // result remains a Bing tracking URL instead of the cited source.
     #[test]
     fn bing_ckurl_with_html_entities_decodes_real_url() {
         let href = "https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&amp;ntb=1";
         assert_eq!(normalize_bing_url(href), "https://rust-lang.org/");
-    }
-
-    fn entry(url: &str) -> ScrapedSearchResult {
-        ScrapedSearchResult {
-            title: "x".into(),
-            url: url.into(),
-            snippet: None,
-        }
-    }
-
-    #[test]
-    fn root_domain_strips_subdomain_keeps_two_labels() {
-        assert_eq!(
-            root_domain("https://astralia.forumgratuit.org/path/page").as_deref(),
-            Some("forumgratuit.org"),
-        );
-        assert_eq!(
-            root_domain("http://www.example.com/").as_deref(),
-            Some("example.com"),
-        );
-        assert_eq!(
-            root_domain("https://example.com").as_deref(),
-            Some("example.com")
-        );
-    }
-
-    #[test]
-    fn root_domain_handles_port_and_userinfo() {
-        assert_eq!(
-            root_domain("http://user:pass@blog.example.com:8080/x").as_deref(),
-            Some("example.com"),
-        );
-    }
-
-    #[test]
-    fn root_domain_returns_none_for_garbage() {
-        assert!(
-            root_domain("not-a-url").as_deref().is_some(),
-            "bare token is treated as host"
-        );
-        assert!(root_domain("https:///path").is_none());
-    }
-
-    #[test]
-    fn spam_detector_flags_single_domain_dominance() {
-        // #964 reproduction: 5/5 results from the same low-quality host.
-        let r = vec![
-            entry("https://astralia.forumgratuit.org/page1"),
-            entry("https://russia.forumgratuit.org/page2"),
-            entry("https://other.forumgratuit.org/page3"),
-            entry("https://hello.forumgratuit.org/page4"),
-            entry("https://world.forumgratuit.org/page5"),
-        ];
-        assert!(is_likely_spam_results(&r));
-    }
-
-    #[test]
-    fn spam_detector_passes_diverse_serp() {
-        // A normal SERP mixes domains; nothing flagged.
-        let r = vec![
-            entry("https://example.com/a"),
-            entry("https://wikipedia.org/b"),
-            entry("https://stackoverflow.com/c"),
-            entry("https://reddit.com/d"),
-            entry("https://example.com/e"),
-        ];
-        assert!(!is_likely_spam_results(&r));
-    }
-
-    #[test]
-    fn spam_detector_passes_short_result_set() {
-        // Two results from the same domain isn't enough signal — false
-        // positives on legitimate two-link answers (docs + homepage)
-        // would hurt more than letting them through.
-        let r = vec![
-            entry("https://example.com/a"),
-            entry("https://example.com/b"),
-        ];
-        assert!(!is_likely_spam_results(&r));
-    }
-
-    #[test]
-    fn spam_detector_threshold_is_sixty_percent() {
-        // 3-of-5 same domain trips the 60% threshold.
-        let r3of5 = vec![
-            entry("https://spam.example.com/a"),
-            entry("https://spam.example.com/b"),
-            entry("https://spam.example.com/c"),
-            entry("https://other.com/d"),
-            entry("https://third.com/e"),
-        ];
-        assert!(is_likely_spam_results(&r3of5));
-        // 2-of-5 does NOT trip the threshold.
-        let r2of5 = vec![
-            entry("https://spam.example.com/a"),
-            entry("https://spam.example.com/b"),
-            entry("https://other.com/c"),
-            entry("https://third.com/d"),
-            entry("https://fourth.com/e"),
-        ];
-        assert!(!is_likely_spam_results(&r2of5));
     }
 
     #[test]

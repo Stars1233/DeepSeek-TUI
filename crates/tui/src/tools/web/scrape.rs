@@ -1,7 +1,7 @@
 //! Shared DuckDuckGo / Bing HTML SERP scrapers and spam filter.
 //!
 //! Used by both `web_search` and `web_run` so parser behavior (including the
-//! #964 single-domain spam heuristic) cannot drift between the two paths.
+//! #964 evidence-based spam filter) cannot drift between the two paths.
 
 use base64::{Engine as _, engine::general_purpose};
 use regex::Regex;
@@ -64,8 +64,7 @@ fn get_bing_snippet_re() -> &'static Regex {
     })
 }
 
-/// Parse DuckDuckGo HTML SERP results. Applies the spam filter unconditionally:
-/// a single-domain-dominated result set is returned as empty.
+/// Parse DuckDuckGo HTML SERP results. Known spam-domain hits are omitted.
 pub fn parse_duckduckgo_results(html: &str, max_results: usize) -> Vec<ScrapedSearchResult> {
     let title_re = get_title_re();
     let snippet_re = get_snippet_re();
@@ -87,6 +86,9 @@ pub fn parse_duckduckgo_results(html: &str, max_results: usize) -> Vec<ScrapedSe
             continue;
         }
         let url = normalize_duckduckgo_url(href);
+        if is_known_spam_url(&url) {
+            continue;
+        }
         let snippet = snippets
             .get(idx)
             .map(|s| s.to_string())
@@ -99,16 +101,10 @@ pub fn parse_duckduckgo_results(html: &str, max_results: usize) -> Vec<ScrapedSe
         });
     }
 
-    if is_likely_spam_results(&results) {
-        // Same defence as the Bing path (#964): a DDG fallback page can
-        // also serve a single-domain stuffed result set when the upstream
-        // is degraded. Drop rather than mislead the model.
-        return Vec::new();
-    }
     results
 }
 
-/// Parse Bing HTML SERP results. Applies the spam filter unconditionally.
+/// Parse Bing HTML SERP results. Known spam-domain hits are omitted.
 pub fn parse_bing_results(html: &str, max_results: usize) -> Vec<ScrapedSearchResult> {
     let mut results = Vec::new();
     for cap in get_bing_result_re().captures_iter(html) {
@@ -133,21 +129,15 @@ pub fn parse_bing_results(html: &str, max_results: usize) -> Vec<ScrapedSearchRe
             .map(|m| normalize_text(m.as_str()))
             .filter(|s| !s.is_empty());
 
+        let url = normalize_bing_url(href);
+        if is_known_spam_url(&url) {
+            continue;
+        }
         results.push(ScrapedSearchResult {
             title,
-            url: normalize_bing_url(href),
+            url,
             snippet,
         });
-    }
-
-    if is_likely_spam_results(&results) {
-        // Bing's scraping endpoint occasionally serves a stuffed page
-        // where the same low-quality domain owns most of the b_algo
-        // entries — #964 reported eight in a row from
-        // `astralia.forumgratuit.org` for unrelated queries. Treat the
-        // batch as "no results" so the caller surfaces a clean failure
-        // message instead of routing the model toward junk.
-        return Vec::new();
     }
     results
 }
@@ -157,46 +147,21 @@ pub fn is_duckduckgo_challenge(html: &str) -> bool {
     html.contains("anomaly-modal") || html.contains("Unfortunately, bots use DuckDuckGo too")
 }
 
-/// Heuristic spam detector for scraped SERP HTML (#964).
-///
-/// Returns `true` when one root domain owns at least 60% of the result
-/// set and there are at least three results. A real-world top-five page
-/// from Google/Bing/DDG mixes domains; a result page dominated by one
-/// host is almost always SEO spam or a bot-detection-stuffed substitute.
-pub fn is_likely_spam_results(results: &[ScrapedSearchResult]) -> bool {
-    if results.len() < 3 {
-        return false;
-    }
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for r in results {
-        if let Some(host) = root_domain(&r.url) {
-            *counts.entry(host).or_insert(0) += 1;
-        }
-    }
-    let Some(&max) = counts.values().max() else {
+/// Evidence-based filter for the domain family in #964. A broad same-domain
+/// ratio is not a spam signal: site-scoped searches and documentation hosts
+/// legitimately return many results from one registrable domain.
+fn is_known_spam_url(url: &str) -> bool {
+    const KNOWN_SPAM_DOMAINS: &[&str] = &["forumgratuit.org"];
+
+    let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
     };
-    // 60% threshold: 3-of-5, 4-of-6, 5-of-8 all trip; 2-of-5 doesn't.
-    max * 5 >= results.len() * 3
-}
-
-/// Extract the registrable root domain (eTLD+1 approximation) from a URL
-/// so spam detection groups `astralia.forumgratuit.org` with
-/// `russia.forumgratuit.org`. Returns lowercase host minus the leftmost
-/// label, or the bare host when there are only two labels.
-pub fn root_domain(url: &str) -> Option<String> {
-    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let host = after_scheme.split(['/', '?', '#']).next()?;
-    let host = host.split('@').next_back()?;
-    let host = host.split(':').next()?.to_ascii_lowercase();
-    if host.is_empty() {
-        return None;
-    }
-    let labels: Vec<&str> = host.split('.').filter(|s| !s.is_empty()).collect();
-    if labels.len() <= 2 {
-        return Some(host);
-    }
-    Some(labels[labels.len().saturating_sub(2)..].join("."))
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    KNOWN_SPAM_DOMAINS
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
 fn normalize_duckduckgo_url(href: &str) -> String {
@@ -220,9 +185,8 @@ pub fn normalize_bing_url(href: &str) -> String {
     // Bing wraps every SERP result URL in a `/ck/a?...&u=<base64>` click-tracking
     // redirect, and in the raw HTML the separators are `&amp;` entities. Without
     // decoding entities first, `extract_query_param` looks for `u` but the actual
-    // key is `amp;u`, so the real URL is never recovered: every result collapses to
-    // a `bing.com` root domain, which the spam heuristic then rejects — yielding
-    // zero results for the default Bing backend. Decode entities before parsing.
+    // key is `amp;u`, so the real URL is never recovered and callers receive Bing's
+    // tracking URL instead of the cited source. Decode entities before parsing.
     let href = decode_html_entities(href);
     let href = href.as_str();
     if let Some(encoded) = extract_query_param(href, "u") {
@@ -346,19 +310,10 @@ fn extract_query_param(url: &str, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn entry(url: &str) -> ScrapedSearchResult {
-        ScrapedSearchResult {
-            title: "x".into(),
-            url: url.into(),
-            snippet: None,
-        }
-    }
-
     // Regression guard: Bing /ck/a redirect hrefs are HTML-entity-encoded
     // (`&amp;`). normalize_bing_url must decode entities before extracting the
     // `u=` base64 payload, otherwise the real URL is never recovered and the
-    // result's root domain collapses to bing.com (then dropped as spam → 0
-    // results for the default Bing backend).
+    // result remains a Bing tracking URL instead of the cited source.
     #[test]
     fn bing_ckurl_with_html_entities_decodes_real_url() {
         let href = "https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&amp;ntb=1";
@@ -401,101 +356,60 @@ mod tests {
     }
 
     #[test]
-    fn root_domain_strips_subdomain_keeps_two_labels() {
-        assert_eq!(
-            root_domain("https://astralia.forumgratuit.org/path/page").as_deref(),
-            Some("forumgratuit.org"),
-        );
-        assert_eq!(
-            root_domain("http://www.example.com/").as_deref(),
-            Some("example.com"),
-        );
-        assert_eq!(
-            root_domain("https://example.com").as_deref(),
-            Some("example.com")
-        );
+    fn known_spam_filter_is_domain_specific() {
+        assert!(is_known_spam_url("https://astralia.forumgratuit.org/page1"));
+        assert!(!is_known_spam_url("https://forumgratuit.org.example/a"));
+        assert!(!is_known_spam_url("https://docs.example.com/a"));
     }
 
     #[test]
-    fn root_domain_handles_port_and_userinfo() {
-        assert_eq!(
-            root_domain("http://user:pass@blog.example.com:8080/x").as_deref(),
-            Some("example.com"),
-        );
+    fn legitimate_same_domain_results_are_preserved() {
+        let html = r#"
+            <a class="result__a" href="https://docs.example.com/a">A</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.com/b">B</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.com/c">C</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.com/d">D</a>
+            <a class="result__snippet">s</a>
+        "#;
+        assert_eq!(parse_duckduckgo_results(html, 10).len(), 4);
     }
 
     #[test]
-    fn root_domain_returns_none_for_garbage() {
-        assert!(
-            root_domain("not-a-url").as_deref().is_some(),
-            "bare token is treated as host"
-        );
-        assert!(root_domain("https:///path").is_none());
+    fn public_suffix_and_private_suffix_hosts_are_not_misgrouped() {
+        let html = r#"
+            <a class="result__a" href="https://alpha.example.co.uk/a">A</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://beta.example.co.uk/b">B</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://alice.github.io/c">C</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://bob.github.io/d">D</a>
+            <a class="result__snippet">s</a>
+        "#;
+        assert_eq!(parse_duckduckgo_results(html, 10).len(), 4);
     }
 
     #[test]
-    fn spam_detector_flags_single_domain_dominance() {
-        // #964 reproduction: 5/5 results from the same low-quality host.
-        let r = vec![
-            entry("https://astralia.forumgratuit.org/page1"),
-            entry("https://russia.forumgratuit.org/page2"),
-            entry("https://other.forumgratuit.org/page3"),
-            entry("https://hello.forumgratuit.org/page4"),
-            entry("https://world.forumgratuit.org/page5"),
-        ];
-        assert!(is_likely_spam_results(&r));
+    fn max_results_three_keeps_legitimate_same_domain_results() {
+        let html = r#"
+            <a class="result__a" href="https://docs.example.com/a">A</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.com/b">B</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.com/c">C</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.com/d">D</a>
+            <a class="result__snippet">s</a>
+        "#;
+        assert_eq!(parse_duckduckgo_results(html, 3).len(), 3);
     }
 
     #[test]
-    fn spam_detector_passes_diverse_serp() {
-        // A normal SERP mixes domains; nothing flagged.
-        let r = vec![
-            entry("https://example.com/a"),
-            entry("https://wikipedia.org/b"),
-            entry("https://stackoverflow.com/c"),
-            entry("https://reddit.com/d"),
-            entry("https://example.com/e"),
-        ];
-        assert!(!is_likely_spam_results(&r));
-    }
-
-    #[test]
-    fn spam_detector_passes_short_result_set() {
-        // Two results from the same domain isn't enough signal — false
-        // positives on legitimate two-link answers (docs + homepage)
-        // would hurt more than letting them through.
-        let r = vec![
-            entry("https://example.com/a"),
-            entry("https://example.com/b"),
-        ];
-        assert!(!is_likely_spam_results(&r));
-    }
-
-    #[test]
-    fn spam_detector_threshold_is_sixty_percent() {
-        // 3-of-5 same domain trips the 60% threshold.
-        let r3of5 = vec![
-            entry("https://spam.example.com/a"),
-            entry("https://spam.example.com/b"),
-            entry("https://spam.example.com/c"),
-            entry("https://other.com/d"),
-            entry("https://third.com/e"),
-        ];
-        assert!(is_likely_spam_results(&r3of5));
-        // 2-of-5 does NOT trip the threshold.
-        let r2of5 = vec![
-            entry("https://spam.example.com/a"),
-            entry("https://spam.example.com/b"),
-            entry("https://other.com/c"),
-            entry("https://third.com/d"),
-            entry("https://fourth.com/e"),
-        ];
-        assert!(!is_likely_spam_results(&r2of5));
-    }
-
-    #[test]
-    fn parse_duckduckgo_filters_spam_domain_dominance() {
-        // Shared path used by web_run and web_search: spam SERP → empty.
+    fn parse_duckduckgo_filters_known_spam_domain() {
+        // Shared path used by web_run and web_search: known spam → empty.
         let html = r#"
             <a class="result__a" href="https://astralia.forumgratuit.org/a">A</a>
             <a class="result__snippet">s</a>
@@ -512,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_bing_filters_spam_domain_dominance() {
+    fn parse_bing_filters_known_spam_domain() {
         let html = r#"
             <ol>
               <li class="b_algo">

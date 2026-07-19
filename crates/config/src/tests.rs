@@ -17,12 +17,14 @@ fn network_policy_toml_deserializes_proxy_hosts() {
         r#"
         default = "allow"
         proxy = ["github.com", ".githubusercontent.com"]
+        proxy_fake_ip_cidrs = ["198.18.0.0/15"]
         "#,
     )
     .expect("network policy toml");
 
     assert_eq!(policy.default, "allow");
     assert_eq!(policy.proxy, ["github.com", ".githubusercontent.com"]);
+    assert_eq!(policy.proxy_fake_ip_cidrs, ["198.18.0.0/15"]);
     assert!(policy.audit);
 }
 

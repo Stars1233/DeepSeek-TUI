@@ -7,7 +7,7 @@ use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_u64, required_str,
 };
-use super::web::guard::validate_fetch_target;
+use super::web::guard::{DnsPin, guarded_reqwest_client_builder, validate_fetch_target};
 use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -600,7 +600,7 @@ impl ToolSpec for WebRunTool {
                 if link_id == 0 {
                     return Err(ToolError::invalid_input("click.id must be >= 1"));
                 }
-                let page = get_page(&ref_id).ok_or_else(|| {
+                let page = get_page(&context.state_namespace, &ref_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("Unknown ref_id '{ref_id}'"))
                 })?;
                 let link = page.links.iter().find(|l| l.id == link_id).ok_or_else(|| {
@@ -627,7 +627,7 @@ impl ToolSpec for WebRunTool {
             for find_req in find_requests {
                 let ref_id = required_str(find_req, "ref_id")?.to_string();
                 let pattern = required_str(find_req, "pattern")?.to_string();
-                let page = get_page(&ref_id).ok_or_else(|| {
+                let page = get_page(&context.state_namespace, &ref_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("Unknown ref_id '{ref_id}'"))
                 })?;
                 let find_result = find_in_page(&ref_id, &pattern, &page, response_length);
@@ -643,7 +643,7 @@ impl ToolSpec for WebRunTool {
             for shot in shots {
                 let ref_id = required_str(shot, "ref_id")?.to_string();
                 let pageno = optional_u64(shot, "pageno", 0) as usize;
-                let page = get_page(&ref_id).ok_or_else(|| {
+                let page = get_page(&context.state_namespace, &ref_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("Unknown ref_id '{ref_id}'"))
                 })?;
                 let screenshot = screenshot_page(&ref_id, pageno, &page)?;
@@ -727,15 +727,18 @@ fn store_page(namespace: &str, ref_id: &str, page: WebPage) {
     });
 }
 
-fn get_page(ref_id: &str) -> Option<Arc<WebPage>> {
+fn get_page(namespace: &str, ref_id: &str) -> Option<Arc<WebPage>> {
     let cache = WEB_RUN_STATE.get_or_init(WebRunCache::default);
     let stored = {
         let pages = cache.pages.read();
         pages.get(ref_id).cloned()
     }?;
+    if stored.namespace != namespace {
+        return None;
+    }
     {
         let mut sessions = cache.sessions.write();
-        if let Some(session) = sessions.get_mut(&stored.namespace) {
+        if let Some(session) = sessions.get_mut(namespace) {
             session.last_access = Instant::now();
         }
     }
@@ -759,7 +762,7 @@ async fn resolve_or_fetch_page(
     timeout_ms: u64,
     context: &ToolContext,
 ) -> Result<Arc<WebPage>, ToolError> {
-    if let Some(page) = get_page(ref_id) {
+    if let Some(page) = get_page(&context.state_namespace, ref_id) {
         return Ok(page);
     }
     if looks_like_url(ref_id) {
@@ -1112,13 +1115,29 @@ async fn fetch_page(
     timeout_ms: u64,
     context: &ToolContext,
 ) -> Result<WebPage, ToolError> {
+    fetch_page_with_initial_pin(url, timeout_ms, context, None).await
+}
+
+async fn fetch_page_with_initial_pin(
+    url: &str,
+    timeout_ms: u64,
+    context: &ToolContext,
+    mut initial_pin: Option<DnsPin>,
+) -> Result<WebPage, ToolError> {
     let mut current_url = reqwest::Url::parse(url)
         .map_err(|e| ToolError::invalid_input(format!("invalid URL: {e}")))?;
     let mut redirects_followed = 0usize;
 
     let resp = loop {
-        let dns_pinning = validate_fetch_target(&current_url, context, "web_run").await?;
-        let mut client_builder = crate::tls::reqwest_client_builder()
+        let dns_pinning = if redirects_followed == 0 {
+            match initial_pin.take() {
+                Some(pin) => pin,
+                None => validate_fetch_target(&current_url, context, "web_run").await?,
+            }
+        } else {
+            validate_fetch_target(&current_url, context, "web_run").await?
+        };
+        let mut client_builder = guarded_reqwest_client_builder()
             .timeout(Duration::from_millis(timeout_ms))
             .user_agent(USER_AGENT)
             .redirect(reqwest::redirect::Policy::none());
@@ -1607,6 +1626,16 @@ mod tests {
         }
     }
 
+    fn sample_page_with_link(url: &str, target: &str) -> WebPage {
+        let mut page = sample_page(url);
+        page.links.push(WebLink {
+            id: 1,
+            url: target.to_string(),
+            text: "target".to_string(),
+        });
+        page
+    }
+
     #[test]
     fn html_link_parsing_extracts_links() {
         let html = r#"
@@ -1671,8 +1700,7 @@ mod tests {
 
     #[test]
     fn web_run_search_path_filters_known_spam_domain() {
-        // Intended behavior change vs pre-unify web_run: spam filter applies
-        // unconditionally on the shared scraper used by web_run (#964).
+        // The shared scraper used by web_run filters the known #964 spam family.
         let html = r#"
             <a class="result__a" href="https://astralia.forumgratuit.org/a">A</a>
             <a class="result__snippet">spam</a>
@@ -1688,7 +1716,31 @@ mod tests {
         let results = parse_duckduckgo_results(html, 10);
         assert!(
             results.is_empty(),
-            "web_run path must drop single-domain spam SERPs via shared scraper"
+            "web_run path must drop the known spam family via the shared scraper"
+        );
+    }
+
+    #[test]
+    fn domain_scoped_fixture_preserves_legitimate_same_site_results() {
+        let html = r#"
+            <a class="result__a" href="https://docs.example.co.uk/a">A</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.co.uk/b">B</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://docs.example.co.uk/c">C</a>
+            <a class="result__snippet">s</a>
+            <a class="result__a" href="https://other.example/d">D</a>
+            <a class="result__snippet">s</a>
+        "#;
+        let domains = vec!["docs.example.co.uk".to_string()];
+        let mut results = parse_duckduckgo_results(html, 10);
+        results.retain(|entry| domain_matches(&entry.url, &domains));
+
+        assert_eq!(results.len(), 3);
+        assert!(
+            results
+                .iter()
+                .all(|entry| entry.url.contains("docs.example.co.uk"))
         );
     }
 
@@ -1731,8 +1783,75 @@ mod tests {
             sample_page("https://example.com/alpha"),
         );
 
-        assert!(get_page(&ref_alpha).is_some());
-        assert!(get_page(&ref_beta).is_none());
+        assert!(get_page("session-alpha", &ref_alpha).is_some());
+        assert!(get_page("session-beta", &ref_alpha).is_none());
+        assert!(get_page("session-beta", &ref_beta).is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_open_rejects_exact_foreign_session_ref() {
+        let _lock = lock_web_run_test_state();
+        reset_web_run_state();
+        let ref_id = format!("{}turn0search1", scoped_ref_prefix("foreign-open-owner"));
+        store_page(
+            "foreign-open-owner",
+            &ref_id,
+            sample_page("https://example.com/private-session-page"),
+        );
+        let context =
+            ToolContext::new(PathBuf::from(".")).with_state_namespace("foreign-open-caller");
+
+        let err = WebRunTool
+            .execute(json!({"open": [{"ref_id": ref_id}]}), &context)
+            .await
+            .expect_err("foreign exact ref must not open");
+
+        assert!(format!("{err}").contains("Unknown ref_id"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_click_rejects_exact_foreign_session_ref() {
+        let _lock = lock_web_run_test_state();
+        reset_web_run_state();
+        let ref_id = format!("{}turn0search1", scoped_ref_prefix("foreign-click-owner"));
+        store_page(
+            "foreign-click-owner",
+            &ref_id,
+            sample_page_with_link(
+                "https://example.com/private-session-page",
+                "https://example.com/target",
+            ),
+        );
+        let context =
+            ToolContext::new(PathBuf::from(".")).with_state_namespace("foreign-click-caller");
+
+        let err = WebRunTool
+            .execute(json!({"click": [{"ref_id": ref_id, "id": 1}]}), &context)
+            .await
+            .expect_err("foreign exact ref must not be clickable");
+
+        assert!(format!("{err}").contains("Unknown ref_id"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_click_routes_target_through_shared_ssrf_guard() {
+        let _lock = lock_web_run_test_state();
+        reset_web_run_state();
+        let namespace = "guarded-click-session";
+        let ref_id = format!("{}turn0search1", scoped_ref_prefix(namespace));
+        store_page(
+            namespace,
+            &ref_id,
+            sample_page_with_link("https://example.com/source", "http://127.0.0.1/admin"),
+        );
+        let context = ToolContext::new(PathBuf::from(".")).with_state_namespace(namespace);
+
+        let err = WebRunTool
+            .execute(json!({"click": [{"ref_id": ref_id, "id": 1}]}), &context)
+            .await
+            .expect_err("click target must be SSRF-guarded");
+
+        assert!(format!("{err}").contains("restricted address"));
     }
 
     #[test]
@@ -1743,8 +1862,8 @@ mod tests {
         let ref_id = format!("{}turn0search1", scoped_ref_prefix(namespace));
         store_page(namespace, &ref_id, sample_page("https://example.com/alpha"));
 
-        let first = get_page(&ref_id).expect("first page read");
-        let second = get_page(&ref_id).expect("second page read");
+        let first = get_page(namespace, &ref_id).expect("first page read");
+        let second = get_page(namespace, &ref_id).expect("second page read");
 
         assert!(Arc::ptr_eq(&first, &second));
     }
@@ -1779,7 +1898,7 @@ mod tests {
         });
 
         assert!(panic_result.is_err());
-        assert!(get_page(&ref_id).is_some());
+        assert!(get_page(namespace, &ref_id).is_some());
         assert_eq!(next_turn_for_namespace(namespace), 42);
     }
 
@@ -1815,7 +1934,7 @@ mod tests {
 
         let _ = next_turn_for_namespace("session-beta");
 
-        assert!(get_page(&ref_id).is_none());
+        assert!(get_page(namespace, &ref_id).is_none());
     }
 
     #[test]
@@ -1834,6 +1953,7 @@ mod tests {
             allow: vec!["api.deepseek.com".to_string()],
             deny: vec![],
             proxy: Vec::new(),
+            proxy_fake_ip_cidrs: Vec::new(),
             audit: false,
         };
         let decider = NetworkPolicyDecider::new(policy, None);
@@ -1891,52 +2011,25 @@ mod tests {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // Serve a 302 from loopback; Location points at a private IP.
-        // fetch_page disables auto-redirects and re-validates every Location
-        // with the shared SSRF guard (same path as an open/click hop).
+        // Use a public-looking hostname pinned to the local fixture for the
+        // already-validated first hop. The redirect itself still goes through
+        // the real shared guard inside fetch_page's redirect loop.
         let server = MockServer::start().await;
         let private_location = "http://10.0.0.5/internal";
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(302).insert_header("Location", private_location))
             .mount(&server)
             .await;
+        let host = "public-redirect.example.test";
+        let initial_url = format!("http://{host}:{}/", server.address().port());
+        let pin = Some((host.to_string(), "127.0.0.1".parse().unwrap()));
 
-        // Unguarded client confirms the mock shape (public-host stand-in → private).
-        let client = crate::tls::reqwest_client_builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("client");
-        let resp = client
-            .get(server.uri())
-            .send()
+        let err = fetch_page_with_initial_pin(&initial_url, 5_000, &ssrf_ctx(), Some(pin))
             .await
-            .expect("unguarded mock fetch");
-        assert!(resp.status().is_redirection());
-        let location = resp
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .expect("Location header");
-        let next = resp.url().join(location).expect("join redirect Location");
-        assert_eq!(next.as_str(), private_location);
-
-        // Exact re-validation hop fetch_page performs before following:
-        let err = validate_fetch_target(&next, &ssrf_ctx(), "web_run")
-            .await
-            .expect_err("redirect to private IP must be refused");
+            .expect_err("guarded redirect to private IP must be refused");
         assert!(
             format!("{err}").contains("restricted address"),
-            "expected restricted-address error consistent with fetch_url; got {err}"
-        );
-
-        // And the open path refuses when the target itself is the private URL
-        // (same guard entry point as a followed redirect).
-        let err = fetch_page(private_location, 5_000, &ssrf_ctx())
-            .await
-            .expect_err("private redirect target must be refused on open");
-        assert!(
-            format!("{err}").contains("restricted address"),
-            "expected restricted-address error; got {err}"
+            "redirect loop must surface the shared guard rejection; got {err}"
         );
     }
 }

@@ -12561,6 +12561,7 @@ mod terminal_mode_tests {
                 allow: Vec::new(),
                 deny: Vec::new(),
                 proxy: Vec::new(),
+                proxy_fake_ip_cidrs: Vec::new(),
                 audit: false,
             },
             None,

@@ -1881,6 +1881,10 @@ pub struct NetworkPolicyToml {
     /// explicitly trusted proxy setup. Literal IP URLs remain blocked.
     #[serde(default)]
     pub proxy: Vec<String>,
+    /// Explicit fake-IP placeholder CIDRs for those proxy hosts. The runtime
+    /// accepts only subnets contained by `198.18.0.0/15`.
+    #[serde(default)]
+    pub proxy_fake_ip_cidrs: Vec<String>,
     /// Whether to record one audit-log line per outbound network call.
     #[serde(default = "default_network_audit")]
     pub audit: bool,
@@ -1901,6 +1905,7 @@ impl Default for NetworkPolicyToml {
             allow: Vec::new(),
             deny: Vec::new(),
             proxy: Vec::new(),
+            proxy_fake_ip_cidrs: Vec::new(),
             audit: default_network_audit(),
         }
     }

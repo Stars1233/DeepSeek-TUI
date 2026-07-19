@@ -685,6 +685,7 @@ fn network_policy_toml_maps_proxy_hosts_to_runtime_policy() {
         r#"
         default = "allow"
         proxy = ["github.com", ".githubusercontent.com"]
+        proxy_fake_ip_cidrs = ["198.18.0.0/15"]
         "#,
     )
     .expect("network policy toml");
@@ -692,6 +693,7 @@ fn network_policy_toml_maps_proxy_hosts_to_runtime_policy() {
     let runtime = policy.into_runtime();
 
     assert_eq!(runtime.proxy, ["github.com", ".githubusercontent.com"]);
+    assert_eq!(runtime.proxy_fake_ip_cidrs, ["198.18.0.0/15"]);
     assert!(runtime.trusts_proxy_fakeip_host("github.com"));
     assert!(runtime.trusts_proxy_fakeip_host("raw.githubusercontent.com"));
 }

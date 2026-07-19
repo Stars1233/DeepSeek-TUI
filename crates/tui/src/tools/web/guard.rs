@@ -15,6 +15,14 @@ use std::net::IpAddr;
 /// connection uses the pre-validated address instead of re-resolving.
 pub(crate) type DnsPin = Option<(String, IpAddr)>;
 
+/// Build the transport used after a destination has passed SSRF validation.
+/// Ambient HTTP(S)/SOCKS proxies are deliberately disabled: a proxy would
+/// receive the original hostname, resolve it again outside this process, and
+/// bypass the validated DNS pin.
+pub(crate) fn guarded_reqwest_client_builder() -> reqwest::ClientBuilder {
+    crate::tls::reqwest_client_builder().no_proxy()
+}
+
 /// Check if an IP address is loopback, private, link-local, cloud-metadata,
 /// multicast, or reserved — all addresses that should not be reachable via
 /// an LLM-initiated fetch request (SSRF prevention).
@@ -157,14 +165,13 @@ pub(crate) fn validate_dns_resolved_ip(
         return Ok(());
     }
 
-    // Allow the resolved IP past the restricted-IP block if either:
-    //   * it falls inside a configured fake-IP placeholder range (a TUN /
-    //     transparent-proxy setup in `fake-ip` mode resolves every host into a
-    //     reserved range such as `198.18.0.0/15`), or
-    //   * the host is on the explicitly-trusted proxy list.
-    // Real private/loopback/link-local/metadata IPs match neither and stay blocked.
+    // A fake-IP exception requires both an explicitly trusted hostname and an
+    // explicitly trusted placeholder CIDR. The CIDR parser admits only subnets
+    // inside 198.18.0.0/15, so real private/loopback/link-local/metadata/ULA
+    // addresses remain blocked even when the hostname is trusted.
     if let Some(decider) = decider
-        && (decider.is_trusted_fakeip_addr(ip) || decider.trusts_proxy_fakeip_host(host))
+        && decider.is_trusted_fakeip_addr(ip)
+        && decider.trusts_proxy_fakeip_host(host)
     {
         decider.record_trusted_proxy_fakeip_allow(host, tool);
         return Ok(());
@@ -179,10 +186,220 @@ pub(crate) fn validate_dns_resolved_ip(
 mod tests {
     use super::*;
     use crate::tools::spec::ToolContext;
+    #[cfg(not(windows))]
+    use std::io::{Read, Write};
+    #[cfg(not(windows))]
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::path::PathBuf;
+    #[cfg(not(windows))]
+    use std::process::Command;
+    #[cfg(not(windows))]
+    use std::sync::Arc;
+    #[cfg(not(windows))]
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(not(windows))]
+    use std::time::{Duration, Instant};
 
     fn ctx() -> ToolContext {
         ToolContext::new(PathBuf::from("."))
+    }
+
+    #[cfg(not(windows))]
+    #[derive(Clone, Copy, Debug)]
+    enum AmbientProxyKind {
+        Http,
+        HttpsConnect,
+        SocksRemoteDns,
+    }
+
+    #[cfg(not(windows))]
+    fn spawn_accept_probe(
+        stop: Arc<AtomicBool>,
+        respond_http: bool,
+        drain_http_headers: bool,
+    ) -> (u16, std::thread::JoinHandle<bool>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind probe listener");
+        let port = listener.local_addr().expect("probe address").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking probe listener");
+        let handle = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if drain_http_headers {
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(2)))
+                                .expect("probe read timeout");
+                            let mut request = Vec::new();
+                            let mut chunk = [0_u8; 1024];
+                            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                let read = stream.read(&mut chunk).expect("read probe request");
+                                if read == 0 {
+                                    break;
+                                }
+                                request.extend_from_slice(&chunk[..read]);
+                            }
+                        }
+                        if respond_http {
+                            let _ = stream.write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                            );
+                        }
+                        return true;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(err) => panic!("probe accept failed: {err}"),
+                }
+                if stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        (port, handle)
+    }
+
+    #[cfg(not(windows))]
+    fn run_ambient_proxy_probe(kind: AmbientProxyKind, guarded: bool) -> (bool, bool) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (target_port, target_handle) = spawn_accept_probe(
+            Arc::clone(&stop),
+            matches!(
+                kind,
+                AmbientProxyKind::Http | AmbientProxyKind::SocksRemoteDns
+            ),
+            matches!(
+                kind,
+                AmbientProxyKind::Http | AmbientProxyKind::SocksRemoteDns
+            ),
+        );
+        let (proxy_port, proxy_handle) = spawn_accept_probe(Arc::clone(&stop), true, false);
+
+        let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+        command.args([
+            "--exact",
+            "tools::web::guard::tests::guarded_transport_proxy_probe_child",
+            "--ignored",
+            "--nocapture",
+        ]);
+        for key in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "REQUEST_METHOD",
+        ] {
+            command.env_remove(key);
+        }
+        command
+            .env("CODEWHALE_PROXY_PROBE_CHILD", "1")
+            .env(
+                "CODEWHALE_PROXY_PROBE_GUARDED",
+                if guarded { "1" } else { "0" },
+            )
+            .env("CODEWHALE_PROXY_PROBE_TARGET_PORT", target_port.to_string());
+        match kind {
+            AmbientProxyKind::Http => {
+                let proxy = format!("http://127.0.0.1:{proxy_port}");
+                command
+                    .env("CODEWHALE_PROXY_PROBE_SCHEME", "http")
+                    .env("HTTP_PROXY", &proxy)
+                    .env("http_proxy", proxy);
+            }
+            AmbientProxyKind::HttpsConnect => {
+                let proxy = format!("http://127.0.0.1:{proxy_port}");
+                command
+                    .env("CODEWHALE_PROXY_PROBE_SCHEME", "https")
+                    .env("HTTPS_PROXY", &proxy)
+                    .env("https_proxy", proxy);
+            }
+            AmbientProxyKind::SocksRemoteDns => {
+                let proxy = format!("socks5h://127.0.0.1:{proxy_port}");
+                command
+                    .env("CODEWHALE_PROXY_PROBE_SCHEME", "http")
+                    .env("ALL_PROXY", &proxy)
+                    .env("all_proxy", proxy);
+            }
+        }
+
+        let output = command.output().expect("run proxy probe child");
+        stop.store(true, Ordering::SeqCst);
+        let target_hit = target_handle.join().expect("join target probe");
+        let proxy_hit = proxy_handle.join().expect("join proxy probe");
+        assert!(
+            output.status.success(),
+            "proxy probe child failed for {kind:?} guarded={guarded}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        (target_hit, proxy_hit)
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    #[ignore = "subprocess helper for ambient proxy regression test"]
+    async fn guarded_transport_proxy_probe_child() {
+        if std::env::var_os("CODEWHALE_PROXY_PROBE_CHILD").is_none() {
+            return;
+        }
+        let guarded = std::env::var("CODEWHALE_PROXY_PROBE_GUARDED").as_deref() == Ok("1");
+        let scheme = std::env::var("CODEWHALE_PROXY_PROBE_SCHEME").expect("probe scheme");
+        let target_port = std::env::var("CODEWHALE_PROXY_PROBE_TARGET_PORT")
+            .expect("probe target port")
+            .parse::<u16>()
+            .expect("numeric target port");
+        let host = "guarded-proxy-probe.example.invalid";
+        let builder = if guarded {
+            guarded_reqwest_client_builder()
+        } else {
+            crate::tls::reqwest_client_builder()
+        };
+        let client = builder
+            .timeout(Duration::from_secs(2))
+            .resolve(
+                host,
+                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), target_port),
+            )
+            .build()
+            .expect("build proxy probe client");
+        let result = client
+            .get(format!("{scheme}://{host}:{target_port}/"))
+            .send()
+            .await;
+        if guarded && scheme == "http" {
+            assert!(
+                result.is_ok(),
+                "guarded HTTP target should answer: {result:?}"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn guarded_transport_bypasses_ambient_http_https_and_remote_dns_socks_proxies() {
+        for kind in [
+            AmbientProxyKind::Http,
+            AmbientProxyKind::HttpsConnect,
+            AmbientProxyKind::SocksRemoteDns,
+        ] {
+            let (unguarded_target, unguarded_proxy) = run_ambient_proxy_probe(kind, false);
+            assert!(
+                unguarded_proxy && !unguarded_target,
+                "control client must demonstrate ambient {kind:?} proxy interception"
+            );
+
+            let (guarded_target, guarded_proxy) = run_ambient_proxy_probe(kind, true);
+            assert!(
+                guarded_target && !guarded_proxy,
+                "guarded client must preserve its DNS pin and bypass ambient {kind:?} proxy"
+            );
+        }
     }
 
     #[test]
@@ -312,6 +529,7 @@ mod tests {
             allow: vec!["api.deepseek.com".to_string()],
             deny: vec![],
             proxy: Vec::new(),
+            proxy_fake_ip_cidrs: Vec::new(),
             audit: false,
         };
         let decider = NetworkPolicyDecider::new(policy, None);
@@ -349,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_opt_in_allows_restricted_dns_for_matching_host() {
+    fn proxy_host_and_fakeip_cidr_allow_matching_placeholder() {
         use crate::network_policy::{Decision, NetworkPolicy, NetworkPolicyDecider};
 
         let policy = NetworkPolicy {
@@ -357,13 +575,86 @@ mod tests {
             allow: Vec::new(),
             deny: Vec::new(),
             proxy: vec!["github.com".to_string()],
+            proxy_fake_ip_cidrs: vec!["198.18.0.0/15".to_string()],
             audit: false,
         };
         let decider = NetworkPolicyDecider::new(policy, None);
         let ip = "198.18.0.1".parse().unwrap();
 
         validate_dns_resolved_ip("github.com", &ip, Some(&decider), "fetch_url")
-            .expect("proxy opt-in should allow fake-IP DNS for matching host");
+            .expect("matching host and fake-IP CIDR should allow the placeholder");
+    }
+
+    #[test]
+    fn proxy_host_without_fakeip_cidr_does_not_allow_restricted_dns() {
+        use crate::network_policy::{Decision, NetworkPolicy, NetworkPolicyDecider};
+
+        let policy = NetworkPolicy {
+            default: Decision::Allow.into(),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            proxy: vec!["github.com".to_string()],
+            proxy_fake_ip_cidrs: Vec::new(),
+            audit: false,
+        };
+        let decider = NetworkPolicyDecider::new(policy, None);
+        let ip = "198.18.0.1".parse().unwrap();
+
+        validate_dns_resolved_ip("github.com", &ip, Some(&decider), "fetch_url")
+            .expect_err("hostname trust alone must not allow a restricted address");
+    }
+
+    #[test]
+    fn fakeip_cidr_without_proxy_host_does_not_allow_restricted_dns() {
+        use crate::network_policy::{Decision, NetworkPolicy, NetworkPolicyDecider};
+
+        let policy = NetworkPolicy {
+            default: Decision::Allow.into(),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            proxy: Vec::new(),
+            proxy_fake_ip_cidrs: vec!["198.18.0.0/15".to_string()],
+            audit: false,
+        };
+        let decider = NetworkPolicyDecider::new(policy, None);
+        let ip = "198.18.0.1".parse().unwrap();
+
+        validate_dns_resolved_ip("github.com", &ip, Some(&decider), "fetch_url")
+            .expect_err("fake-IP CIDR alone must not allow an untrusted hostname");
+    }
+
+    #[test]
+    fn proxy_host_never_exempts_real_private_or_local_addresses() {
+        use crate::network_policy::{Decision, NetworkPolicy, NetworkPolicyDecider};
+
+        let policy = NetworkPolicy {
+            default: Decision::Allow.into(),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            proxy: vec!["github.com".to_string()],
+            proxy_fake_ip_cidrs: vec![
+                "198.18.0.0/15".to_string(),
+                "127.0.0.0/8".to_string(),
+                "10.0.0.0/8".to_string(),
+                "169.254.0.0/16".to_string(),
+            ],
+            audit: false,
+        };
+        let decider = NetworkPolicyDecider::new(policy, None);
+
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "fc00::1",
+        ] {
+            let ip = ip.parse().unwrap();
+            assert!(
+                validate_dns_resolved_ip("github.com", &ip, Some(&decider), "fetch_url").is_err(),
+                "{ip} must remain restricted"
+            );
+        }
     }
 
     #[test]
@@ -375,6 +666,7 @@ mod tests {
             allow: Vec::new(),
             deny: Vec::new(),
             proxy: vec!["github.com".to_string()],
+            proxy_fake_ip_cidrs: vec!["198.18.0.0/15".to_string()],
             audit: false,
         };
         let decider = NetworkPolicyDecider::new(policy, None);
@@ -400,6 +692,7 @@ mod tests {
             allow: Vec::new(),
             deny: Vec::new(),
             proxy: vec!["github.com".to_string()],
+            proxy_fake_ip_cidrs: vec!["198.18.0.0/15".to_string()],
             audit: true,
         };
         let decider = NetworkPolicyDecider::new(policy, Some(auditor));

@@ -11,7 +11,7 @@ use super::handle::query_jsonpath;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_u64,
 };
-use super::web::guard::validate_fetch_target;
+use super::web::guard::{guarded_reqwest_client_builder, validate_fetch_target};
 use async_trait::async_trait;
 use regex::Regex;
 use serde::Serialize;
@@ -163,7 +163,7 @@ impl ToolSpec for FetchUrlTool {
 
         let resp = loop {
             let dns_pinning = validate_fetch_target(&current_url, context, "fetch_url").await?;
-            let mut client_builder = crate::tls::reqwest_client_builder()
+            let mut client_builder = guarded_reqwest_client_builder()
                 .timeout(Duration::from_millis(timeout_ms))
                 .user_agent(USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none());
@@ -462,6 +462,7 @@ mod tests {
             allow: vec!["api.deepseek.com".to_string()],
             deny: vec![],
             proxy: Vec::new(),
+            proxy_fake_ip_cidrs: Vec::new(),
             audit: false,
         };
         let decider = NetworkPolicyDecider::new(policy, None);
@@ -483,6 +484,7 @@ mod tests {
             allow: Vec::new(),
             deny: Vec::new(),
             proxy: vec!["198.18.0.1".to_string()],
+            proxy_fake_ip_cidrs: vec!["198.18.0.0/15".to_string()],
             audit: false,
         };
         let decider = NetworkPolicyDecider::new(policy, None);
