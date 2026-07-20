@@ -601,6 +601,18 @@ impl ToolSpec for WorkflowTool {
                     "description": "Structured planner plan JSON (#4124). Alternative to script/source_path. Accepts goal, risk, max_children, token_budget, phases[], and/or children[] (or IR nodes). risk must be exactly read_only, writes, or elevated. For a child, prefer role/profile without an explicit type; do not combine a role/profile with a conflicting type. Lowered to Workflow JS with parallel() partial-success semantics."
                 },
                 "args": {
+                    "anyOf": [
+                        { "type": "null" },
+                        { "type": "boolean" },
+                        { "type": "integer" },
+                        { "type": "number" },
+                        { "type": "string" },
+                        { "type": "array" },
+                        {
+                            "type": "object",
+                            "additionalProperties": {}
+                        }
+                    ],
                     "description": "JSON value exposed to the script as args. Defaults to null."
                 },
                 "token_budget": {

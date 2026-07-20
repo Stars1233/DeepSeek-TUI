@@ -3113,6 +3113,58 @@ mod tests {
         );
     }
 
+    async fn assert_kimi_code_untyped_default_fails_before_transport(streaming: bool) {
+        let server = MockServer::start().await;
+        let client = moonshot_request_boundary_client(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            server.uri(),
+        );
+        let mut request =
+            k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
+        let mut tool = test_tool("private_default_tool");
+        tool.input_schema = json!({
+            "type": "object",
+            "properties": {
+                "private-field-4401": {
+                    "default": "private-default-value-4402"
+                }
+            }
+        });
+        request.tools = Some(vec![tool]);
+
+        let error = if streaming {
+            match client.create_message_stream(request).await {
+                Ok(_) => panic!("untyped streaming parameters reached transport"),
+                Err(error) => error,
+            }
+        } else {
+            match client.create_message(request).await {
+                Ok(_) => panic!("untyped non-streaming parameters reached transport"),
+                Err(error) => error,
+            }
+        };
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("failed safe compatibility validation"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("without a concrete type"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("private-field-4401"));
+        assert!(!diagnostic.contains("private-default-value-4402"));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("request log")
+                .is_empty(),
+            "untyped parameters must fail before transport"
+        );
+    }
+
     async fn assert_kimi_code_streams_mfjs_safe_deferred_dynamic_tool() {
         let tool = deferred_dynamic_request_tool();
         assert_eq!(tool.defer_loading, Some(true));
@@ -3251,6 +3303,16 @@ mod tests {
     #[tokio::test]
     async fn create_message_stream_rejects_invalid_kimi_root_ref_before_transport() {
         assert_kimi_code_invalid_root_ref_fails_before_transport(true).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_request_rejects_untyped_kimi_default_before_transport() {
+        assert_kimi_code_untyped_default_fails_before_transport(false).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_rejects_untyped_kimi_default_before_transport() {
+        assert_kimi_code_untyped_default_fails_before_transport(true).await;
     }
 
     #[tokio::test]

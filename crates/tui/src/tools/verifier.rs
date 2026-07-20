@@ -286,7 +286,6 @@ impl ToolSpec for RunVerifiersTool {
                             "args": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "default": [],
                                 "description": "Arguments passed directly to the executable."
                             },
                             "cwd": {
@@ -297,7 +296,6 @@ impl ToolSpec for RunVerifiersTool {
                         "required": ["name", "program"],
                         "additionalProperties": false
                     },
-                    "default": []
                 },
                 "background": {
                     "type": "boolean",
