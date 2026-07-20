@@ -484,17 +484,19 @@ max_subagents = 10 # optional (1-20)
 # base_url = "https://api.arcee.ai/api/v1"
 # model = "trinity-large-thinking"          # or trinity-large-preview
 
-# Moonshot/Kimi OpenAI-compatible endpoint (https://platform.moonshot.ai)
+# Moonshot/Kimi OpenAI-compatible endpoint (https://platform.kimi.com)
 [providers.moonshot]
 # api_key = "YOUR_MOONSHOT_API_KEY"           # or KIMI_API_KEY
 # base_url = "https://api.moonshot.ai/v1"      # or KIMI_BASE_URL
 # model = "kimi-k3"                         # direct Moonshot K3 wire ID
 # Direct K3 is always-thinking: off -> low, medium -> high, and max remains max.
-# The exact direct route sends top-level reasoning_effort (never thinking.disabled).
+# The exact route sends top-level reasoning_effort, max_completion_tokens, and
+# omits temperature/top_p per https://platform.kimi.com/docs/api/chat.
 # Kimi Code membership path (key: https://www.kimi.com/code/console):
 # api_key = "YOUR_KIMI_CODE_API_KEY"
 # base_url = "https://api.kimi.com/coding/v1"
 # model = "k3"                              # Kimi Code K3 wire ID
+# K3 membership off -> enabled/low; auto leaves the provider default in control.
 # context_window = 1048576                   # only for Allegretto+ plans with 1M access
 # Omit context_window for Codewhale's safe 262144-token K3 baseline.
 # `k3[1m]` is a Claude Code-only convention, not an API model ID; Codewhale rejects it.

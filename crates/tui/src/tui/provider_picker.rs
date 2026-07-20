@@ -3674,7 +3674,7 @@ mod tests {
 
         let rendered = render_text(&picker, 120, 20);
 
-        assert!(rendered.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(rendered.contains("https://platform.kimi.com/console/api-keys"));
         assert!(rendered.contains("paste key here"));
         assert!(!rendered.contains("OAuth"));
         assert!(!rendered.contains("device login"));
@@ -3703,7 +3703,7 @@ mod tests {
         assert!(rendered.contains("https://www.kimi.com/code/console"));
         assert!(rendered.contains("api.kimi.com/coding/v1"));
         assert!(rendered.contains("does not import Kimi CLI credentials"));
-        assert!(!rendered.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(!rendered.contains("https://platform.kimi.com/console/api-keys"));
         assert!(!rendered.contains("OAuth"));
     }
 

@@ -424,10 +424,12 @@ pub struct ProviderCapability {
     pub resolved_model: String,
     /// Context window in tokens (the maximum input the model can accept).
     pub context_window: u32,
-    /// Official maximum output tokens for this combo.
+    /// Known output ceiling for this provider/model metadata path.
     ///
-    /// This is model metadata for diagnostics and CI policy. Normal turns use
-    /// a separate, more conservative request cap in the engine.
+    /// This may be a documented exact-route maximum or a conservative/default
+    /// ceiling when the route does not publish a maximum. It is metadata for
+    /// diagnostics and CI policy; normal turns use a separate, more
+    /// conservative request cap in the engine.
     pub max_output: u32,
     /// Whether the provider+model supports thinking/reasoning mode.
     pub thinking_supported: bool,
@@ -5131,7 +5133,7 @@ impl Config {
                      \"https://api.kimi.com/coding/v1\" and model = \"kimi-for-coding\".",
                     credential_help
                         .credential_url
-                        .unwrap_or("https://platform.kimi.ai/console/api-keys"),
+                        .unwrap_or("https://platform.kimi.com/console/api-keys"),
                     provider.env_vars_label(),
                     provider_config_table_name(provider)?
                 );

@@ -4526,7 +4526,7 @@ mod tests {
             text.contains(crate::config::KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL),
             "{text}"
         );
-        assert!(!text.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(!text.contains("https://platform.kimi.com/console/api-keys"));
     }
 
     #[test]

@@ -270,7 +270,7 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         // (cache storage limited-time free).
         "z-ai/glm-5.2" | "glm-5.2" => Some(usd_only_pricing(0.26, 1.40, 4.40)),
         // Moonshot K2.7 Code cache-read rate per
-        // https://platform.kimi.ai/docs/pricing/chat-k27-code
+        // https://platform.kimi.com/docs/pricing/chat-k27-code
         "moonshotai/kimi-k2.7-code" | "kimi-k2.7-code" => Some(usd_only_pricing(0.19, 0.95, 4.00)),
         // MiniMax-M3 uses the lower standard tier for metadata-only lookups;
         // cost estimation selects the correct tier from total input usage.

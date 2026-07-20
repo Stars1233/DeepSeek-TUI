@@ -11778,11 +11778,11 @@ mod doctor_setup_state_tests {
         let kimi_report = doctor_setup_report_json(&kimi_config, &workspace);
         assert_eq!(
             kimi_report["provider_model"]["auth"]["credential_url"],
-            "https://platform.kimi.ai/console/api-keys"
+            "https://platform.kimi.com/console/api-keys"
         );
         assert_eq!(
             kimi_report["provider_model"]["auth"]["credential_docs_url"],
-            "https://platform.kimi.ai/docs/overview"
+            "https://platform.kimi.com/docs/overview"
         );
         assert_eq!(
             kimi_report["provider_model"]["auth"]["credential_mode"],
@@ -12291,7 +12291,6 @@ mod doctor_endpoint_tests {
             report["context_window_source"],
             "static Kimi Code safe floor"
         );
-        assert_eq!(report["max_output"], 131_072);
         assert_eq!(report["thinking_supported"], true);
     }
 
@@ -12321,12 +12320,11 @@ mod doctor_endpoint_tests {
         );
         assert_eq!(report["context_window"], 1_048_576);
         assert_eq!(report["context_window_source"], "configured");
-        assert_eq!(report["max_output"], 131_072);
         assert_eq!(report["thinking_supported"], true);
     }
 
     #[test]
-    fn provider_capability_report_keeps_direct_moonshot_k3_catalog_facts() {
+    fn provider_capability_report_uses_direct_moonshot_k3_route_facts() {
         let config = Config {
             provider: Some("moonshot".to_string()),
             providers: Some(crate::config::ProvidersConfig {
@@ -12346,7 +12344,7 @@ mod doctor_endpoint_tests {
         assert_eq!(report["resolved_model"], "kimi-k3");
         assert_eq!(report["context_window"], 1_048_576);
         assert_eq!(report["context_window_source"], "catalog");
-        assert_eq!(report["max_output"], 131_072);
+        assert_eq!(report["max_output"], 1_048_576);
         assert_eq!(report["thinking_supported"], true);
     }
 

@@ -309,7 +309,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(body.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(body.contains("https://platform.kimi.com/console/api-keys"));
         assert!(body.contains("paste it below"));
         assert!(body.contains("paste key here if required"));
         assert!(!body.contains("OAuth"));
@@ -332,7 +332,7 @@ mod tests {
         assert!(body.contains("https://www.kimi.com/code/console"));
         assert!(body.contains("api.kimi.com/coding/v1"));
         assert!(body.contains("does not import Kimi CLI credentials"));
-        assert!(!body.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(!body.contains("https://platform.kimi.com/console/api-keys"));
         assert!(!body.contains("OAuth"));
     }
 }

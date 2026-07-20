@@ -15,14 +15,19 @@ pub const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 /// preserving the `k3` wire id.
 pub const KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS: u32 = 262_144;
 /// Kimi K3 context window on the open platform (`kimi-k3` pay-as-you-go).
-/// Verified 2026-07-20 from https://platform.kimi.ai/docs/pricing/chat-k3
-/// (1,048,576 tokens) and models.dev `moonshotai/kimi-k3`. Max output is a
-/// separate fact below and must never be conflated with this window.
+/// Verified 2026-07-20 from https://platform.kimi.com/docs/api/chat
+/// (1,048,576 tokens). Max output is a separate fact below and must never be
+/// conflated with this window.
 pub const KIMI_K3_CONTEXT_WINDOW_TOKENS: u32 = 1_048_576;
-/// Documented K3 default max generation tokens (`max_completion_tokens`
-/// defaults to 131,072 per the Kimi K3 quickstart). Never use this as a
-/// context window.
-pub const KIMI_K3_MAX_OUTPUT_TOKENS: u32 = 131_072;
+/// Conservative K3 default generation ceiling. The direct Kimi API defaults
+/// `max_completion_tokens` to 131,072, while its documented route maximum is
+/// a separate exact-route fact below. Membership and neighboring routes do
+/// not inherit that direct-platform maximum.
+pub const KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS: u32 = 131_072;
+/// Documented maximum output for the exact direct Kimi K3 API route.
+///
+/// Source: https://platform.kimi.com/docs/api/chat (verified 2026-07-20).
+pub const DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
 /// Last-resort compaction trigger when [`context_window_for_model`] returns
 /// `None` (an unrecognised model id). v0.8.11 raised this from `50_000` to
 /// `102_400` (80% of [`LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS`]) so unknown
@@ -315,7 +320,7 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         | "qwen/qwen3.6-27b"
         | "tencent/hy3-preview" => Some(262_144),
         // Official Kimi K3 platform pricing (2026-07-20):
-        // https://platform.kimi.ai/docs/pricing/chat-k3 — 1,048,576 context
+        // https://platform.kimi.com/docs/api/chat — 1,048,576 context
         // for the open platform.
         "moonshotai/kimi-k3" | "kimi-k3" | "opencode-go/kimi-k3" => {
             Some(KIMI_K3_CONTEXT_WINDOW_TOKENS)
@@ -393,11 +398,12 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         }
         "claude-haiku-4-5" => Some(64_000),
         "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" => Some(262_144),
-        // Kimi K3's documented default max generation is 131K, distinct from
-        // its context window. Keep them separate so UI/budget code never
-        // treats max output as the context window.
+        // Keep the generic/model-id lookup at K3's conservative documented
+        // default generation ceiling. The exact direct route's 1M maximum is
+        // applied later with endpoint-aware provenance; membership and
+        // neighboring routes must not inherit it.
         "moonshotai/kimi-k3" | "kimi-k3" | "k3" | "opencode-go/kimi-k3" => {
-            Some(KIMI_K3_MAX_OUTPUT_TOKENS)
+            Some(KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS)
         }
         // Kimi K2.7 Code has a 256K context window but its documented default
         // maximum generation is 32K. Keeping those separate prevents the

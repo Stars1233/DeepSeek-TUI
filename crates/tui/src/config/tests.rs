@@ -7517,7 +7517,7 @@ api_key = "stale-api-key"
     assert!(
         !error
             .to_string()
-            .contains("https://platform.kimi.ai/console/api-keys")
+            .contains("https://platform.kimi.com/console/api-keys")
     );
     assert!(!has_api_key_for(&config, ApiProvider::Moonshot));
     assert_eq!(
@@ -7534,11 +7534,11 @@ fn moonshot_credential_help_keeps_direct_and_kimi_code_routes_distinct() {
         credential_help_for_provider_route(ApiProvider::Moonshot, DEFAULT_MOONSHOT_BASE_URL);
     assert_eq!(
         direct.credential_url,
-        Some("https://platform.kimi.ai/console/api-keys")
+        Some("https://platform.kimi.com/console/api-keys")
     );
     assert_eq!(
         direct.docs_url,
-        Some("https://platform.kimi.ai/docs/overview")
+        Some("https://platform.kimi.com/docs/overview")
     );
 
     let kimi_code =
@@ -7795,7 +7795,7 @@ fn moonshot_kimi_code_missing_key_reports_membership_plan_console() -> Result<()
         message.contains("does not import Kimi CLI credentials"),
         "{message}"
     );
-    assert!(!message.contains("https://platform.kimi.ai/console/api-keys"));
+    assert!(!message.contains("https://platform.kimi.com/console/api-keys"));
     Ok(())
 }
 

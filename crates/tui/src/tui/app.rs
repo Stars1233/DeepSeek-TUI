@@ -358,11 +358,11 @@ impl ReasoningEffort {
     }
 
     /// Resolve an effort against the exact provider route that will receive
-    /// the request. The Kimi Code membership route keeps its documented
-    /// low/high/max mapping. Direct Moonshot K3 is always-thinking, so `off`
-    /// becomes its lowest supported tier and `medium` becomes `high`. Generic
-    /// Moonshot and every other non-Codex route retain the historic high
-    /// coercion. This intentionally does not change
+    /// the request. Both K3 routes are always-thinking, so `off` becomes the
+    /// lowest supported tier. The Kimi Code membership route otherwise keeps
+    /// its low/high/max mapping; direct Moonshot K3 additionally maps `medium`
+    /// to `high`. Generic Moonshot and every other non-Codex route retain the
+    /// historic high coercion. This intentionally does not change
     /// [`Self::normalize_for_provider`], whose generic wire semantics are used
     /// by older callers that do not yet have a route receipt.
     #[must_use]
@@ -374,7 +374,10 @@ impl ReasoningEffort {
     ) -> Self {
         let normalized = self.normalize_for_provider(provider);
         if crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model) {
-            return normalized;
+            return match normalized {
+                Self::Off => Self::Low,
+                other => other,
+            };
         }
         if crate::config::is_exact_direct_moonshot_k3_route(provider, base_url, wire_model) {
             return match normalized {

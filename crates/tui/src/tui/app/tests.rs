@@ -426,6 +426,16 @@ fn reasoning_effort_normalizes_each_exact_k3_route_without_neighbor_leakage() {
     let kimi_base = crate::config::DEFAULT_KIMI_CODE_BASE_URL;
     let moonshot_base = crate::config::DEFAULT_MOONSHOT_BASE_URL;
     assert_eq!(
+        ReasoningEffort::Off.normalize_for_route(ApiProvider::Moonshot, kimi_base, "k3"),
+        ReasoningEffort::Low,
+        "membership K3 stays on K3 by mapping off to its lowest thinking tier"
+    );
+    assert_eq!(
+        ReasoningEffort::Auto.normalize_for_route(ApiProvider::Moonshot, kimi_base, "k3"),
+        ReasoningEffort::Auto,
+        "auto must leave the Kimi Code provider default in control"
+    );
+    assert_eq!(
         ReasoningEffort::Low.normalize_for_route(ApiProvider::Moonshot, kimi_base, "k3"),
         ReasoningEffort::Low
     );

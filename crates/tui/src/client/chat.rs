@@ -68,11 +68,13 @@ use super::{
 fn apply_provider_token_limit(
     body: &mut Value,
     provider: ApiProvider,
+    base_url: &str,
     model: &str,
     max_tokens: u32,
 ) {
     let use_max_completion_tokens = provider == ApiProvider::XiaomiMimo
-        || (provider == ApiProvider::Openai && model_is_openai_reasoning_family(model));
+        || (provider == ApiProvider::Openai && model_is_openai_reasoning_family(model))
+        || is_exact_direct_moonshot_k3_route(provider, base_url, model);
     if !use_max_completion_tokens {
         return;
     }
@@ -158,8 +160,7 @@ fn apply_kimi_code_k3_reasoning_effort(
     };
 
     let thinking = match effort.trim().to_ascii_lowercase().as_str() {
-        "off" | "none" | "disabled" | "false" => json!({ "type": "disabled" }),
-        "low" | "minimum" | "minimal" | "light" => {
+        "off" | "none" | "disabled" | "false" | "low" | "minimum" | "minimal" | "light" => {
             json!({ "type": "enabled", "effort": "low" })
         }
         "medium" | "high" => json!({ "type": "enabled", "effort": "high" }),
@@ -227,6 +228,25 @@ fn apply_route_reasoning_controls(
     apply_openai_reasoning_effort(body, provider, model, effort);
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
+}
+
+/// The direct K3 Chat Completions schema exposes fixed sampling behavior and
+/// omits `temperature` and `top_p`. Strip legacy/generic values only from the
+/// exact first-party route so compatible gateways keep their own contract.
+/// Source: https://platform.kimi.com/docs/api/chat (verified 2026-07-20).
+fn apply_direct_moonshot_k3_fixed_sampling(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) {
+    if !is_exact_direct_moonshot_k3_route(provider, base_url, model) {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("temperature");
+        object.remove("top_p");
+    }
 }
 
 fn openai_compatible_reasoning_effort(
@@ -301,7 +321,13 @@ impl DeepSeekClient {
             "messages": messages,
             "max_tokens": request.max_tokens,
         });
-        apply_provider_token_limit(&mut body, self.api_provider, &model, request.max_tokens);
+        apply_provider_token_limit(
+            &mut body,
+            self.api_provider,
+            &self.base_url,
+            &model,
+            request.max_tokens,
+        );
 
         if let Some(temperature) = request.temperature {
             body["temperature"] = json!(temperature);
@@ -367,6 +393,12 @@ impl DeepSeekClient {
             &self.base_url,
             &model,
             request.reasoning_effort.as_deref(),
+        );
+        apply_direct_moonshot_k3_fixed_sampling(
+            &mut body,
+            self.api_provider,
+            &self.base_url,
+            &model,
         );
         mirror_minimax_reasoning_details_for_body(&mut body, self.api_provider);
 
@@ -455,7 +487,13 @@ impl DeepSeekClient {
                 "include_usage": true
             },
         });
-        apply_provider_token_limit(&mut body, self.api_provider, &model, request.max_tokens);
+        apply_provider_token_limit(
+            &mut body,
+            self.api_provider,
+            &self.base_url,
+            &model,
+            request.max_tokens,
+        );
 
         if let Some(temperature) = request.temperature {
             body["temperature"] = json!(temperature);
@@ -521,6 +559,12 @@ impl DeepSeekClient {
             &self.base_url,
             &model,
             request.reasoning_effort.as_deref(),
+        );
+        apply_direct_moonshot_k3_fixed_sampling(
+            &mut body,
+            self.api_provider,
+            &self.base_url,
+            &model,
         );
 
         // Bulletproof final sanitizer: walk the wire payload and force
@@ -4788,7 +4832,8 @@ mod alias_thinking_detection_tests {
     //! turn. See upstream API docs:
     //! https://api-docs.deepseek.com/guides/thinking_mode
     use super::{
-        ReasoningStreamStyle, apply_inkling_reasoning_effort, apply_kimi_code_k3_reasoning_effort,
+        ReasoningStreamStyle, apply_direct_moonshot_k3_fixed_sampling,
+        apply_inkling_reasoning_effort, apply_kimi_code_k3_reasoning_effort,
         apply_openai_reasoning_effort, apply_provider_token_limit, apply_route_reasoning_controls,
         is_reasoning_model_for_stream, is_reasoning_model_for_stream_on_route,
         provider_accepts_reasoning_content, reasoning_stream_style_for_route,
@@ -4995,7 +5040,13 @@ mod alias_thinking_detection_tests {
             "max_tokens": 8192,
         });
 
-        apply_provider_token_limit(&mut body, ApiProvider::XiaomiMimo, "mimo-v2.5-pro", 8192);
+        apply_provider_token_limit(
+            &mut body,
+            ApiProvider::XiaomiMimo,
+            "https://api.xiaomimimo.com/v1",
+            "mimo-v2.5-pro",
+            8192,
+        );
 
         assert!(body.get("max_tokens").is_none());
         assert_eq!(
@@ -5013,7 +5064,13 @@ mod alias_thinking_detection_tests {
             "max_tokens": 4096,
         });
 
-        apply_provider_token_limit(&mut body, ApiProvider::Openai, "gpt-5.5", 4096);
+        apply_provider_token_limit(
+            &mut body,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            "gpt-5.5",
+            4096,
+        );
         apply_openai_reasoning_effort(&mut body, ApiProvider::Openai, "gpt-5.5", Some("high"));
 
         assert!(body.get("max_tokens").is_none());
@@ -5037,7 +5094,13 @@ mod alias_thinking_detection_tests {
             "max_tokens": 8192,
         });
 
-        apply_provider_token_limit(&mut body, ApiProvider::Openai, "gpt-5.6-sol", 8192);
+        apply_provider_token_limit(
+            &mut body,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            "gpt-5.6-sol",
+            8192,
+        );
         apply_openai_reasoning_effort(&mut body, ApiProvider::Openai, "gpt-5.6-sol", Some("max"));
 
         assert!(body.get("max_tokens").is_none());
@@ -5107,8 +5170,8 @@ mod alias_thinking_detection_tests {
             ("xhigh", json!({ "type": "enabled", "effort": "max" })),
             ("ultra", json!({ "type": "enabled", "effort": "max" })),
             ("max", json!({ "type": "enabled", "effort": "max" })),
-            ("none", json!({ "type": "disabled" })),
-            ("off", json!({ "type": "disabled" })),
+            ("none", json!({ "type": "enabled", "effort": "low" })),
+            ("off", json!({ "type": "enabled", "effort": "low" })),
         ] {
             let mut body = json!({ "reasoning_effort": "stale" });
             apply_kimi_code_k3_reasoning_effort(
@@ -5161,6 +5224,55 @@ mod alias_thinking_detection_tests {
         );
         assert!(provider_default.get("thinking").is_none());
         assert!(provider_default.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn direct_moonshot_k3_uses_modern_token_field_and_fixed_sampling_only_on_exact_route() {
+        let mut direct = json!({
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "top_p": 0.9,
+        });
+        apply_provider_token_limit(
+            &mut direct,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K3_MODEL,
+            64,
+        );
+        apply_direct_moonshot_k3_fixed_sampling(
+            &mut direct,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K3_MODEL,
+        );
+        assert_eq!(direct["max_completion_tokens"], json!(64));
+        assert!(direct.get("max_tokens").is_none());
+        assert!(direct.get("temperature").is_none());
+        assert!(direct.get("top_p").is_none());
+
+        let mut neighbor = json!({
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "top_p": 0.9,
+        });
+        apply_provider_token_limit(
+            &mut neighbor,
+            ApiProvider::Moonshot,
+            "https://proxy.example/v1",
+            crate::config::MOONSHOT_KIMI_K3_MODEL,
+            64,
+        );
+        apply_direct_moonshot_k3_fixed_sampling(
+            &mut neighbor,
+            ApiProvider::Moonshot,
+            "https://proxy.example/v1",
+            crate::config::MOONSHOT_KIMI_K3_MODEL,
+        );
+        assert_eq!(neighbor["max_tokens"], json!(64));
+        assert!(neighbor.get("max_completion_tokens").is_none());
+        assert_eq!(neighbor["temperature"], json!(0.2));
+        assert_eq!(neighbor["top_p"], json!(0.9));
     }
 
     #[test]
@@ -5247,7 +5359,13 @@ mod alias_thinking_detection_tests {
             "max_tokens": 8192,
         });
 
-        apply_provider_token_limit(&mut body, ApiProvider::Meta, "muse-spark-1.1", 8192);
+        apply_provider_token_limit(
+            &mut body,
+            ApiProvider::Meta,
+            "https://api.meta.ai/v1",
+            "muse-spark-1.1",
+            8192,
+        );
         apply_openai_reasoning_effort(&mut body, ApiProvider::Meta, "muse-spark-1.1", Some("max"));
 
         assert_eq!(body["max_tokens"], json!(8192));
@@ -5263,7 +5381,13 @@ mod alias_thinking_detection_tests {
             "max_tokens": 4096,
         });
 
-        apply_provider_token_limit(&mut body, ApiProvider::Openai, "gpt-4o", 4096);
+        apply_provider_token_limit(
+            &mut body,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            "gpt-4o",
+            4096,
+        );
         apply_openai_reasoning_effort(&mut body, ApiProvider::Openai, "gpt-4o", Some("high"));
 
         assert_eq!(
@@ -5282,7 +5406,13 @@ mod alias_thinking_detection_tests {
             "max_tokens": 4096,
         });
 
-        apply_provider_token_limit(&mut body, ApiProvider::Openai, "deepseek-v4-pro", 4096);
+        apply_provider_token_limit(
+            &mut body,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            "deepseek-v4-pro",
+            4096,
+        );
         apply_openai_reasoning_effort(
             &mut body,
             ApiProvider::Openai,

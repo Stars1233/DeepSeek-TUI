@@ -97,6 +97,8 @@ pub enum OverrideSource {
     ProviderReportedContextWindow,
     /// Conservative all-plan safe floor for a membership-plan route.
     MembershipPlanSafeFloor,
+    /// Maximum output documented for one exact provider endpoint/model route.
+    DocumentedRouteOutputMaximum,
 }
 
 /// One sourced limit override, applied by the resolver BEFORE the candidate is

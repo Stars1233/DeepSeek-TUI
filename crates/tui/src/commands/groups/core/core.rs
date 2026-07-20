@@ -1355,8 +1355,8 @@ mod tests {
         assert!(msg.contains("Xiaomi MiMo (xiaomi-mimo)"));
         assert!(msg.contains("https://platform.xiaomimimo.com/token-plan"));
         assert!(msg.contains("Moonshot/Kimi (moonshot)"));
-        assert!(msg.contains("https://platform.kimi.ai/console/api-keys"));
-        assert!(msg.contains("https://platform.kimi.ai/docs/overview"));
+        assert!(msg.contains("https://platform.kimi.com/console/api-keys"));
+        assert!(msg.contains("https://platform.kimi.com/docs/overview"));
         assert!(msg.contains("https://api.kimi.com/coding/v1"));
         assert!(msg.contains("https://www.kimi.com/code/console"));
         assert!(msg.contains("never imports Kimi CLI credentials"));

@@ -2183,7 +2183,7 @@ fn external_credential_target(
             grok_auth_file_path(),
         ),
         ProviderKind::Moonshot => bail!(
-            "Kimi is API-key-only in Codewhale. Create a key at https://platform.kimi.ai/console/api-keys; Kimi CLI OAuth import is unsupported."
+            "Kimi is API-key-only in Codewhale. Create a key at https://platform.kimi.com/console/api-keys; Kimi CLI OAuth import is unsupported."
         ),
         _ => bail!(
             "{} has no supported external CLI credential source",
@@ -7042,7 +7042,7 @@ model = "qwen-2.5-7b"
         assert!(kimi.to_string().contains("API-key-only"));
         assert!(
             kimi.to_string()
-                .contains("https://platform.kimi.ai/console/api-keys")
+                .contains("https://platform.kimi.com/console/api-keys")
         );
         assert!(
             store

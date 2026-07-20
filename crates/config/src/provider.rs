@@ -230,8 +230,8 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
         },
         ProviderKind::Moonshot => CredentialHelp {
             acquisition: ApiKey,
-            credential_url: Some("https://platform.kimi.ai/console/api-keys"),
-            docs_url: Some("https://platform.kimi.ai/docs/overview"),
+            credential_url: Some("https://platform.kimi.com/console/api-keys"),
+            docs_url: Some("https://platform.kimi.com/docs/overview"),
             guidance: "For Moonshot's default direct API route, sign in to Kimi API Platform and create and copy an API key. A configured Kimi Code route uses a separate membership-plan console and never imports Kimi CLI credentials; first-class Kimi OAuth is not available.",
         },
         ProviderKind::Sglang => CredentialHelp {
@@ -1274,11 +1274,11 @@ mod tests {
         assert_eq!(help.acquisition, CredentialAcquisition::ApiKey);
         assert_eq!(
             help.credential_url,
-            Some("https://platform.kimi.ai/console/api-keys")
+            Some("https://platform.kimi.com/console/api-keys")
         );
         assert_eq!(
             help.docs_url,
-            Some("https://platform.kimi.ai/docs/overview")
+            Some("https://platform.kimi.com/docs/overview")
         );
         assert!(help.guidance.contains("create and copy an API key"));
         assert!(help.guidance.contains("OAuth is not available"));
@@ -1292,7 +1292,7 @@ mod tests {
 
         assert_eq!(
             direct.credential_url,
-            Some("https://platform.kimi.ai/console/api-keys")
+            Some("https://platform.kimi.com/console/api-keys")
         );
         assert_eq!(
             kimi_code.credential_url,

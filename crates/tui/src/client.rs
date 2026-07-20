@@ -2731,8 +2731,8 @@ mod tests {
             thinking: None,
             reasoning_effort: Some(effort.to_string()),
             stream: Some(stream),
-            temperature: None,
-            top_p: None,
+            temperature: Some(0.25),
+            top_p: Some(0.75),
         }
     }
 
@@ -2820,25 +2820,41 @@ mod tests {
             .await;
             assert_eq!(body["reasoning_effort"], json!(expected), "{body}");
             assert!(body.get("thinking").is_none(), "{body}");
+            assert_eq!(body["max_completion_tokens"], json!(64), "{body}");
+            assert!(body.get("max_tokens").is_none(), "{body}");
+            assert!(body.get("temperature").is_none(), "{body}");
+            assert!(body.get("top_p").is_none(), "{body}");
             assert_eq!(
                 body.get("stream").and_then(Value::as_bool),
                 streaming.then_some(true)
             );
         }
 
-        let membership = capture_moonshot_chat_request(
-            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            crate::config::KIMI_CODE_K3_MODEL,
-            "max",
-            streaming,
-        )
-        .await;
-        assert_eq!(
-            membership["thinking"],
-            json!({"type": "enabled", "effort": "max"}),
-            "{membership}"
-        );
-        assert!(membership.get("reasoning_effort").is_none(), "{membership}");
+        for (requested, expected) in [
+            ("off", Some(json!({"type": "enabled", "effort": "low"}))),
+            ("auto", None),
+            ("max", Some(json!({"type": "enabled", "effort": "max"}))),
+        ] {
+            let membership = capture_moonshot_chat_request(
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K3_MODEL,
+                requested,
+                streaming,
+            )
+            .await;
+            match expected {
+                Some(thinking) => assert_eq!(membership["thinking"], thinking, "{membership}"),
+                None => assert!(membership.get("thinking").is_none(), "{membership}"),
+            }
+            assert!(membership.get("reasoning_effort").is_none(), "{membership}");
+            assert_eq!(membership["max_tokens"], json!(64), "{membership}");
+            assert!(
+                membership.get("max_completion_tokens").is_none(),
+                "{membership}"
+            );
+            assert_eq!(membership["temperature"], json!(0.25), "{membership}");
+            assert_eq!(membership["top_p"], json!(0.75), "{membership}");
+        }
 
         let neighbor = capture_moonshot_chat_request(
             "https://proxy.example/v1",
@@ -2854,6 +2870,13 @@ mod tests {
         );
         assert!(neighbor.get("reasoning_effort").is_none(), "{neighbor}");
         assert!(neighbor.pointer("/thinking/effort").is_none(), "{neighbor}");
+        assert_eq!(neighbor["max_tokens"], json!(64), "{neighbor}");
+        assert!(
+            neighbor.get("max_completion_tokens").is_none(),
+            "{neighbor}"
+        );
+        assert_eq!(neighbor["temperature"], json!(0.25), "{neighbor}");
+        assert_eq!(neighbor["top_p"], json!(0.75), "{neighbor}");
     }
 
     #[tokio::test]

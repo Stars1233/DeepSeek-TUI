@@ -110,10 +110,11 @@ pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str =
 /// Moonshot's pay-as-you-go `kimi-k3` catalog id.
 pub const KIMI_CODE_K3_MODEL: &str = "k3";
 // The K3 contract constants (`KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS`,
-// `KIMI_K3_CONTEXT_WINDOW_TOKENS`, `KIMI_K3_MAX_OUTPUT_TOKENS`) live in
-// `crate::models` — the model-facts table, which also compiles standalone in
-// integration tests — so the facts have exactly one home. Re-export only the
-// route-owned floor, which existing `crate::config` call sites import.
+// `KIMI_K3_CONTEXT_WINDOW_TOKENS`, and the distinct default/direct output
+// limits) live in `crate::models` — the model-facts table, which also compiles
+// standalone in integration tests — so the facts have exactly one home.
+// Re-export only the route-owned floor, which existing `crate::config` call
+// sites import.
 pub use crate::models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS;
 pub const DEFAULT_SGLANG_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_SGLANG_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";

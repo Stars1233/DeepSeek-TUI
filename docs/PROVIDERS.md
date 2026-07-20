@@ -234,7 +234,7 @@ configuration path instead of guessing a vendor page.
 | `siliconflow` | [SiliconFlow global API keys](https://cloud.siliconflow.com/account/ak) |
 | `siliconflow-CN` | [SiliconFlow China API keys](https://cloud.siliconflow.cn/account/ak) |
 | `arcee` | [Arcee API key guide](https://docs.arcee.ai/other/create-your-first-api-key) |
-| `moonshot` | [Moonshot platform API keys](https://platform.kimi.ai/console/api-keys) or [Kimi Code membership console](https://www.kimi.com/code/console) |
+| `moonshot` | [Kimi API platform keys](https://platform.kimi.com/console/api-keys) or [Kimi Code membership console](https://www.kimi.com/code/console) |
 | `zai` | [Z.ai model API](https://z.ai/model-api) |
 | `stepfun` | [StepFun Open Platform](https://platform.stepfun.ai/) |
 | `minimax`, `minimax-anthropic` | [MiniMax interface keys](https://platform.minimax.io/user-center/basic-information/interface-key) |
@@ -253,7 +253,7 @@ configuration path instead of guessing a vendor page.
 | `xai` | [xAI Console](https://console.x.ai/) for an API key, Codewhale-owned device login, or explicitly consented read-only Grok CLI credentials. |
 | `custom` | Set the named provider's `base_url` and `api_key_env` or `api_key`; no canonical vendor credential page exists. |
 
-For Kimi, the official [quickstart](https://platform.kimi.ai/docs/overview)
+For Kimi, the official [quickstart](https://platform.kimi.com/docs/overview)
 directs users to sign in, open **API Keys**, create and copy a key, and keep it
 secret. Codewhale links straight to that console and accepts the copied key.
 It never probes or impersonates `kimi_cli`/`kimi_code_cli`; first-class Kimi
@@ -316,7 +316,7 @@ Kimi remains API-key-only; external consent for Kimi is rejected.
 | `siliconflow` | `[providers.siliconflow]` | `SILICONFLOW_API_KEY` | `SILICONFLOW_BASE_URL`; default `https://api.siliconflow.com/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | OpenAI-compatible hosted route. Official docs use the `.com` endpoint. `SILICONFLOW_MODEL` is accepted. Reasoning aliases `deepseek-reasoner` and `deepseek-r1` map to Pro; `deepseek-chat` and `deepseek-v3` map to Flash. |
 | `siliconflow-CN` | `[providers.siliconflow_cn]` | `SILICONFLOW_API_KEY` | `SILICONFLOW_BASE_URL`; default `https://api.siliconflow.cn/v1` | Uses the SiliconFlow model set | China regional SiliconFlow route. Falls back to `[providers.siliconflow]` for api_key / base_url / model when unset. Select it with `provider = "siliconflow-CN"` or `CODEWHALE_PROVIDER=siliconflow-CN`. |
 | `arcee` | `[providers.arcee]` | `ARCEE_API_KEY` | `ARCEE_BASE_URL`; default `https://api.arcee.ai/api/v1` | `trinity-large-thinking`, `trinity-large-preview` | Arcee AI direct OpenAI-compatible route, tracked as 256K-context BF16 serving. `ARCEE_MODEL` is accepted. OpenRouter's `arcee-ai/trinity-large-thinking` remains the OpenRouter namespaced model ID; direct Arcee uses the bare `trinity-large-thinking` ID. |
-| `moonshot` | `[providers.moonshot]` | `MOONSHOT_API_KEY`, `KIMI_API_KEY` | `MOONSHOT_BASE_URL`, `KIMI_BASE_URL`; default `https://api.moonshot.ai/v1` | Direct Moonshot: `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`; Kimi Code membership: `k3`, `kimi-for-coding` at `https://api.kimi.com/coding/v1` | Moonshot/Kimi route. `kimi` and `kimi-k2` aliases select `kimi-k2.7-code`; `MOONSHOT_MODEL`, `KIMI_MODEL_NAME`, and `KIMI_MODEL` are accepted. Kimi thinking streams through `reasoning_content`; Codewhale keeps it in Thinking cells and replays it for thinking/tool-call continuity. For direct K3, use exact `base_url = "https://api.moonshot.ai/v1"` and `model = "kimi-k3"`; it is always-thinking and receives top-level `reasoning_effort = "low" | "high" | "max"` (`off` normalizes to `low`). For Kimi Code K3, use a key from the [Kimi Code console](https://www.kimi.com/code/console), exact `base_url = "https://api.kimi.com/coding/v1"`, and bare `model = "k3"`. That membership route defaults safely to 262,144 context tokens; the [Kimi Code model-tier table](https://www.kimi.com/code/docs/en/kimi-code/models.html) grants Allegretto and higher plans up to 1M, which those plans may express as `context_window = 1048576`. `k3[1m]` is Claude Code-only and Codewhale rejects it. `kimi-for-coding` remains the valid K2.7 membership route. Legacy `auth_mode = "kimi_oauth"` fails to API-key guidance without probing Kimi CLI files. Codewhale does not impersonate `kimi_cli` or `kimi_code_cli`. |
+| `moonshot` | `[providers.moonshot]` | `MOONSHOT_API_KEY`, `KIMI_API_KEY` | `MOONSHOT_BASE_URL`, `KIMI_BASE_URL`; default `https://api.moonshot.ai/v1` | Direct Moonshot: `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`; Kimi Code membership: `k3`, `kimi-for-coding` at `https://api.kimi.com/coding/v1` | Moonshot/Kimi route. `kimi` and `kimi-k2` aliases select `kimi-k2.7-code`; `MOONSHOT_MODEL`, `KIMI_MODEL_NAME`, and `KIMI_MODEL` are accepted. Kimi thinking streams through `reasoning_content`; Codewhale keeps it in Thinking cells and replays it for thinking/tool-call continuity. For direct K3, use exact `base_url = "https://api.moonshot.ai/v1"` and `model = "kimi-k3"`; it is always-thinking and receives top-level `reasoning_effort = "low" | "high" | "max"` (`off` normalizes to `low`), uses only `max_completion_tokens`, and omits `temperature`/`top_p` per the [chat API schema](https://platform.kimi.com/docs/api/chat). For Kimi Code K3, use a key from the [Kimi Code console](https://www.kimi.com/code/console), exact `base_url = "https://api.kimi.com/coding/v1"`, and bare `model = "k3"`; `off` becomes enabled `low`, while `auto` leaves the provider default in control. That membership route defaults safely to 262,144 context tokens; the [Kimi Code model-tier table](https://www.kimi.com/code/docs/en/kimi-code/models.html) grants Allegretto and higher plans up to 1M, which those plans may express as `context_window = 1048576`. `k3[1m]` is Claude Code-only and Codewhale rejects it. `kimi-for-coding` remains the valid K2.7 membership route. Legacy `auth_mode = "kimi_oauth"` fails to API-key guidance without probing Kimi CLI files. Codewhale does not impersonate `kimi_cli` or `kimi_code_cli`. |
 | `zai` | `[providers.zai]` | `ZAI_API_KEY`, `Z_AI_API_KEY` | `ZAI_BASE_URL`, `Z_AI_BASE_URL`; default `https://api.z.ai/api/coding/paas/v4`; general API `https://api.z.ai/api/paas/v4` | `GLM-5.2` default; `GLM-5.1`, `GLM-5-Turbo` available | Z.AI GLM Coding Plan route. `GLM-5.2` is the default; set `model = "GLM-5.1"` or `ZAI_MODEL=GLM-5.1` for the smaller model, or `GLM-5-Turbo` for the fast variant used by faster/explore sub-agents. |
 | `stepfun` | `[providers.stepfun]` | `STEPFUN_API_KEY`, `STEP_API_KEY` | `STEPFUN_BASE_URL`, `STEP_BASE_URL`; default `https://api.stepfun.ai/v1`; Coding Plan endpoint `https://api.stepfun.ai/step_plan/v1` | `step-3.7-flash` | StepFun / StepFlash direct OpenAI-compatible route. Set `[providers.stepfun].base_url` or `STEP_BASE_URL` to the Coding Plan URL when using that plan. Offline accounting labels recognized routes as `stepfun-payg` or `stepfun-plan` without persisting the raw endpoint, and only the standard PAYG route receives token pricing. `STEPFUN_MODEL` and `STEP_MODEL` are accepted. |
 | `minimax` | `[providers.minimax]` | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL`; default `https://api.minimax.io/v1`; China `https://api.minimaxi.com/v1` | `MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2` | MiniMax direct OpenAI-compatible route. Codewhale sends `reasoning_split = true` so MiniMax thinking arrives separately from answer text. Official M3 input modalities are text, image, and video; M2.7 is text-only. |
@@ -515,8 +515,8 @@ context-pressure checks, compaction, and output-cap budgeting.
 | Wanjie Ark `reasoner` / `r1` model IDs | 128,000 | 4,096 | yes | no | not documented in code |
 | Direct Arcee API `trinity-large-thinking` | 262,144 | 262,144 | yes | no | not documented in code |
 | Direct Arcee API `trinity-large-preview` | 262,144 | 4,096 | no in doctor capability metadata | no | not documented in code |
-| Direct Moonshot `kimi-k3` | 1,048,576 | 131,072 | yes | no | not documented in code |
-| Kimi Code membership `k3` | 262,144 safe baseline; 1,048,576 with an explicit entitled-plan override | 131,072 | yes | no | exact `https://api.kimi.com/coding/v1` route |
+| Direct Moonshot `kimi-k3` | 1,048,576 | 1,048,576 documented maximum; 131,072 provider default | yes | no | exact route uses `max_completion_tokens` and omits fixed sampling fields ([API reference](https://platform.kimi.com/docs/api/chat)) |
+| Kimi Code membership `k3` | 262,144 safe baseline; 1,048,576 with an explicit entitled-plan override | 131,072 conservative default ceiling; membership maximum is not published | yes | no | exact `https://api.kimi.com/coding/v1` route |
 | Moonshot/Kimi K2.7/K2.6 (`kimi-k2.7-code`, `kimi-k2.6`, Kimi Code `kimi-for-coding`) | 262,144 | 32,768 | yes | no | not documented in code |
 | Direct Z.AI `GLM-5.2` (default) | 1,000,000 | 131,072 | yes | no | not documented in code |
 | Direct Z.AI `GLM-5.1` | 202,752 | 131,072 | yes | no | not documented in code |
@@ -599,10 +599,10 @@ custom endpoints continue to own their model ids.
 
 `/reasoning <effort>` (and the `reasoning_effort` config key) is translated to
 each provider's wire dialect by the client before the request is sent. `off`
-disables thinking where the route supports it. Direct Moonshot K3 is the
-exception: it is always-thinking, so `off` becomes its lowest supported tier,
-`low`. Providers marked "omitted" receive no reasoning fields at all for that
-tier.
+disables thinking where the route supports it. Both exact K3 routes preserve
+K3 by mapping `off` to their lowest supported tier, `low`; `auto` omits the
+route-specific effort so the provider default remains in control. Providers
+marked "omitted" receive no reasoning fields at all for that tier.
 
 | Provider | `off` | `low`/`medium`/`high` | `max`/`xhigh` |
 | --- | --- | --- | --- |
@@ -610,7 +610,7 @@ tier.
 | `openrouter`, `novita`, other `together` models | `thinking: {type: disabled}` | `reasoning_effort` pass-through + `thinking: {type: enabled}` | `reasoning_effort: "xhigh"` + `thinking: {type: enabled}` |
 | `together` + `thinkingmachines/inkling` | `reasoning_effort: "none"` | exact `minimal`/`low`/`medium`/`high` `reasoning_effort` | `reasoning_effort: "max"` |
 | Direct Moonshot `kimi-k3` at exact `https://api.moonshot.ai/v1` | top-level `reasoning_effort: "low"` (effective normalization) | top-level `reasoning_effort: "low"` / `"high"` (`medium` becomes `high`) | top-level `reasoning_effort: "max"` |
-| Kimi Code membership `k3` at exact `https://api.kimi.com/coding/v1` | `thinking: {type: disabled}` | `thinking: {type: enabled, effort: "low" | "high"}` | `thinking: {type: enabled, effort: "max"}` |
+| Kimi Code membership `k3` at exact `https://api.kimi.com/coding/v1` | `thinking: {type: enabled, effort: "low"}` (effective normalization) | `thinking: {type: enabled, effort: "low" | "high"}` | `thinking: {type: enabled, effort: "max"}` |
 | Other `moonshot` routes | `thinking: {type: disabled}` | `thinking: {type: enabled}` | `thinking: {type: enabled}` |
 | `ollama` | `think: false` | `think: true` | `think: true` |
 | `xiaomi-mimo` | `thinking: {type: disabled}` | `thinking: {type: enabled}` | `thinking: {type: enabled}` |
