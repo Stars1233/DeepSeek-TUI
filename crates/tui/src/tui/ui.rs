@@ -51,18 +51,17 @@ use crate::client::{
     inspect_prompt_for_request,
 };
 use crate::commands;
-use crate::compaction::estimate_input_tokens_conservative;
 use crate::compaction::CompactionConfig;
+use crate::compaction::estimate_input_tokens_conservative;
 use crate::config::{
     ApiProvider, Config, ProviderConfig, ProviderIdentity, ProvidersConfig, StatusItem,
     UpdateConfig, persist_external_credential_consent_for_at,
     revoke_external_credential_consent_for_at,
 };
 use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
-use codewhale_config::route::RouteLimits;
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
 use crate::core::events::Event as EngineEvent;
-use crate::core::ops::{Op, ProviderRuntimeStatus, USER_SHELL_TOOL_ID_PREFIX};
+use crate::core::ops::{Op, ProviderRuntimeStatus, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance};
 use crate::hooks::{HookEvent, HookExecutor, TurnEndPayloadInput, TurnEndTotals};
 use crate::llm_client::LlmClient;
 use crate::localization::{MessageId, tr};
@@ -90,6 +89,7 @@ use crate::tui::command_palette::{
 use crate::tui::composer_ui::*;
 use crate::tui::context_inspector::ContextInspectorView;
 use crate::tui::event_broker::EventBroker;
+use crate::tui::file_mention::ContextReference;
 use crate::tui::file_picker_relevance;
 use crate::tui::footer_ui::{
     friendly_subagent_progress, is_noisy_subagent_progress, render_footer,
@@ -141,7 +141,7 @@ use super::key_actions;
 use super::app::{
     ActiveTurnMetadata, App, AppAction, AppMode, HuntVerdict, OnboardingState,
     PendingProviderSwitch, QueuedMessage, ReasoningEffort, SidebarFocus, StatusToastLevel,
-    SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, TuiOptions,
+    SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolEvidence, TuiOptions,
     looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
@@ -1234,6 +1234,13 @@ pub async fn run_tui(
         open_onboarding_provider_picker(&mut app, config, &engine_handle, true).await;
     }
 
+    // #4605: create the dispatch completion channel before any submit path so
+    // initial input and queued follow-ups can dispatch without blocking the
+    // startup sequence.
+    let (dispatch_completion_tx, dispatch_completion_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::tui::app::DispatchApplyFn>();
+    app.dispatch_completion_tx = Some(dispatch_completion_tx);
+
     submit_initial_input_if_ready(&mut app, config, &engine_handle).await?;
 
     crate::startup_trace::log_summary();
@@ -1245,6 +1252,7 @@ pub async fn run_tui(
         task_manager,
         &event_broker,
         translation_client,
+        dispatch_completion_rx,
     )
     .await;
     automation_cancel.cancel();
@@ -2180,7 +2188,7 @@ fn should_fetch_deepseek_balance(app: &App) -> bool {
         )
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn run_event_loop(
     terminal: &mut AppTerminal,
     app: &mut App,
@@ -2189,6 +2197,9 @@ async fn run_event_loop(
     task_manager: SharedTaskManager,
     event_broker: &EventBroker,
     translation_client: Option<Arc<DeepSeekClient>>,
+    mut dispatch_completion_rx: tokio::sync::mpsc::UnboundedReceiver<
+        crate::tui::app::DispatchApplyFn,
+    >,
 ) -> Result<()> {
     // Track streaming state
     let mut current_streaming_text = String::new();
@@ -2260,21 +2271,11 @@ async fn run_event_loop(
 
     let mut pending_subagent_list_refresh = false;
 
-    // #4605: channel for spawned dispatch tasks to report errors back to the
-    // event loop without blocking the render thread on network calls.
-    let (dispatch_error_tx, mut dispatch_error_rx) =
-        tokio::sync::mpsc::unbounded_channel::<String>();
-    app.dispatch_error_tx = Some(dispatch_error_tx);
-
     loop {
-        // Drain dispatch errors from spawned send tasks (#4605).
-        while let Ok(err_msg) = dispatch_error_rx.try_recv() {
-            app.is_loading = false;
-            app.dispatch_started_at = None;
-            app.last_send_at = None;
-            app.pending_turn_route = None;
-            app.status_message = Some(err_msg);
-            app.needs_redraw = true;
+        // Drain dispatch completions from spawned send tasks (#4605). The
+        // closure receives `&mut App` and applies success state or rollback.
+        while let Ok(apply) = dispatch_completion_rx.try_recv() {
+            let _ = apply(app, &engine_handle, &*config);
         }
 
         // Drain the version-check handle once; re-assign None so we
@@ -4080,14 +4081,16 @@ async fn run_event_loop(
         }
 
         if let Some(next) = queued_to_send {
-            if let Err(err) = dispatch_user_message(app, config, &engine_handle, next.clone()).await
-            {
-                app.queue_message(next);
-                app.status_message = Some(format!(
-                    "Dispatch failed ({err}); kept {} queued message(s)",
-                    app.queued_message_count()
-                ));
-            }
+            let _ = dispatch_user_message_with_recovery(
+                app,
+                config,
+                &engine_handle,
+                next,
+                DispatchRecovery::Queued {
+                    restore_index: None,
+                },
+            )
+            .await;
 
             app.needs_redraw = true;
         }
@@ -8099,7 +8102,14 @@ async fn submit_initial_input_if_ready(
             app.status_message = None;
         }
         let queued = build_queued_message(app, input);
-        dispatch_user_message(app, config, engine_handle, queued).await?;
+        dispatch_user_message_with_recovery(
+            app,
+            config,
+            engine_handle,
+            queued,
+            DispatchRecovery::Initial,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -8196,14 +8206,16 @@ async fn send_taken_queued_message_now(
                 Some(1_500),
             );
         }
-    } else if let Err(err) =
-        dispatch_user_message(app, config, engine_handle, message.clone()).await
+    } else if let Err(_err) = dispatch_user_message_with_recovery(
+        app,
+        config,
+        engine_handle,
+        message,
+        DispatchRecovery::Queued { restore_index },
+    )
+    .await
     {
-        restore_queued_message(app, restore_index, message);
-        app.status_message = Some(format!(
-            "Dispatch failed ({err}); kept {} queued follow-up(s)",
-            app.queued_message_count()
-        ));
+        // The completion closure re-queued the message and set the status.
     } else {
         app.status_message = Some(format!("Sent queued follow-up: {display}"));
     }
@@ -8476,11 +8488,108 @@ fn validated_profile_default_route(
         .map_err(anyhow::Error::msg)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DispatchRecovery {
+    /// Normal immediate composer submit: restore the composer on failure.
+    Immediate,
+    /// A queued follow-up pulled from the queue; re-insert at the prior index.
+    Queued { restore_index: Option<usize> },
+    /// Initial `--prompt` / startup input.
+    Initial,
+    /// Plan accept followup.
+    PlanFollowup,
+}
+
+/// Snapshot of App state taken before the sync prepare phase so a failed
+/// dispatch can roll back the optimistic history/api_messages changes.
+#[derive(Debug, Clone)]
+struct UserDispatchSnapshot {
+    is_loading: bool,
+    runtime_turn_status: Option<String>,
+    receipt_text: Option<String>,
+    receipt_started_at: Option<Instant>,
+    tool_evidence: Vec<ToolEvidence>,
+    history_len: usize,
+    history_revisions_len: usize,
+    history_version: u64,
+    next_history_revision: u64,
+    api_messages_len: usize,
+}
+
+/// Data captured synchronously before the async dispatch phase. All values are
+/// Send so the spawned task can resolve routes and send without holding `&mut App`.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone)]
+struct UserDispatchPrepare {
+    message: QueuedMessage,
+    content: String,
+    references: Vec<ContextReference>,
+    paused_dispatch: PausedCommandDispatch,
+    app_route_identity: ProviderIdentity,
+    route_config: Config,
+    goal_objective: Option<String>,
+    goal_status: GoalStatus,
+    goal_token_budget: Option<u32>,
+    mode: AppMode,
+    api_provider: ApiProvider,
+    app_model: String,
+    auto_model: bool,
+    reasoning_effort: ReasoningEffort,
+    allow_shell: bool,
+    trust_mode: bool,
+    auto_approve: bool,
+    approval_mode: ApprovalMode,
+    translation_enabled: bool,
+    show_thinking: bool,
+    allowed_tools: Option<Vec<String>>,
+    hook_executor: Option<Arc<HookExecutor>>,
+    verbosity: Option<String>,
+    provenance: UserInputProvenance,
+    auto_router_context: String,
+    should_auto_resolve: bool,
+    auto_compact_user_configured: bool,
+    auto_compact: bool,
+    auto_compact_threshold_percent: f64,
+    snapshot: UserDispatchSnapshot,
+    message_index: usize,
+    history_cell: usize,
+}
+
+/// Data produced by the async dispatch phase that is needed to apply the
+/// post-acceptance mutations to `App`.
+#[derive(Debug, Clone)]
+struct UserDispatchOutcome {
+    turn_compaction: CompactionConfig,
+    effective_provider: ApiProvider,
+    effective_model: String,
+    effective_provider_identity: String,
+    effective_provider_label: String,
+    selected_reasoning_effort: Option<ReasoningEffort>,
+    auto_selection: Option<crate::model_routing::AutoRouteSelection>,
+}
+
 async fn dispatch_user_message(
     app: &mut App,
     config: &Config,
     engine_handle: &EngineHandle,
+    message: QueuedMessage,
+) -> Result<()> {
+    dispatch_user_message_with_recovery(
+        app,
+        config,
+        engine_handle,
+        message,
+        DispatchRecovery::Immediate,
+    )
+    .await
+}
+
+async fn dispatch_user_message_with_recovery(
+    app: &mut App,
+    config: &Config,
+    engine_handle: &EngineHandle,
     mut message: QueuedMessage,
+    recovery: DispatchRecovery,
 ) -> Result<()> {
     // #1364: run mutable `message_submit` hooks before dispatch. Hooks see the
     // user's display text and may replace or block it before file mentions,
@@ -8530,56 +8639,204 @@ async fn dispatch_user_message(
         content.push_str(note);
     }
     let (app_route_identity, route_config) = app_scoped_runtime_config(app, config);
-    let auto_selection = if auto_router::should_resolve_auto_model_selection(app) {
-        match auto_router::resolve_auto_model_selection(app, &route_config, &message, &content)
-            .await
+
+    let should_auto_resolve = auto_router::should_resolve_auto_model_selection(app);
+    let auto_router_context = auto_router::recent_auto_router_context(&app.api_messages);
+
+    // Capture the App state before any optimistic mutation so a failure can
+    // roll back cleanly.
+    let snapshot = UserDispatchSnapshot {
+        is_loading: app.is_loading,
+        runtime_turn_status: app.runtime_turn_status.clone(),
+        receipt_text: app.receipt_text.clone(),
+        receipt_started_at: app.receipt_started_at,
+        tool_evidence: app.tool_evidence.clone(),
+        history_len: app.history.len(),
+        history_revisions_len: app.history_revisions.len(),
+        history_version: app.history_version,
+        next_history_revision: app.next_history_revision,
+        api_messages_len: app.api_messages.len(),
+    };
+
+    // --- Sync prepare: show the user message and spinner immediately so the
+    // event loop can repaint before network I/O (#4605). The async phase runs
+    // the auto-model route, compaction, and engine send off the render thread.
+    app.is_loading = true;
+    app.runtime_turn_status = None;
+    app.clear_receipt();
+    app.tool_evidence.clear();
+    app.needs_redraw = true;
+
+    let message_index = app.api_messages.len();
+    app.add_message(HistoryCell::User {
+        content: message.display.clone(),
+    });
+    let history_cell = app.history.len().saturating_sub(1);
+    app.scroll_to_bottom();
+    app.api_messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: content.clone(),
+            cache_control: None,
+        }],
+    });
+
+    let goal_objective = paused_dispatch.goal_objective(app);
+
+    let prepare = UserDispatchPrepare {
+        message,
+        content,
+        references,
+        paused_dispatch,
+        app_route_identity,
+        route_config,
+        goal_objective,
+        goal_status: app.hunt.verdict.goal_status(),
+        goal_token_budget: app.hunt.token_budget,
+        mode: app.mode,
+        api_provider: app.api_provider,
+        app_model: app.model.clone(),
+        auto_model: app.auto_model,
+        reasoning_effort: app.reasoning_effort,
+        allow_shell: app.allow_shell,
+        trust_mode: app.trust_mode,
+        auto_approve: app_auto_approve_enabled(app),
+        approval_mode: app.approval_mode,
+        translation_enabled: app.translation_enabled,
+        show_thinking: app.show_thinking,
+        allowed_tools: app.active_allowed_tools.clone(),
+        hook_executor: app.runtime_services.hook_executor.clone(),
+        verbosity: app.verbosity.clone(),
+        provenance: UserInputProvenance::ExternalUser,
+        auto_router_context,
+        should_auto_resolve,
+        auto_compact_user_configured: app.auto_compact_user_configured,
+        auto_compact: app.auto_compact,
+        auto_compact_threshold_percent: app.auto_compact_threshold_percent,
+        snapshot,
+        message_index,
+        history_cell,
+    };
+
+    let completion_tx = match app.dispatch_completion_tx.clone() {
+        Some(tx) => tx,
+        None => {
+            // Tests don't set the completion channel; await the spawned task
+            // inline so the test observes the final App state synchronously.
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::tui::app::DispatchApplyFn>();
+            tokio::spawn(spawned_dispatch_execute(
+                prepare,
+                recovery,
+                engine_handle.clone(),
+                tx,
+            ));
+            let apply = rx
+                .recv()
+                .await
+                .ok_or_else(|| anyhow::Error::msg("dispatch completion channel closed"))?;
+            return apply(app, engine_handle, config);
+        }
+    };
+
+    // #4605: spawn the async phase so the event loop can draw immediately.
+    tokio::spawn(spawned_dispatch_execute(
+        prepare,
+        recovery,
+        engine_handle.clone(),
+        completion_tx,
+    ));
+    Ok(())
+}
+
+async fn spawned_dispatch_execute(
+    prepare: UserDispatchPrepare,
+    recovery: DispatchRecovery,
+    engine_handle: EngineHandle,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<crate::tui::app::DispatchApplyFn>,
+) {
+    let apply = spawned_dispatch_inner(prepare, recovery, engine_handle).await;
+    let _ = completion_tx.send(apply);
+}
+
+async fn spawned_dispatch_inner(
+    prepare: UserDispatchPrepare,
+    recovery: DispatchRecovery,
+    engine_handle: EngineHandle,
+) -> crate::tui::app::DispatchApplyFn {
+    let auto_selection = if prepare.should_auto_resolve {
+        match crate::model_routing::resolve_auto_route_with_inventory_for_session(
+            &prepare.route_config,
+            &prepare.content,
+            &prepare.auto_router_context,
+            prepare.mode.as_setting(),
+            if prepare.auto_model { "auto" } else { "fixed" },
+            prepare
+                .reasoning_effort
+                .as_setting_for_provider(prepare.api_provider),
+        )
+        .await
         {
             Ok(selection) => Some(selection),
             Err(err) => {
-                app.is_loading = false;
-                app.dispatch_started_at = None;
-                app.last_send_at = None;
-                app.status_message = Some(format!("Auto model route unavailable: {err}"));
-                return Err(err);
+                return build_dispatch_error_closure(prepare, recovery, err.to_string());
             }
         }
     } else {
         None
     };
+
     let effective_provider = auto_selection
         .as_ref()
         .map(|selection| selection.provider)
-        .unwrap_or(app.api_provider);
-    let effective_model = if app.auto_model {
+        .unwrap_or(prepare.api_provider);
+
+    let effective_model = if prepare.auto_model {
         auto_selection
             .as_ref()
             .map(|selection| selection.model.clone())
             .unwrap_or_else(|| {
-                crate::model_routing::auto_model_heuristic(&message.display, &app.model)
+                crate::model_routing::auto_model_heuristic(
+                    &prepare.message.display,
+                    &prepare.app_model,
+                )
             })
     } else {
-        app.model.clone()
+        prepare.app_model.clone()
     };
-    // Resolve the exact turn route before mutating loading, transcript, API
-    // messages, receipts, or the persisted checkpoint. Real engines also
-    // construct the concrete client here so a credential/TLS failure cannot
-    // leave a zombie turn. Explicit injected/mock engines own their model-I/O
-    // seam and therefore require structural route validation only.
-    let turn_route = if effective_provider == app_route_identity.provider {
+
+    let turn_route = if effective_provider == prepare.app_route_identity.provider {
         resolve_runtime_route_for_identity(
-            &route_config,
-            &app_route_identity,
+            &prepare.route_config,
+            &prepare.app_route_identity,
             Some(&effective_model),
         )
     } else {
-        resolve_runtime_route(&route_config, effective_provider, Some(&effective_model))
-    }
-    .map_err(anyhow::Error::msg)?;
+        resolve_runtime_route(
+            &prepare.route_config,
+            effective_provider,
+            Some(&effective_model),
+        )
+    };
+
+    let turn_route = match turn_route {
+        Ok(route) => route,
+        Err(err) => {
+            return build_dispatch_error_closure(prepare, recovery, err.to_string());
+        }
+    };
+
     let turn_route = if engine_handle.client_preflight_required() {
-        turn_route.preflight().map_err(anyhow::Error::msg)?
+        match turn_route.preflight() {
+            Ok(route) => route,
+            Err(err) => {
+                return build_dispatch_error_closure(prepare, recovery, err);
+            }
+        }
     } else {
         turn_route
     };
+
     let turn_route_limits = crate::route_budget::known_route_limits(turn_route.candidate.limits());
     let effective_provider_identity = turn_route.identity.key.clone();
     let effective_provider_label = if effective_provider == ApiProvider::Custom {
@@ -8587,31 +8844,44 @@ async fn dispatch_user_message(
     } else {
         effective_provider.display_name().to_string()
     };
-    let turn_compaction = app.compaction_config_for_route(
-        turn_route.identity.provider,
-        &turn_route.model,
-        turn_route_limits,
-    );
-    let goal_objective = paused_dispatch.goal_objective(app);
-    let next_system_prompt =
-        build_app_system_prompt_with_goal(app, config, goal_objective.as_deref());
-    let next_api_message = Message {
-        role: "user".to_string(),
-        content: vec![ContentBlock::Text {
-            text: content.clone(),
-            cache_control: None,
-        }],
+
+    let turn_compaction = CompactionConfig {
+        enabled: if prepare.auto_compact_user_configured {
+            prepare.auto_compact
+        } else {
+            crate::route_budget::auto_compact_default_for_route(
+                turn_route.identity.provider,
+                &turn_route.model,
+                turn_route_limits,
+            )
+        },
+        token_threshold: crate::route_budget::compaction_threshold_for_route_at_percent(
+            turn_route.identity.provider,
+            &turn_route.model,
+            turn_route_limits,
+            prepare.auto_compact_threshold_percent,
+        ),
+        model: turn_route.model.clone(),
+        effective_context_window: Some(crate::route_budget::route_context_window_tokens(
+            turn_route.identity.provider,
+            &turn_route.model,
+            turn_route_limits,
+        )),
+        ..Default::default()
     };
-    let auto_controls_reasoning = app.auto_model || app.reasoning_effort == ReasoningEffort::Auto;
+
+    let auto_controls_reasoning =
+        prepare.auto_model || prepare.reasoning_effort == ReasoningEffort::Auto;
     let selected_reasoning_effort = if auto_controls_reasoning {
         let effort = auto_selection
             .as_ref()
             .and_then(|selection| selection.reasoning_effort)
-            .unwrap_or_else(|| crate::auto_reasoning::select(false, &message.display));
+            .unwrap_or_else(|| crate::auto_reasoning::select(false, &prepare.message.display));
         Some(effort)
     } else {
         None
     };
+
     let effective_reasoning_effort = if let Some(effort) = selected_reasoning_effort {
         effort
             .api_value_for_route(
@@ -8621,7 +8891,8 @@ async fn dispatch_user_message(
             )
             .map(str::to_string)
     } else {
-        app.reasoning_effort
+        prepare
+            .reasoning_effort
             .api_value_for_route(
                 effective_provider,
                 &turn_route.candidate.endpoint().base_url,
@@ -8630,115 +8901,193 @@ async fn dispatch_user_message(
             .map(str::to_string)
     };
 
-    // Enqueue the turn before applying any paused-command transition or
-    // mutating transcript/session state. A closed mailbox therefore leaves
-    // the exact App state, persisted checkpoint, and engine pause gate intact.
-    // SendMessage carries the route-bound compaction policy; the engine adds
-    // the user message and evaluates auto-compaction inside this same op before
-    // the provider request. Never split pre-send compaction into a second
-    // mailbox operation or a receiver-close race can partially dispatch.
-    engine_handle
+    if let Err(err) = engine_handle
         .send(Op::SendMessage {
-            content,
-            mode: app.mode,
+            content: prepare.content.clone(),
+            mode: prepare.mode,
             route: Box::new(turn_route),
             compaction: Box::new(turn_compaction.clone()),
-            goal_objective,
-            goal_token_budget: app.hunt.token_budget,
-            goal_status: app.hunt.verdict.goal_status(),
+            goal_objective: prepare.goal_objective.clone(),
+            goal_token_budget: prepare.goal_token_budget,
+            goal_status: prepare.goal_status,
             reasoning_effort: effective_reasoning_effort,
             reasoning_effort_auto: auto_controls_reasoning,
-            auto_model: app.auto_model,
-            allow_shell: app.allow_shell,
-            trust_mode: app.trust_mode,
-            auto_approve: app_auto_approve_enabled(app),
-            approval_mode: app.approval_mode,
-            translation_enabled: app.translation_enabled,
-            show_thinking: app.show_thinking,
-            allowed_tools: app.active_allowed_tools.clone(),
+            auto_model: prepare.auto_model,
+            allow_shell: prepare.allow_shell,
+            trust_mode: prepare.trust_mode,
+            auto_approve: prepare.auto_approve,
+            approval_mode: prepare.approval_mode,
+            translation_enabled: prepare.translation_enabled,
+            show_thinking: prepare.show_thinking,
+            allowed_tools: prepare.allowed_tools.clone(),
             dynamic_tools: Vec::new(),
-            hook_executor: app.runtime_services.hook_executor.clone(),
-            verbosity: app.verbosity.clone(),
-            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
+            hook_executor: prepare.hook_executor.clone(),
+            verbosity: prepare.verbosity.clone(),
+            provenance: prepare.provenance,
         })
-        .await?;
-
-    paused_dispatch.apply(app, engine_handle);
-
-    // Set only after the operation is accepted so a failed dispatch cannot
-    // claim a turn or alter the retryable user input.
-    let dispatch_started_at = Instant::now();
-    app.is_loading = true;
-    app.dispatch_started_at = Some(dispatch_started_at);
-    app.runtime_turn_status = None;
-    app.last_send_at = Some(dispatch_started_at);
-    app.last_submitted_prompt = Some(message.display.clone());
-    app.clear_receipt();
-    app.tool_evidence.clear();
-
-    let message_index = app.api_messages.len();
-    app.system_prompt = Some(next_system_prompt);
-    app.add_message(HistoryCell::User {
-        content: message.display.clone(),
-    });
-    let history_cell = app.history.len().saturating_sub(1);
-    app.record_context_references(history_cell, message_index, references);
-    app.scroll_to_bottom();
-    app.api_messages.push(next_api_message);
-    maybe_warn_context_pressure_for_config(app, &turn_compaction);
-    app.session.last_prompt_tokens = None;
-    app.session.last_completion_tokens = None;
-    app.session.last_output_throughput = None;
-    app.session.last_prompt_cache_hit_tokens = None;
-    app.session.last_prompt_cache_miss_tokens = None;
-    app.session.last_reasoning_replay_tokens = None;
-    app.last_effective_reasoning_effort = selected_reasoning_effort;
-    if let Some(selection) = auto_selection.as_ref() {
-        if app.auto_model {
-            app.last_effective_model = Some(effective_model.clone());
-            app.last_effective_provider = Some(effective_provider);
-            app.last_effective_provider_identity = Some(effective_provider_identity);
-            app.last_auto_route_receipt = selection.receipt.clone();
-            let status = app
-                .tr(MessageId::AutoRouteSelectedToast)
-                .replace("{provider}", &effective_provider_label)
-                .replace("{model}", &effective_model)
-                .replace("{source}", selection.source.label());
-            app.push_status_toast(status, StatusToastLevel::Info, Some(6_000));
-        }
-    } else {
-        app.last_effective_model = None;
-        app.last_effective_provider = None;
-        app.last_effective_provider_identity = None;
-        app.last_auto_route_receipt = None;
-    }
-    app.pending_auto_route_receipt = auto_selection
-        .as_ref()
-        .and_then(|selection| selection.receipt.clone());
-    app.pending_turn_route = Some((effective_provider, effective_model, app.auto_model));
-
-    // Persist only after the engine accepted the turn and after its concrete
-    // route receipt is installed. A failed mailbox send must not leave a
-    // checkpoint for work that never started, while a crash after acceptance
-    // must not lose the route decision.
-    if let Ok(manager) = SessionManager::default_location()
-        && let Ok(session) = build_session_snapshot(app, &manager)
+        .await
     {
-        // Pin the id so every checkpoint of this session lands in the same
-        // per-session file and the eventual clear targets it.
-        if app.current_session_id.is_none() {
-            app.current_session_id = Some(session.metadata.id.clone());
-        }
-        if let Err(err) =
-            persist_with_pending_work_boundary(app, PersistRequest::SaveCheckpoint { session })
-        {
-            app.status_message = Some(format!(
-                "Work update is pending: turn checkpoint could not be queued ({err})"
-            ));
-        }
+        return build_dispatch_error_closure(prepare, recovery, err.to_string());
     }
 
-    Ok(())
+    build_dispatch_success_closure(
+        prepare,
+        UserDispatchOutcome {
+            turn_compaction,
+            effective_provider,
+            effective_model,
+            effective_provider_identity,
+            effective_provider_label,
+            selected_reasoning_effort,
+            auto_selection,
+        },
+    )
+}
+
+fn build_dispatch_success_closure(
+    prepare: UserDispatchPrepare,
+    outcome: UserDispatchOutcome,
+) -> crate::tui::app::DispatchApplyFn {
+    Box::new(
+        move |app: &mut App, engine_handle: &EngineHandle, config: &Config| -> anyhow::Result<()> {
+            prepare.paused_dispatch.apply(app, engine_handle);
+
+            let dispatch_started_at = Instant::now();
+            app.is_loading = true;
+            app.dispatch_started_at = Some(dispatch_started_at);
+            app.runtime_turn_status = None;
+            app.last_send_at = Some(dispatch_started_at);
+            app.last_submitted_prompt = Some(prepare.message.display.clone());
+            app.clear_receipt();
+            app.tool_evidence.clear();
+
+            app.system_prompt = Some(build_app_system_prompt_with_goal(
+                app,
+                config,
+                app.hunt.quarry.as_deref(),
+            ));
+            // History and api_messages were already appended in the sync prepare
+            // phase; record references now that the turn is accepted.
+            app.record_context_references(
+                prepare.history_cell,
+                prepare.message_index,
+                prepare.references,
+            );
+            app.scroll_to_bottom();
+
+            app.last_effective_reasoning_effort = outcome.selected_reasoning_effort;
+            if prepare.auto_model {
+                app.last_effective_model = Some(outcome.effective_model.clone());
+                app.last_effective_provider = Some(outcome.effective_provider);
+                app.last_effective_provider_identity =
+                    Some(outcome.effective_provider_identity.clone());
+                if let Some(selection) = outcome.auto_selection.as_ref() {
+                    app.last_auto_route_receipt = selection.receipt.clone();
+                    let status = app
+                        .tr(MessageId::AutoRouteSelectedToast)
+                        .replace("{provider}", &outcome.effective_provider_label)
+                        .replace("{model}", &outcome.effective_model)
+                        .replace("{source}", selection.source.label());
+                    app.push_status_toast(status, StatusToastLevel::Info, Some(6_000));
+                }
+            } else {
+                app.last_effective_model = None;
+                app.last_effective_provider = None;
+                app.last_effective_provider_identity = None;
+                app.last_auto_route_receipt = None;
+            }
+            app.pending_auto_route_receipt = outcome
+                .auto_selection
+                .as_ref()
+                .and_then(|selection| selection.receipt.clone());
+            app.pending_turn_route = Some((
+                outcome.effective_provider,
+                outcome.effective_model,
+                prepare.auto_model,
+            ));
+
+            maybe_warn_context_pressure_for_config(app, &outcome.turn_compaction);
+            app.session.last_prompt_tokens = None;
+            app.session.last_completion_tokens = None;
+            app.session.last_output_throughput = None;
+            app.session.last_prompt_cache_hit_tokens = None;
+            app.session.last_prompt_cache_miss_tokens = None;
+            app.session.last_reasoning_replay_tokens = None;
+
+            if let Ok(manager) = SessionManager::default_location()
+                && let Ok(session) = build_session_snapshot(app, &manager)
+            {
+                if app.current_session_id.is_none() {
+                    app.current_session_id = Some(session.metadata.id.clone());
+                }
+                if let Err(err) = persist_with_pending_work_boundary(
+                    app,
+                    PersistRequest::SaveCheckpoint { session },
+                ) {
+                    app.status_message = Some(format!(
+                        "Work update is pending: turn checkpoint could not be queued ({err})"
+                    ));
+                }
+            }
+
+            Ok(())
+        },
+    )
+}
+
+fn build_dispatch_error_closure(
+    prepare: UserDispatchPrepare,
+    recovery: DispatchRecovery,
+    error: String,
+) -> crate::tui::app::DispatchApplyFn {
+    Box::new(
+        move |app: &mut App,
+              _engine_handle: &EngineHandle,
+              _config: &Config|
+              -> anyhow::Result<()> {
+            // Roll back the optimistic sync prepare mutations.
+            app.is_loading = prepare.snapshot.is_loading;
+            app.runtime_turn_status = prepare.snapshot.runtime_turn_status.clone();
+            app.receipt_text = prepare.snapshot.receipt_text.clone();
+            app.receipt_started_at = prepare.snapshot.receipt_started_at;
+            app.tool_evidence = prepare.snapshot.tool_evidence.clone();
+            app.history.truncate(prepare.snapshot.history_len);
+            app.history_revisions
+                .truncate(prepare.snapshot.history_revisions_len);
+            app.history_version = prepare.snapshot.history_version;
+            app.next_history_revision = prepare.snapshot.next_history_revision;
+            app.api_messages.truncate(prepare.snapshot.api_messages_len);
+            app.needs_redraw = true;
+
+            match recovery {
+                DispatchRecovery::Immediate => {
+                    restore_failed_immediate_submit(
+                        app,
+                        prepare.message,
+                        &anyhow::Error::msg(error.clone()),
+                    );
+                }
+                DispatchRecovery::Queued { restore_index } => {
+                    restore_queued_message(app, restore_index, prepare.message);
+                    app.status_message = Some(format!(
+                        "Dispatch failed ({error}); kept {} queued follow-up(s)",
+                        app.queued_message_count()
+                    ));
+                }
+                DispatchRecovery::Initial => {
+                    app.status_message = Some(format!("Initial prompt could not be sent: {error}"));
+                }
+                DispatchRecovery::PlanFollowup => {
+                    app.queue_message(prepare.message);
+                    app.status_message = Some(format!(
+                        "Plan follow-up could not be sent; it has been re-queued: {error}"
+                    ));
+                }
+            }
+
+            Err(anyhow::Error::msg(error))
+        },
+    )
 }
 
 fn goal_status_from_snapshot(snapshot: &GoalSnapshot) -> Option<GoalStatus> {
@@ -11218,11 +11567,7 @@ async fn submit_or_steer_message(
         .unwrap_or(SubmitDisposition::Immediate)
     {
         SubmitDisposition::Immediate => {
-            if let Err(err) =
-                dispatch_user_message(app, config, engine_handle, message.clone()).await
-            {
-                restore_failed_immediate_submit(app, message, &err);
-            }
+            let _ = dispatch_user_message(app, config, engine_handle, message).await;
             Ok(())
         }
         SubmitDisposition::Queue => {
@@ -11387,7 +11732,14 @@ async fn apply_plan_choice(
                 app.queue_message(followup);
                 app.status_message = Some("Queued accepted plan execution (Act mode).".to_string());
             } else {
-                dispatch_user_message(app, config, engine_handle, followup).await?;
+                dispatch_user_message_with_recovery(
+                    app,
+                    config,
+                    engine_handle,
+                    followup,
+                    DispatchRecovery::PlanFollowup,
+                )
+                .await?;
             }
         }
         PlanChoice::AcceptYolo => {
@@ -11403,7 +11755,14 @@ async fn apply_plan_choice(
                 app.status_message =
                     Some("Queued accepted plan execution (Act + Full Access).".to_string());
             } else {
-                dispatch_user_message(app, config, engine_handle, followup).await?;
+                dispatch_user_message_with_recovery(
+                    app,
+                    config,
+                    engine_handle,
+                    followup,
+                    DispatchRecovery::PlanFollowup,
+                )
+                .await?;
             }
         }
         PlanChoice::RevisePlan => {

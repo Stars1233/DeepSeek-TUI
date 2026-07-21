@@ -1842,6 +1842,17 @@ pub(crate) struct PendingProviderSwitch {
     pub previous_api_key_env_only: bool,
 }
 
+/// Opaque completion returned by a spawned dispatch task. It carries the
+/// captured data needed to apply success or rollback on the event loop.
+pub type DispatchApplyFn = Box<
+    dyn FnOnce(
+            &mut App,
+            &crate::core::engine::EngineHandle,
+            &crate::config::Config,
+        ) -> anyhow::Result<()>
+        + Send,
+>;
+
 /// Global UI state for the TUI.
 #[allow(clippy::struct_excessive_bools)]
 pub struct App {
@@ -1877,9 +1888,10 @@ pub struct App {
     pub next_history_revision: u64,
     pub api_messages: Vec<Message>,
     pub is_loading: bool,
-    /// Sender for spawned dispatch tasks to report errors back to the event
-    /// loop without blocking the render thread (#4605).
-    pub dispatch_error_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Sender for spawned dispatch tasks to report completion back to the
+    /// event loop. The closure is called with `&mut App` so the async phase
+    /// never needs `&mut App` while awaiting network I/O (#4605).
+    pub dispatch_completion_tx: Option<tokio::sync::mpsc::UnboundedSender<DispatchApplyFn>>,
     /// Timestamp of the most recent Enter while the engine was busy.
     /// Used by `enter_with_double_tap()` to detect a double-tap within 500 ms.
     pub last_enter_instant: Option<Instant>,
@@ -3296,7 +3308,7 @@ impl App {
             next_history_revision: 1,
             api_messages: Vec::new(),
             is_loading: false,
-            dispatch_error_tx: None,
+            dispatch_completion_tx: None,
             last_enter_instant: None,
             provider_wait_incident_logged: false,
             prompt_suggestion: None,

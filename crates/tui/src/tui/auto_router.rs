@@ -1,48 +1,16 @@
 //! Auto-routing helpers: deciding when to consult the auto-route flash
 //! model, and building the small context window it sees.
 //!
-//! The TUI calls `resolve_auto_model_selection` once per user turn when
-//! `app.auto_model` is set. The async function builds a recent-context
-//! summary from `api_messages` (capped to six rows of up to 900 chars
-//! each), passes it through `model_routing::resolve_auto_route_with_inventory`,
-//! and returns the selection (model + reasoning effort). The remaining
-//! helpers are pure transforms used to build that summary.
+//! `dispatch_user_message` calls `model_routing::resolve_auto_route_with_inventory_for_session`
+//! directly once per user turn when `app.auto_model` is set. The remaining
+//! helpers here build the compact recent-context summary the router sees.
 
-use anyhow::Result;
-
-use crate::config::Config;
-use crate::model_routing;
 use crate::models::{ContentBlock, Message};
-use crate::tui::app::{App, QueuedMessage};
+use crate::tui::app::App;
 
 /// Whether the next turn should consult the auto-route flash model.
 pub(super) fn should_resolve_auto_model_selection(app: &App) -> bool {
     app.auto_model
-}
-
-/// Call the auto-route flash model with the user's draft + a short
-/// recent-context window. Returns the selected model and effort.
-pub(super) async fn resolve_auto_model_selection(
-    app: &App,
-    config: &Config,
-    message: &QueuedMessage,
-    latest_content: &str,
-) -> Result<model_routing::AutoRouteSelection> {
-    let latest_request = if latest_content.trim().is_empty() {
-        message.display.as_str()
-    } else {
-        latest_content
-    };
-    model_routing::resolve_auto_route_with_inventory_for_session(
-        config,
-        latest_request,
-        &recent_auto_router_context(&app.api_messages),
-        app.mode.as_setting(),
-        if app.auto_model { "auto" } else { "fixed" },
-        app.reasoning_effort
-            .as_setting_for_provider(app.api_provider),
-    )
-    .await
 }
 
 /// Build a compact recent-context summary for the auto-route prompt.
