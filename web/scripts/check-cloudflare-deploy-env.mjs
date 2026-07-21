@@ -31,6 +31,7 @@ const required = [
 
 const placeholderPattern = /^(changeme|replace(_with)?|todo|example|dummy|null|undefined)$/i;
 const failures = [];
+const preflight = process.argv.includes("--preflight");
 
 for (const item of required) {
   const value = (process.env[item.name] ?? "").trim();
@@ -51,6 +52,17 @@ for (const item of required) {
 }
 
 if (failures.length > 0) {
+  if (preflight) {
+    console.log(
+      "[check-cloudflare-deploy-env] PREFLIGHT - deploy credentials are intentionally unavailable in this environment.",
+    );
+    console.log(
+      `[check-cloudflare-deploy-env] ${failures.length} credential input(s) must be supplied by the protected manual deploy job.`,
+    );
+    console.log("[check-cloudflare-deploy-env] Wrangler deploy was not started.");
+    process.exit(0);
+  }
+
   console.error("[check-cloudflare-deploy-env] FAIL - Cloudflare deploy configuration is incomplete.");
   for (const failure of failures) {
     const { item, reason } = failure;
