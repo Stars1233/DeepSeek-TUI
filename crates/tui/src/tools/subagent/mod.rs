@@ -6,7 +6,7 @@
 //!
 //! The model-facing creation surface is the `agent` tool. Narrow coordination
 //! tools (`agents/list`, `agents/message`, `agents/followup`,
-//! `agents/interrupt`, `agents/wait`) wrap the same runtime without restoring
+//! `agents/interrupt`, `agents/coordinate`, `agents/wait`) wrap the same runtime without restoring
 //! the retired lifecycle theater. Older manager helpers remain executable for
 //! persisted records and internal recovery.
 
@@ -53,15 +53,21 @@ use crate::work_graph::{
     EvidenceKind, EvidenceRef, OperationIntent, OperationOwnerSnapshot, OwnerState,
     SharedWorkRuntime,
 };
-use crate::worker_profile::{ModelRoute, ShellPolicy, ToolScope, WorkerRuntimeProfile};
+use crate::worker_profile::{
+    ChildLaunchManifest, ModelRoute, ShellPolicy, ToolScope, WorkerRuntimeProfile,
+};
+use coord::{
+    CoordinationLedger, DecisionRecord, DecisionStatus, PersistedWriteClaim, ReconciliationReceipt,
+    WriteScopeClaim,
+};
 
 pub mod coord;
 pub mod mailbox;
 
 #[allow(unused_imports)] // re-exported for hosts / tests; registration uses concrete types
 pub use coord::{
-    AgentsFollowupTool, AgentsInterruptTool, AgentsListTool, AgentsMessageTool, AgentsWaitTool,
-    register_coordination_tools,
+    AgentsCoordinateTool, AgentsFollowupTool, AgentsInterruptTool, AgentsListTool,
+    AgentsMessageTool, AgentsWaitTool, register_coordination_tools,
 };
 #[allow(unused_imports)]
 pub use mailbox::{Mailbox, MailboxEnvelope, MailboxMessage, MailboxReceiver};
@@ -790,6 +796,9 @@ pub struct AgentWorkerSpec {
     pub max_steps: u32,
     pub spawn_depth: u32,
     pub max_spawn_depth: u32,
+    /// #414 launch authority and #4647 write contract, persisted as one record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_manifest: Option<ChildLaunchManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -853,6 +862,10 @@ pub struct AgentCoordSummary {
     pub checkpoint_id: Option<String>,
     #[serde(default)]
     pub continuable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_claim: Option<PersistedWriteClaim>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_decisions: Vec<DecisionRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1365,6 +1378,9 @@ pub(crate) struct SubAgentSpawnOptions {
     pub max_steps: Option<u32>,
     /// Optional per-child wall-clock override, clamped to the runtime ceiling.
     pub wall_time: Option<Duration>,
+    pub write_claim: Option<WriteScopeClaim>,
+    pub isolated_worktree: bool,
+    pub expected_artifact: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1528,6 +1544,11 @@ struct SpawnRequest {
     /// Declared expected artifact. Surfaced to the child in its prompt so the
     /// contract the spawner declared is visible to the agent doing the work.
     expected_artifact: Option<String>,
+    /// Expected shared-workspace mutation boundary. Empty on a write-capable
+    /// launch becomes a conservative whole-workspace claim.
+    write_roots: Vec<String>,
+    exact_files: Vec<String>,
+    coordination_contracts: Vec<String>,
 }
 
 /// Declared child write authority for a (deliberate) spawn.
@@ -1626,6 +1647,8 @@ struct PersistedSubAgentState {
     agents: Vec<PersistedSubAgent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     workers: Vec<AgentWorkerRecord>,
+    #[serde(default)]
+    coordination: CoordinationLedger,
 }
 
 impl Default for PersistedSubAgentState {
@@ -1634,6 +1657,7 @@ impl Default for PersistedSubAgentState {
             schema_version: SUBAGENT_STATE_SCHEMA_VERSION,
             agents: Vec::new(),
             workers: Vec::new(),
+            coordination: CoordinationLedger::default(),
         }
     }
 }
@@ -2445,6 +2469,7 @@ pub struct SubAgentManager {
     agents: HashMap<String, SubAgent>,
     worker_records: HashMap<String, AgentWorkerRecord>,
     worker_event_seq: u64,
+    coordination: CoordinationLedger,
     #[allow(dead_code)] // Stored for future workspace-scoped operations
     workspace: PathBuf,
     state_path: Option<PathBuf>,
@@ -2494,6 +2519,7 @@ impl SubAgentManager {
             agents: HashMap::new(),
             worker_records: HashMap::new(),
             worker_event_seq: 0,
+            coordination: CoordinationLedger::default(),
             workspace,
             state_path: None,
             max_steps: None,
@@ -2547,6 +2573,152 @@ impl SubAgentManager {
     #[cfg(test)]
     pub fn session_boot_id(&self) -> &str {
         &self.current_session_boot_id
+    }
+
+    pub fn record_coordination_decision(
+        &mut self,
+        decision: DecisionRecord,
+    ) -> Result<DecisionRecord, String> {
+        self.coordination.record_decision(decision)
+    }
+
+    pub fn update_coordination_decision(
+        &mut self,
+        decision_id: &str,
+        status: DecisionStatus,
+        owner: &str,
+    ) -> Result<DecisionRecord, String> {
+        self.coordination
+            .update_decision_status(decision_id, status, owner)
+    }
+
+    pub fn reconcile_coordination(
+        &mut self,
+        subject: String,
+        owner: String,
+        input_decisions: Vec<String>,
+        outcome: String,
+        evidence_handles: Vec<String>,
+    ) -> Result<ReconciliationReceipt, String> {
+        self.coordination
+            .reconcile(subject, owner, input_decisions, outcome, evidence_handles)
+    }
+
+    #[must_use]
+    pub fn inspect_coordination(&self, subject: Option<&str>, limit: usize) -> Value {
+        let limit = limit.clamp(1, coord::COORDINATION_RECORD_LIMIT);
+        let matches_subject = |value: &str| subject.is_none_or(|subject| value == subject);
+        let decisions = self
+            .coordination
+            .decisions
+            .iter()
+            .rev()
+            .filter(|decision| matches_subject(&decision.subject))
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let reconciliations = self
+            .coordination
+            .reconciliations
+            .iter()
+            .rev()
+            .filter(|receipt| matches_subject(&receipt.subject))
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let claims = self
+            .coordination
+            .write_claims
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        json!({
+            "sequence": self.coordination.sequence,
+            "decisions": decisions,
+            "write_claims": claims,
+            "reconciliations": reconciliations,
+            "bounded": true,
+            "limit": limit,
+        })
+    }
+
+    pub fn expand_write_claim(
+        &mut self,
+        owner: &str,
+        roots: Vec<String>,
+        exact_files: Vec<String>,
+        contracts: Vec<String>,
+    ) -> Result<PersistedWriteClaim, String> {
+        let Some(existing) = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == owner)
+            .cloned()
+        else {
+            return Err(format!("agent '{owner}' has no write claim to expand"));
+        };
+        let mut claim = existing.claim;
+        for root in roots {
+            let root = normalize_claim_path(&root)?;
+            if !claim.roots.contains(&root) {
+                claim.roots.push(root);
+            }
+        }
+        for file in exact_files {
+            let file = normalize_claim_path(&file)?;
+            if !claim.exact_files.contains(&file) {
+                claim.exact_files.push(file);
+            }
+        }
+        for contract in contracts
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            if !claim.contracts.contains(&contract) {
+                claim.contracts.push(contract);
+            }
+        }
+        let active_owners = self
+            .agents
+            .iter()
+            .filter(|(_, agent)| agent.status == SubAgentStatus::Running)
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.coordination
+            .register_claim(claim, existing.isolated_worktree, |candidate| {
+                active_owners.contains(candidate)
+            })
+    }
+
+    fn validate_write_scope(&self, owner: &str, paths: &[String]) -> Result<(), String> {
+        let Some(claim) = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == owner)
+        else {
+            return Err(format!(
+                "agent '{owner}' has no registered write claim; declare scope at launch before mutation"
+            ));
+        };
+        if let Some(path) = paths.iter().find(|path| !claim.claim.contains_path(path)) {
+            return Err(format!(
+                "write '{path}' is outside agent '{owner}' scope (roots: {:?}, files: {:?}); expand it first with agents/coordinate action=claim",
+                claim.claim.roots, claim.claim.exact_files
+            ));
+        }
+        Ok(())
+    }
+
+    fn shared_write_claim(&self, owner: &str) -> Option<&PersistedWriteClaim> {
+        self.coordination
+            .write_claims
+            .iter()
+            .find(|record| record.claim.owner == owner && !record.isolated_worktree)
     }
 
     /// Classify an agent by its `session_boot_id`: `true` when the
@@ -2651,6 +2823,7 @@ impl SubAgentManager {
             schema_version: SUBAGENT_STATE_SCHEMA_VERSION,
             agents,
             workers: self.sorted_worker_records(),
+            coordination: self.coordination.clone(),
         };
         Ok(Some((path, payload)))
     }
@@ -2786,6 +2959,7 @@ impl SubAgentManager {
 
         self.agents.clear();
         self.worker_records.clear();
+        self.coordination = state.coordination;
         for persisted in state.agents {
             let nickname = persisted
                 .nickname
@@ -3456,6 +3630,23 @@ impl SubAgentManager {
             .map(VecDeque::len)
             .unwrap_or(0);
         let continuable = subagent_checkpoint_is_continuable(&snap);
+        let write_claim = self
+            .coordination
+            .write_claims
+            .iter()
+            .find(|claim| claim.claim.owner == agent_id)
+            .cloned();
+        let accepted_decisions = self
+            .coordination
+            .decisions
+            .iter()
+            .rev()
+            .filter(|decision| {
+                decision.owner == agent_id && decision.status == DecisionStatus::Accepted
+            })
+            .take(recent_limit)
+            .cloned()
+            .collect();
         Ok(AgentCoordSummary {
             agent_id: snap.agent_id.clone(),
             name: snap.name.clone(),
@@ -3469,6 +3660,8 @@ impl SubAgentManager {
             queued_mail,
             checkpoint_id: snap.checkpoint.as_ref().map(|c| c.checkpoint_id.clone()),
             continuable,
+            write_claim,
+            accepted_decisions,
         })
     }
 
@@ -3543,6 +3736,7 @@ impl SubAgentManager {
             max_steps: WorkerRuntimeProfile::default().max_steps,
             spawn_depth: 1,
             max_spawn_depth: 3,
+            launch_manifest: None,
         };
         self.register_worker(spec);
         agent_id
@@ -3786,6 +3980,26 @@ impl SubAgentManager {
             options.model_route.clone(),
         );
         runtime.worker_profile = runtime_profile.clone();
+        let persisted_claim = if runtime_profile.permissions.write {
+            options.write_claim.clone()
+        } else {
+            None
+        }
+        .map(|mut claim| {
+            claim.owner = agent_id.clone();
+            let active_owners = self
+                .agents
+                .iter()
+                .filter(|(_, agent)| agent.status == SubAgentStatus::Running)
+                .map(|(id, _)| id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            self.coordination
+                .register_claim(claim, options.isolated_worktree, |owner| {
+                    active_owners.contains(owner)
+                })
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()?;
         let max_steps = resolve_max_steps(agent_type.clone(), options.max_steps, self.max_steps);
         runtime.worker_profile.max_steps = max_steps;
         let wall_time = options
@@ -3811,10 +4025,37 @@ impl SubAgentManager {
             .to_string(),
             fork_context: options.fork_context,
             tool_profile,
-            runtime_profile,
+            runtime_profile: runtime_profile.clone(),
             max_steps,
             spawn_depth: runtime.spawn_depth,
             max_spawn_depth: runtime.max_spawn_depth,
+            launch_manifest: Some(ChildLaunchManifest {
+                owner_session: runtime
+                    .parent_agent_id
+                    .clone()
+                    .unwrap_or_else(|| "root".to_string()),
+                child_id: agent_id.clone(),
+                profile: runtime_profile,
+                prompt: prompt.clone(),
+                cwd: Some(agent.workspace.display().to_string()),
+                worktree: options.isolated_worktree,
+                writable_roots: persisted_claim
+                    .as_ref()
+                    .map(|record| record.claim.roots.clone())
+                    .unwrap_or_default(),
+                writable_files: persisted_claim
+                    .as_ref()
+                    .map(|record| record.claim.exact_files.clone())
+                    .unwrap_or_default(),
+                coordination_contracts: persisted_claim
+                    .as_ref()
+                    .map(|record| record.claim.contracts.clone())
+                    .unwrap_or_default(),
+                expected_artifact: options.expected_artifact.clone(),
+                token_budget: options.token_budget,
+                resume_identity: Some(agent.session_name.clone()),
+                generation: 1,
+            }),
         };
         agent.work_lifecycle =
             SubAgentWorkLifecycle::register(&runtime, &agent_id, &assignment.objective)?;
@@ -5088,6 +5329,21 @@ impl ToolSpec for AgentTool {
                     "enum": ["read_only", "workspace_write", "worktree_write"],
                     "description": "Write authority for the child — enforced. read_only removes write permission from the child's runtime profile (and its descendants); worktree_write requires worktree isolation."
                 },
+                "write_roots": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Expected repo-relative directory trees this child may mutate. Shared write-capable children claim these before launch; scope expansion must use agents/coordinate before mutation."
+                },
+                "exact_files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Expected repo-relative individual files this child may mutate."
+                },
+                "coordination_contracts": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Named shared contracts or schemas this child owns while active; equal names contend even when file paths differ."
+                },
                 "deliberate": {
                     "type": "boolean",
                     "description": "When true, require type (or profile), workspace_policy, expected_artifact, and write_authority."
@@ -5744,6 +6000,31 @@ async fn spawn_subagent_from_input(
         }
         None => effective_prompt,
     };
+    let write_capable = spawn_request.write_authority != Some(SpawnWriteAuthority::ReadOnly)
+        && matches!(
+            spawn_request.agent_type,
+            SubAgentType::General | SubAgentType::Implementer | SubAgentType::Custom
+        );
+    let write_claim = write_capable.then(|| WriteScopeClaim {
+        owner: String::new(),
+        roots: if spawn_request.write_roots.is_empty()
+            && spawn_request.exact_files.is_empty()
+            && spawn_request.coordination_contracts.is_empty()
+        {
+            vec![".".to_string()]
+        } else {
+            spawn_request.write_roots.clone()
+        },
+        exact_files: spawn_request.exact_files.clone(),
+        contracts: spawn_request.coordination_contracts.clone(),
+    });
+    let effective_prompt = match write_claim.as_ref() {
+        Some(claim) => format!(
+            "{effective_prompt}\n\nWrite scope (enforced): roots={:?}; exact_files={:?}; contracts={:?}. Expand it with agents/coordinate action=claim before mutating anything outside this scope.",
+            claim.roots, claim.exact_files, claim.contracts
+        ),
+        None => effective_prompt,
+    };
 
     // #4193 seam 2 (cont.): strength/inherit/faster routing and the final
     // provider-namespace guard both read the provider from the runtime's client,
@@ -5822,6 +6103,9 @@ async fn spawn_subagent_from_input(
                 token_budget: spawn_request.token_budget,
                 max_steps: spawn_request.max_steps,
                 wall_time: spawn_request.wall_time,
+                write_claim,
+                isolated_worktree: spawn_request.worktree.is_some(),
+                expected_artifact: spawn_request.expected_artifact.clone(),
             },
         )
         .map_err(|e| ToolError::execution_failed(format!("Failed to spawn sub-agent: {e}")))?;
@@ -8252,6 +8536,9 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
              (workspace_policy 'worktree' or worktree=true).",
         ));
     }
+    let write_roots = parse_coordination_paths(input, "write_roots")?;
+    let exact_files = parse_coordination_paths(input, "exact_files")?;
+    let coordination_contracts = parse_bounded_strings(input, "coordination_contracts", 16)?;
 
     Ok(SpawnRequest {
         session_name,
@@ -8277,7 +8564,73 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         inherit_disallowed_tools,
         write_authority,
         expected_artifact,
+        write_roots,
+        exact_files,
+        coordination_contracts,
     })
+}
+
+fn parse_bounded_strings(input: &Value, key: &str, limit: usize) -> Result<Vec<String>, ToolError> {
+    let Some(value) = input.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(ToolError::invalid_input(format!(
+            "{key} must be an array of strings"
+        )));
+    };
+    if items.len() > limit {
+        return Err(ToolError::invalid_input(format!(
+            "{key} accepts at most {limit} entries"
+        )));
+    }
+    let mut result = Vec::new();
+    for item in items {
+        let Some(text) = item.as_str() else {
+            return Err(ToolError::invalid_input(format!(
+                "{key} must contain only strings"
+            )));
+        };
+        let text = text.trim();
+        if text.chars().count() > 512 {
+            return Err(ToolError::invalid_input(format!(
+                "{key} entries must be at most 512 characters"
+            )));
+        }
+        if !text.is_empty() && !result.iter().any(|existing| existing == text) {
+            result.push(text.to_string());
+        }
+    }
+    Ok(result)
+}
+
+fn parse_coordination_paths(input: &Value, key: &str) -> Result<Vec<String>, ToolError> {
+    parse_bounded_strings(input, key, 32)?
+        .into_iter()
+        .map(|path| normalize_claim_path(&path).map_err(ToolError::invalid_input))
+        .collect()
+}
+
+fn normalize_claim_path(path: &str) -> Result<String, String> {
+    let path = path.replace('\\', "/");
+    let trimmed = path.trim().trim_start_matches("./").trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "." {
+        return Ok(".".to_string());
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "write scope path must be repo-relative without traversal: {path}"
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 fn validate_session_name(name: &str) -> Result<String, ToolError> {
@@ -9590,6 +9943,10 @@ struct SubAgentToolRegistry {
     can_spawn_child: bool,
     owner_agent_id: String,
     owner_agent_name: String,
+    coordination_manager: SharedSubAgentManager,
+    /// Disabled only by the legacy unit-test constructor, which has no
+    /// admitted worker identity. Production registries always enforce claims.
+    enforce_write_claim: bool,
     registry: ToolRegistry,
 }
 
@@ -9602,7 +9959,7 @@ impl SubAgentToolRegistry {
         todo_list: SharedTodoList,
         plan_state: SharedPlanState,
     ) -> Self {
-        Self::new_with_owner(
+        let mut registry = Self::new_with_owner(
             runtime,
             agent_type,
             "agent_unknown".to_string(),
@@ -9610,7 +9967,9 @@ impl SubAgentToolRegistry {
             explicit_allowed_tools,
             todo_list,
             plan_state,
-        )
+        );
+        registry.enforce_write_claim = false;
+        registry
     }
 
     fn new_with_owner(
@@ -9629,6 +9988,7 @@ impl SubAgentToolRegistry {
         // retained only when depth budget remains.
         let can_spawn_child = !runtime.would_exceed_depth();
         let context = runtime.context.clone();
+        let coordination_manager = Arc::clone(&runtime.manager);
         let mut surface_options = runtime.agent_tool_surface_options.clone();
         surface_options.shell_policy = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
         let mut registry = ToolRegistryBuilder::new().with_full_agent_surface_options(
@@ -9664,6 +10024,8 @@ impl SubAgentToolRegistry {
             can_spawn_child,
             owner_agent_id,
             owner_agent_name,
+            coordination_manager,
+            enforce_write_claim: true,
             registry,
         }
     }
@@ -9841,6 +10203,35 @@ impl SubAgentToolRegistry {
             }
         }
         reject_subagent_terminal_takeover(name, &input)?;
+        let scope_aware_write = matches!(
+            name,
+            "write_file" | "edit_file" | "apply_patch" | "fim_edit"
+        ) || (name == "pandoc_convert"
+            && input.get("output_path").is_some());
+        if scope_aware_write && self.enforce_write_claim {
+            let paths = mutation_paths(name, &input)?;
+            if paths.is_empty() {
+                return Err(anyhow!(
+                    "Write tool {name} did not expose a bounded repo-relative target for coordination"
+                ));
+            }
+            let manager = self.coordination_manager.read().await;
+            manager
+                .validate_write_scope(&self.owner_agent_id, &paths)
+                .map_err(anyhow::Error::msg)?;
+        } else if self.enforce_write_claim
+            && (name == "exec_shell"
+                || self.registry.get(name).is_some_and(|spec| {
+                    spec.approval_requirement_for(&input) == ApprovalRequirement::Suggest
+                }))
+        {
+            let manager = self.coordination_manager.read().await;
+            if manager.shared_write_claim(&self.owner_agent_id).is_some() {
+                return Err(anyhow!(
+                    "Tool {name} cannot prove a bounded file target for this shared-workspace write claim. Use scope-aware file tools, or launch the child with worktree isolation."
+                ));
+            }
+        }
         let context = self
             .registry
             .context()
@@ -9852,6 +10243,26 @@ impl SubAgentToolRegistry {
             .map(|result| result.content)
             .map_err(|e| anyhow!(e))
     }
+}
+
+fn mutation_paths(name: &str, input: &Value) -> Result<Vec<String>> {
+    let raw_paths = if name == "apply_patch" {
+        crate::tools::apply_patch::preflight_apply_patch(input)
+            .map_err(|err| anyhow!(err.to_string()))?
+            .touched_files
+    } else if let Some(path) = input
+        .get("path")
+        .or_else(|| input.get("output_path"))
+        .and_then(Value::as_str)
+    {
+        vec![path.to_string()]
+    } else {
+        Vec::new()
+    };
+    raw_paths
+        .into_iter()
+        .map(|path| normalize_claim_path(&path).map_err(anyhow::Error::msg))
+        .collect()
 }
 
 fn reject_subagent_terminal_takeover(name: &str, input: &Value) -> Result<()> {

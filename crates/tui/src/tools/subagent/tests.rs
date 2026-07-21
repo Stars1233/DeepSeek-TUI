@@ -192,6 +192,7 @@ fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
         max_steps: 8,
         spawn_depth: 1,
         max_spawn_depth: DEFAULT_MAX_SPAWN_DEPTH,
+        launch_manifest: None,
     }
 }
 
@@ -552,6 +553,56 @@ fn headless_worker_records_persist_with_subagent_state() {
             .iter()
             .any(|event| event.status == AgentWorkerStatus::Failed)
     );
+}
+
+#[test]
+fn coordination_ledger_persists_and_replays_bounded_contracts() {
+    let tmp = tempdir().expect("tempdir");
+    let state_path = tmp.path().join("subagents.v1.json");
+    let mut manager =
+        SubAgentManager::new(tmp.path().to_path_buf(), 4).with_state_path(state_path.clone());
+    manager
+        .coordination
+        .register_claim(
+            WriteScopeClaim {
+                owner: "agent_writer".into(),
+                roots: vec!["src".into()],
+                exact_files: vec!["Cargo.toml".into()],
+                contracts: vec!["public-api".into()],
+            },
+            false,
+            |_| false,
+        )
+        .expect("claim");
+    manager
+        .record_coordination_decision(DecisionRecord {
+            decision_id: "decision_storage".into(),
+            subject: "storage".into(),
+            status: DecisionStatus::Accepted,
+            owner: "agent_writer".into(),
+            scope: vec!["router".into()],
+            constraints: vec!["bounded".into()],
+            evidence_handles: vec!["test:coordination".into()],
+            version: 1,
+            sequence: 0,
+        })
+        .expect("decision");
+    manager.persist_state().unwrap().join().unwrap();
+
+    let mut loaded = SubAgentManager::new(tmp.path().to_path_buf(), 4).with_state_path(state_path);
+    loaded.load_state().expect("reload coordination");
+    assert!(
+        loaded
+            .validate_write_scope("agent_writer", &["src/lib.rs".into()])
+            .is_ok()
+    );
+    let err = loaded
+        .validate_write_scope("agent_writer", &["docs/readme.md".into()])
+        .unwrap_err();
+    assert!(err.contains("outside") && err.contains("expand"), "{err}");
+    let inspect = loaded.inspect_coordination(Some("storage"), 4);
+    assert_eq!(inspect["decisions"][0]["decision_id"], "decision_storage");
+    assert_eq!(inspect["write_claims"][0]["claim"]["owner"], "agent_writer");
 }
 
 fn init_subagent_git_repo() -> tempfile::TempDir {
@@ -1199,6 +1250,32 @@ fn declared_write_authority_parses_and_worktree_write_requires_isolation() {
     }))
     .expect("worktree_write with isolation parses");
     assert_eq!(ok.write_authority, Some(SpawnWriteAuthority::WorktreeWrite));
+}
+
+#[test]
+fn declared_write_scope_is_normalized_and_rejects_traversal() {
+    let request = parse_spawn_request(&json!({
+        "prompt": "edit bounded files",
+        "write_authority": "workspace_write",
+        "write_roots": ["./crates/tui/src/", "docs"],
+        "exact_files": ["Cargo.toml"],
+        "coordination_contracts": ["public-api"]
+    }))
+    .expect("bounded scope parses");
+    assert_eq!(request.write_roots, vec!["crates/tui/src", "docs"]);
+    assert_eq!(request.exact_files, vec!["Cargo.toml"]);
+    assert_eq!(request.coordination_contracts, vec!["public-api"]);
+
+    let err = parse_spawn_request(&json!({
+        "prompt": "escape",
+        "write_roots": ["../outside"]
+    }))
+    .expect_err("traversal must fail")
+    .to_string();
+    assert!(
+        err.contains("repo-relative") || err.contains("traversal"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -3860,6 +3937,76 @@ async fn spawn_duplicate_session_name_error_names_conflicting_agent() {
 }
 
 #[tokio::test]
+async fn shared_write_claim_is_registered_before_parallel_launch_and_manifested() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    let options = SubAgentSpawnOptions {
+        name: Some("writer-a".into()),
+        write_claim: Some(WriteScopeClaim {
+            owner: String::new(),
+            roots: vec!["src".into()],
+            exact_files: vec![],
+            contracts: vec!["public-api".into()],
+        }),
+        expected_artifact: Some("tested patch".into()),
+        ..Default::default()
+    };
+    let (first_id, contention) = {
+        let mut guard = manager.write().await;
+        let first = guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                runtime.clone(),
+                SubAgentType::Implementer,
+                "edit src".into(),
+                make_assignment(),
+                Some(vec![]),
+                options,
+            )
+            .expect("first writer admitted");
+        let second = guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                runtime,
+                SubAgentType::Implementer,
+                "edit same contract".into(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    name: Some("writer-b".into()),
+                    write_claim: Some(WriteScopeClaim {
+                        owner: String::new(),
+                        roots: vec!["docs".into()],
+                        exact_files: vec![],
+                        contracts: vec!["public-api".into()],
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect_err("overlapping live contract must contend");
+        (first.agent_id, second.to_string())
+    };
+    assert!(
+        contention.contains("contention") && contention.contains(&first_id),
+        "{contention}"
+    );
+    let guard = manager.read().await;
+    let record = guard.get_worker_record(&first_id).expect("worker record");
+    let manifest = record
+        .spec
+        .launch_manifest
+        .as_ref()
+        .expect("launch manifest");
+    assert_eq!(manifest.child_id, first_id);
+    assert_eq!(manifest.writable_roots, vec!["src"]);
+    assert_eq!(manifest.coordination_contracts, vec!["public-api"]);
+    assert_eq!(manifest.expected_artifact.as_deref(), Some("tested patch"));
+}
+
+#[tokio::test]
 async fn test_running_count_counts_only_agents_with_live_task_handles() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1);
     let (input_tx, _input_rx) = mpsc::unbounded_channel();
@@ -5594,6 +5741,79 @@ fn subagent_registry_with_mcp_action(auto_approve: bool) -> SubAgentToolRegistry
             MCP_ACTION_TOOL,
         ));
     registry
+}
+
+#[tokio::test]
+async fn child_write_tool_fails_closed_outside_registered_scope() {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+    {
+        let mut guard = manager.write().await;
+        guard
+            .coordination
+            .register_claim(
+                WriteScopeClaim {
+                    owner: "agent_scoped".into(),
+                    roots: vec!["src".into()],
+                    exact_files: vec![],
+                    contracts: vec![],
+                },
+                false,
+                |_| false,
+            )
+            .unwrap();
+    }
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    runtime.context.auto_approve = true;
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Implementer);
+    let registry = SubAgentToolRegistry::new_with_owner(
+        runtime,
+        SubAgentType::Implementer,
+        "agent_scoped".into(),
+        "implementer".into(),
+        Some(vec!["write_file".into(), "exec_shell".into()]),
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+    registry
+        .execute(
+            "agent_scoped",
+            "write_file",
+            json!({"path": "src/ok.txt", "content": "ok"}),
+        )
+        .await
+        .expect("in-scope write");
+    let err = registry
+        .execute(
+            "agent_scoped",
+            "write_file",
+            json!({"path": "docs/no.txt", "content": "no"}),
+        )
+        .await
+        .expect_err("out-of-scope write must fail")
+        .to_string();
+    assert!(
+        err.contains("outside") && err.contains("agents/coordinate"),
+        "{err}"
+    );
+    assert!(!tmp.path().join("docs/no.txt").exists());
+    let shell_err = registry
+        .execute(
+            "agent_scoped",
+            "exec_shell",
+            json!({"command": "touch docs/shell.txt"}),
+        )
+        .await
+        .expect_err("unbounded shared-workspace shell must fail")
+        .to_string();
+    assert!(
+        shell_err.contains("cannot prove a bounded file target"),
+        "{shell_err}"
+    );
+    assert!(!tmp.path().join("docs/shell.txt").exists());
 }
 
 #[tokio::test]

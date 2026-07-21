@@ -108,6 +108,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
             .unwrap_or(u32::MAX),
         spawn_depth: 0,
         max_spawn_depth: runtime_profile.max_spawn_depth,
+        launch_manifest: None,
     })
 }
 
@@ -2496,6 +2497,7 @@ mod tests {
             max_steps: 1000,
             spawn_depth: 0,
             max_spawn_depth: 0,
+            launch_manifest: None,
         };
         let exec = codewhale_config::FleetExecConfig {
             max_turns: 50,
@@ -2525,6 +2527,7 @@ mod tests {
             max_steps: 1000,
             spawn_depth: 0,
             max_spawn_depth: 0,
+            launch_manifest: None,
         };
 
         let exec = codewhale_config::FleetExecConfig {
@@ -2630,6 +2633,7 @@ mod tests {
             max_steps: 100,
             spawn_depth: 0,
             max_spawn_depth: 0,
+            launch_manifest: None,
         };
         let exec = codewhale_config::FleetExecConfig {
             append_system_prompt: "never push to main".to_string(),

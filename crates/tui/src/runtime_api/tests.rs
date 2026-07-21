@@ -1681,6 +1681,7 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
             max_steps: 8,
             spawn_depth: 0,
             max_spawn_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
+            launch_manifest: None,
         });
     }
     let Some((addr, _runtime_threads, handle)) =
@@ -1884,6 +1885,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             max_steps: 4,
             spawn_depth: 1,
             max_spawn_depth: crate::tools::subagent::DEFAULT_MAX_SPAWN_DEPTH,
+            launch_manifest: None,
         },
         actor_kind: "subagent".to_string(),
         parent_run_id: Some("parent_run".to_string()),

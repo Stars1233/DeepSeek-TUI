@@ -365,7 +365,7 @@ impl Default for WorkerRuntimeProfile {
 /// Everything needed to provision, launch, and resume a child — prompt, role,
 /// model, tools, permissions, workspace boundary, budget, and identity — comes
 /// from this single persisted record. No field is derived ad-hoc at launch time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChildLaunchManifest {
     pub owner_session: String,
     pub child_id: String,
@@ -374,6 +374,12 @@ pub struct ChildLaunchManifest {
     pub cwd: Option<String>,
     pub worktree: bool,
     pub writable_roots: Vec<String>,
+    #[serde(default)]
+    pub writable_files: Vec<String>,
+    #[serde(default)]
+    pub coordination_contracts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_artifact: Option<String>,
     pub token_budget: Option<u64>,
     pub resume_identity: Option<String>,
     #[serde(default)]

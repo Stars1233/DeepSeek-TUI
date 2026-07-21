@@ -26,6 +26,8 @@ const COORD_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
 const COORD_WAIT_MAX_TIMEOUT_SECS: u64 = 1800;
 const COORD_WAIT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const RECENT_PROGRESS_LIMIT: usize = 8;
+pub(super) const COORDINATION_RECORD_LIMIT: usize = 128;
+const COORDINATION_INSPECT_LIMIT: usize = 24;
 
 // ── agents/list ──────────────────────────────────────────────────────────
 
@@ -639,7 +641,7 @@ async fn wait_for_activity(
     }
 }
 
-/// Register the five coordination tools alongside `agent`.
+/// Register the narrow coordination tools alongside `agent`.
 pub fn register_coordination_tools(
     builder: ToolRegistryBuilder,
     manager: SharedSubAgentManager,
@@ -656,11 +658,14 @@ pub fn register_coordination_tools(
         Some(caller) => AgentsInterruptTool::new(Arc::clone(&manager)).with_caller(caller),
         None => AgentsInterruptTool::new(Arc::clone(&manager)),
     };
+    let coordinate =
+        AgentsCoordinateTool::new(Arc::clone(&manager), runtime.parent_agent_id.clone());
     builder
         .with_tool(Arc::new(AgentsListTool::new(Arc::clone(&manager))))
         .with_tool(Arc::new(AgentsMessageTool::new(Arc::clone(&manager))))
         .with_tool(Arc::new(AgentsFollowupTool::new(Arc::clone(&manager))))
         .with_tool(Arc::new(interrupt))
+        .with_tool(Arc::new(coordinate))
         .with_tool(Arc::new(AgentsWaitTool::new(manager)))
 }
 
@@ -849,7 +854,7 @@ pub enum DecisionStatus {
 ///
 /// Persisted with stable subject, concise constraints, one active owner,
 /// applicability scope, evidence handles, and sequence/version.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecisionRecord {
     pub decision_id: String,
     pub subject: String,
@@ -866,7 +871,7 @@ pub struct DecisionRecord {
 ///
 /// Declares expected repo-relative paths/trees and named contracts.
 /// This is coordination metadata, not another approval system.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WriteScopeClaim {
     pub owner: String,
     pub roots: Vec<String>,
@@ -881,17 +886,405 @@ impl WriteScopeClaim {
     pub fn overlaps(&self, other: &WriteScopeClaim) -> bool {
         for root_a in &self.roots {
             for root_b in &other.roots {
-                if root_a.starts_with(root_b.as_str()) || root_b.starts_with(root_a.as_str()) {
+                if path_contains(root_a, root_b) || path_contains(root_b, root_a) {
                     return true;
                 }
             }
         }
         for file_a in &self.exact_files {
-            if other.exact_files.iter().any(|f| f == file_a) {
+            if other.exact_files.iter().any(|f| f == file_a)
+                || other.roots.iter().any(|root| path_contains(root, file_a))
+            {
                 return true;
             }
         }
+        for file_b in &other.exact_files {
+            if self.roots.iter().any(|root| path_contains(root, file_b)) {
+                return true;
+            }
+        }
+        if self
+            .contracts
+            .iter()
+            .any(|contract| other.contracts.iter().any(|other| other == contract))
+        {
+            return true;
+        }
         false
+    }
+
+    #[must_use]
+    pub fn contains_path(&self, path: &str) -> bool {
+        self.exact_files.iter().any(|file| file == path)
+            || self.roots.iter().any(|root| path_contains(root, path))
+    }
+}
+
+fn path_contains(root: &str, candidate: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    let candidate = candidate.trim_end_matches('/');
+    root == "."
+        || root == candidate
+        || candidate
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedWriteClaim {
+    pub claim: WriteScopeClaim,
+    pub sequence: u64,
+    #[serde(default)]
+    pub isolated_worktree: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconciliationReceipt {
+    pub reconciliation_id: String,
+    pub subject: String,
+    pub owner: String,
+    pub input_decisions: Vec<String>,
+    pub outcome: String,
+    pub evidence_handles: Vec<String>,
+    pub sequence: u64,
+}
+
+/// Durable, bounded coordination state owned by `SubAgentManager`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CoordinationLedger {
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub decisions: Vec<DecisionRecord>,
+    #[serde(default)]
+    pub write_claims: Vec<PersistedWriteClaim>,
+    #[serde(default)]
+    pub reconciliations: Vec<ReconciliationReceipt>,
+}
+
+impl CoordinationLedger {
+    fn next_sequence(&mut self) -> u64 {
+        self.sequence = self.sequence.saturating_add(1);
+        self.sequence
+    }
+
+    pub fn record_decision(
+        &mut self,
+        mut decision: DecisionRecord,
+    ) -> Result<DecisionRecord, String> {
+        if decision.subject.trim().is_empty() || decision.owner.trim().is_empty() {
+            return Err("decision subject and owner are required".to_string());
+        }
+        decision.sequence = self.next_sequence();
+        decision.version = decision.version.max(1);
+        if decision.decision_id.trim().is_empty() {
+            decision.decision_id = format!("decision_{}", decision.sequence);
+        }
+        if decision.status == DecisionStatus::Accepted {
+            for existing in self.decisions.iter_mut().filter(|existing| {
+                existing.subject == decision.subject && existing.status == DecisionStatus::Accepted
+            }) {
+                existing.status = DecisionStatus::Superseded;
+            }
+        }
+        self.decisions.push(decision.clone());
+        trim_front(&mut self.decisions, COORDINATION_RECORD_LIMIT);
+        Ok(decision)
+    }
+
+    pub fn update_decision_status(
+        &mut self,
+        decision_id: &str,
+        status: DecisionStatus,
+        _owner: &str,
+    ) -> Result<DecisionRecord, String> {
+        let Some(index) = self
+            .decisions
+            .iter()
+            .position(|decision| decision.decision_id == decision_id)
+        else {
+            return Err(format!("decision '{decision_id}' not found"));
+        };
+        let subject = self.decisions[index].subject.clone();
+        if status == DecisionStatus::Accepted {
+            for (other_index, existing) in self.decisions.iter_mut().enumerate() {
+                if other_index != index
+                    && existing.subject == subject
+                    && existing.status == DecisionStatus::Accepted
+                {
+                    existing.status = DecisionStatus::Superseded;
+                }
+            }
+        }
+        let sequence = self.next_sequence();
+        let decision = &mut self.decisions[index];
+        decision.status = status;
+        decision.version = decision.version.saturating_add(1);
+        decision.sequence = sequence;
+        Ok(decision.clone())
+    }
+
+    pub fn register_claim<F>(
+        &mut self,
+        claim: WriteScopeClaim,
+        isolated_worktree: bool,
+        mut owner_is_active: F,
+    ) -> Result<PersistedWriteClaim, String>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        if claim.owner.trim().is_empty()
+            || (claim.roots.is_empty()
+                && claim.exact_files.is_empty()
+                && claim.contracts.is_empty())
+        {
+            return Err(
+                "write claim requires an owner and at least one root, file, or contract"
+                    .to_string(),
+            );
+        }
+        if !isolated_worktree {
+            if let Some(existing) = self.write_claims.iter().find(|existing| {
+                !existing.isolated_worktree
+                    && existing.claim.owner != claim.owner
+                    && owner_is_active(&existing.claim.owner)
+                    && existing.claim.overlaps(&claim)
+            }) {
+                return Err(format!(
+                    "write-scope contention with {} (roots: {:?}, files: {:?}, contracts: {:?}); serialize the work, narrow the claim, or use worktree isolation",
+                    existing.claim.owner,
+                    existing.claim.roots,
+                    existing.claim.exact_files,
+                    existing.claim.contracts
+                ));
+            }
+        }
+        self.write_claims
+            .retain(|existing| existing.claim.owner != claim.owner);
+        let record = PersistedWriteClaim {
+            claim,
+            sequence: self.next_sequence(),
+            isolated_worktree,
+        };
+        self.write_claims.push(record.clone());
+        trim_front(&mut self.write_claims, COORDINATION_RECORD_LIMIT);
+        Ok(record)
+    }
+
+    pub fn reconcile(
+        &mut self,
+        subject: String,
+        owner: String,
+        input_decisions: Vec<String>,
+        outcome: String,
+        evidence_handles: Vec<String>,
+    ) -> Result<ReconciliationReceipt, String> {
+        if owner.trim().is_empty() || subject.trim().is_empty() || outcome.trim().is_empty() {
+            return Err("reconciliation owner, subject, and outcome are required".to_string());
+        }
+        if input_decisions.len() < 2 {
+            return Err("neutral fan-in requires at least two input decisions".to_string());
+        }
+        if input_decisions.iter().any(|id| {
+            !self
+                .decisions
+                .iter()
+                .any(|decision| &decision.decision_id == id)
+        }) {
+            return Err("reconciliation references an unknown decision".to_string());
+        }
+        let inputs = input_decisions
+            .iter()
+            .filter_map(|id| {
+                self.decisions
+                    .iter()
+                    .find(|decision| &decision.decision_id == id)
+            })
+            .collect::<Vec<_>>();
+        if inputs.iter().any(|decision| decision.subject != subject) {
+            return Err("reconciliation inputs must share the requested subject".to_string());
+        }
+        if inputs.iter().any(|decision| decision.owner == owner) {
+            return Err(
+                "neutral fan-in owner must differ from every input decision owner".to_string(),
+            );
+        }
+        let sequence = self.next_sequence();
+        let receipt = ReconciliationReceipt {
+            reconciliation_id: format!("reconcile_{sequence}"),
+            subject,
+            owner,
+            input_decisions,
+            outcome,
+            evidence_handles,
+            sequence,
+        };
+        self.reconciliations.push(receipt.clone());
+        trim_front(&mut self.reconciliations, COORDINATION_RECORD_LIMIT);
+        Ok(receipt)
+    }
+}
+
+fn trim_front<T>(records: &mut Vec<T>, limit: usize) {
+    if records.len() > limit {
+        records.drain(..records.len() - limit);
+    }
+}
+
+pub struct AgentsCoordinateTool {
+    manager: SharedSubAgentManager,
+    caller: Option<String>,
+}
+
+impl AgentsCoordinateTool {
+    #[must_use]
+    pub fn new(manager: SharedSubAgentManager, caller: Option<String>) -> Self {
+        Self { manager, caller }
+    }
+}
+
+#[async_trait]
+impl ToolSpec for AgentsCoordinateTool {
+    fn name(&self) -> &'static str {
+        "agents/coordinate"
+    }
+
+    fn description(&self) -> &'static str {
+        "Record or inspect bounded coordination state: propose/accept/supersede decisions, expand the caller's write claim before mutation, or reconcile multiple decision records into one neutral fan-in receipt."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["inspect", "propose", "accept", "supersede", "claim", "reconcile"] },
+                "decision_id": { "type": "string" },
+                "subject": { "type": "string" },
+                "owner": { "type": "string" },
+                "scope": { "type": "array", "items": { "type": "string" } },
+                "constraints": { "type": "array", "items": { "type": "string" } },
+                "evidence_handles": { "type": "array", "items": { "type": "string" } },
+                "roots": { "type": "array", "items": { "type": "string" } },
+                "exact_files": { "type": "array", "items": { "type": "string" } },
+                "contracts": { "type": "array", "items": { "type": "string" } },
+                "input_decisions": { "type": "array", "items": { "type": "string" } },
+                "outcome": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 24 }
+            },
+            "required": ["action"]
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+    fn approval_requirement(&self) -> ApprovalRequirement {
+        ApprovalRequirement::Auto
+    }
+    fn is_read_only_for(&self, input: &Value) -> bool {
+        input.get("action").and_then(Value::as_str) == Some("inspect")
+    }
+
+    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let action = input
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("inspect");
+        let bounded_text = |key: &str| {
+            input
+                .get(key)
+                .and_then(Value::as_str)
+                .map(|value| value.chars().take(512).collect::<String>())
+        };
+        let owner = self
+            .caller
+            .clone()
+            .or_else(|| bounded_text("owner"))
+            .unwrap_or_else(|| "root".to_string());
+        let strings = |key: &str| {
+            input
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(24)
+                        .filter_map(Value::as_str)
+                        .map(|value| value.chars().take(512).collect::<String>())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let mut manager = self.manager.write().await;
+        let value = match action {
+            "inspect" => manager.inspect_coordination(
+                bounded_text("subject").as_deref(),
+                input
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(COORDINATION_INSPECT_LIMIT as u64) as usize,
+            ),
+            "propose" => serde_json::to_value(
+                manager
+                    .record_coordination_decision(DecisionRecord {
+                        decision_id: bounded_text("decision_id").unwrap_or_default(),
+                        subject: bounded_text("subject").unwrap_or_default(),
+                        status: DecisionStatus::Proposed,
+                        owner,
+                        scope: strings("scope"),
+                        constraints: strings("constraints"),
+                        evidence_handles: strings("evidence_handles"),
+                        version: 1,
+                        sequence: 0,
+                    })
+                    .map_err(ToolError::invalid_input)?,
+            )
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?,
+            "accept" | "supersede" => serde_json::to_value(
+                manager
+                    .update_coordination_decision(
+                        &bounded_text("decision_id").unwrap_or_default(),
+                        if action == "accept" {
+                            DecisionStatus::Accepted
+                        } else {
+                            DecisionStatus::Superseded
+                        },
+                        &owner,
+                    )
+                    .map_err(ToolError::invalid_input)?,
+            )
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?,
+            "claim" => serde_json::to_value(
+                manager
+                    .expand_write_claim(
+                        &owner,
+                        strings("roots"),
+                        strings("exact_files"),
+                        strings("contracts"),
+                    )
+                    .map_err(ToolError::invalid_input)?,
+            )
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?,
+            "reconcile" => serde_json::to_value(
+                manager
+                    .reconcile_coordination(
+                        bounded_text("subject").unwrap_or_default(),
+                        owner,
+                        strings("input_decisions"),
+                        bounded_text("outcome").unwrap_or_default(),
+                        strings("evidence_handles"),
+                    )
+                    .map_err(ToolError::invalid_input)?,
+            )
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?,
+            other => {
+                return Err(ToolError::invalid_input(format!(
+                    "unknown coordination action '{other}'"
+                )));
+            }
+        };
+        manager.persist_state_best_effort();
+        ToolResult::json(&value).map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 }
 
@@ -948,5 +1341,96 @@ mod records_tests {
             contracts: vec![],
         };
         assert!(a.overlaps(&b));
+    }
+
+    #[test]
+    fn path_overlap_respects_component_boundaries_and_root_coverage() {
+        let root = WriteScopeClaim {
+            owner: "agent-a".into(),
+            roots: vec!["src".into()],
+            exact_files: vec![],
+            contracts: vec![],
+        };
+        let sibling = WriteScopeClaim {
+            owner: "agent-b".into(),
+            roots: vec!["src2".into()],
+            exact_files: vec![],
+            contracts: vec![],
+        };
+        let child_file = WriteScopeClaim {
+            owner: "agent-c".into(),
+            roots: vec![],
+            exact_files: vec!["src/lib.rs".into()],
+            contracts: vec![],
+        };
+        assert!(!root.overlaps(&sibling));
+        assert!(root.overlaps(&child_file));
+    }
+
+    #[test]
+    fn active_shared_claims_contend_but_isolated_claims_do_not() {
+        let mut ledger = CoordinationLedger::default();
+        let first = WriteScopeClaim {
+            owner: "agent-a".into(),
+            roots: vec!["src".into()],
+            exact_files: vec![],
+            contracts: vec!["public-api".into()],
+        };
+        ledger.register_claim(first, false, |_| false).unwrap();
+        let second = WriteScopeClaim {
+            owner: "agent-b".into(),
+            roots: vec!["docs".into()],
+            exact_files: vec![],
+            contracts: vec!["public-api".into()],
+        };
+        let err = ledger
+            .register_claim(second.clone(), false, |owner| owner == "agent-a")
+            .unwrap_err();
+        assert!(
+            err.contains("contention") && err.contains("agent-a"),
+            "{err}"
+        );
+        assert!(
+            ledger
+                .register_claim(second, true, |owner| owner == "agent-a")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn accepted_decision_supersedes_prior_acceptance_and_reconciles() {
+        let mut ledger = CoordinationLedger::default();
+        let make = |id: &str, owner: &str, status| DecisionRecord {
+            decision_id: id.into(),
+            subject: "storage".into(),
+            status,
+            owner: owner.into(),
+            scope: vec!["router".into()],
+            constraints: vec![],
+            evidence_handles: vec![format!("receipt:{id}")],
+            version: 1,
+            sequence: 0,
+        };
+        ledger
+            .record_decision(make("a", "agent-a", DecisionStatus::Accepted))
+            .unwrap();
+        ledger
+            .record_decision(make("b", "agent-b", DecisionStatus::Proposed))
+            .unwrap();
+        ledger
+            .update_decision_status("b", DecisionStatus::Accepted, "root")
+            .unwrap();
+        assert_eq!(ledger.decisions[0].status, DecisionStatus::Superseded);
+        let receipt = ledger
+            .reconcile(
+                "storage".into(),
+                "root".into(),
+                vec!["a".into(), "b".into()],
+                "use bounded origin-session artifacts".into(),
+                vec!["test:coord".into()],
+            )
+            .unwrap();
+        assert_eq!(receipt.input_decisions.len(), 2);
+        assert!(receipt.sequence > ledger.decisions[1].sequence);
     }
 }
