@@ -9814,6 +9814,10 @@ async fn switch_provider(
     let _ = engine_handle.send(Op::Shutdown).await;
     let engine_config = build_engine_config(app, config);
     *engine_handle = spawn_engine(engine_config, config);
+    // A successful in-session switch must refresh the same key-scoped live
+    // catalog as startup. TelecomJS is currently the only provider using this
+    // seam; failures preserve the existing/static rows.
+    crate::client::DeepSeekClient::spawn_active_provider_catalog_refresh(config);
 
     if !app.api_messages.is_empty() {
         let _ = engine_handle
@@ -14656,6 +14660,7 @@ fn mirror_saved_api_key_in_config(config: &mut Config, provider: ApiProvider, ap
         ApiProvider::OpencodeGo => &mut providers.opencode_go,
         ApiProvider::Meta => &mut providers.meta,
         ApiProvider::Xai => &mut providers.xai,
+        ApiProvider::Telecomjs => &mut providers.telecomjs,
     };
     if pin_kimi_code_base_url {
         entry.base_url = Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string());

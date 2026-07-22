@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.9.1] - Unreleased candidate
 
 The Codewhale v0.9.1 source candidate includes a first-class local web client over the Runtime API,
-first-class OpenCode Go and restored xAI device login on the provider surface,
+first-class OpenCode Go and TelecomJS TokenHub providers and restored xAI device login,
 calendar-correct hourly automations, a buildable OpenHarmony workflow-js
 target, and hardening for Auto routing, remote-terminal clipboard transport,
 restart recovery, and the community site's content boundaries.
@@ -34,6 +34,13 @@ restart recovery, and the community site's content boundaries.
   of this narrow route until Codewhale supports per-model wire selection
   (#1481 by @seanthefuturegorilla; implementation harvested from PR #773 by
   @zhangweiii and PR #1050 by @sternelee).
+- Add TelecomJS TokenHub as a first-class Chat Completions provider with
+  `[providers.telecomjs]`, `TELECOMJS_API_KEY`, and a key-scoped live
+  `/v1/models` refresh. Models.dev and provider-specific catalogs remain in
+  separate source partitions so either refresh order preserves both; refreshes
+  do not delete the other source's rows, matching model ids from unrelated
+  providers do not fabricate metadata, and chat requests omit unsupported
+  reasoning fields (PR #4370 by @baendlorel; harvested with co-authorship).
 - Prepare native Windows ARM64 `codewhale`, `codew`, and `codewhale-tui`
   binaries, npm selection, updater support, and standard/portable release
   archives. Build and smoke them on GitHub's native Windows 11 ARM runner,

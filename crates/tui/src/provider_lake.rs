@@ -1,16 +1,17 @@
 //! Configured provider/model lake facade (#3830, Wave 5b / #4188).
 //!
 //! Single seam over the Models.dev catalog layers and the configured-provider
-//! predicate shared with `/provider`. Precedence is **live Models.dev >
-//! bundled offline snapshot > legacy hardcoded fallback**. Pickers, hotbar
-//! route slots, [`crate::model_inventory::ModelInventory`], slash completions,
-//! and subagent validation should read model lists from here.
+//! predicate shared with `/provider`. Precedence is **provider-scoped live >
+//! live Models.dev > bundled offline snapshot > legacy hardcoded fallback**.
+//! Pickers, hotbar route slots, [`crate::model_inventory::ModelInventory`],
+//! slash completions, and subagent validation should read model lists from here.
 //!
 //! [`crate::config::model_completion_names_for_provider`] is retained only as a
 //! compatibility fallback for CodeWhale-only / local providers that Models.dev
 //! does not represent (and for unbundled gateways until the live catalog covers
 //! them).
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -24,13 +25,87 @@ use crate::config::{
 
 static BUNDLED_SNAPSHOT: std::sync::OnceLock<CatalogSnapshot> = std::sync::OnceLock::new();
 
-/// Optional live Models.dev snapshot (#4187). When `None`, only the bundled
-/// offline/stale fallback rows are visible.
-static LIVE_SNAPSHOT: RwLock<Option<CatalogSnapshot>> = RwLock::new(None);
+/// Source tag for live-catalog rows. Models.dev is a cross-provider catalog
+/// that serves as the primary live layer; per-provider refreshes (e.g.
+/// TelecomJS `/v1/models`) are a secondary layer that must coexist alongside
+/// Models.dev rows without being wiped by a Models.dev refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LiveSource {
+    /// The cross-provider Models.dev catalog refresh.
+    ModelsDev,
+    /// A per-provider `/v1/models` catalog refresh (e.g. TelecomJS TokenHub).
+    PerProvider,
+}
+
+/// Optional live catalog snapshot(s), source-scoped (#4188 race fix).
+///
+/// Models.dev and every provider fetch maintain distinct partitions of live
+/// rows. A Models.dev refresh replaces only Models.dev-sourced rows; a
+/// per-provider merge adds/replaces only that provider's rows. This prevents a
+/// later Models.dev `set_live_snapshot` from erasing TelecomJS rows and keeps
+/// independent provider refreshes from erasing each other.
+static LIVE_SNAPSHOT: RwLock<LiveSnapshotPartitions> = RwLock::new(LiveSnapshotPartitions {
+    models_dev: None,
+    per_provider: BTreeMap::new(),
+});
+
+/// Internal partition map: one Models.dev snapshot plus one snapshot per
+/// provider-specific live fetch.
+#[derive(Default)]
+struct LiveSnapshotPartitions {
+    models_dev: Option<CatalogSnapshot>,
+    per_provider: BTreeMap<String, CatalogSnapshot>,
+}
+
+impl LiveSnapshotPartitions {
+    /// Collect all live rows from every partition into a single flat snapshot.
+    fn flattened(&self) -> Option<CatalogSnapshot> {
+        if self.models_dev.is_none() && self.per_provider.is_empty() {
+            return None;
+        }
+
+        // Merge by (provider, wire_model_id); provider-scoped rows win on
+        // collision because they came from that gateway's own live endpoint.
+        let mut merged: BTreeMap<(String, String), CatalogOffering> = BTreeMap::new();
+        if let Some(models_dev) = &self.models_dev {
+            for row in &models_dev.offerings {
+                merged.insert(
+                    (row.provider.clone(), row.wire_model_id.clone()),
+                    row.clone(),
+                );
+            }
+        }
+        for provider_snapshot in self.per_provider.values() {
+            for row in &provider_snapshot.offerings {
+                merged.insert(
+                    (row.provider.clone(), row.wire_model_id.clone()),
+                    row.clone(),
+                );
+            }
+        }
+        Some(CatalogSnapshot {
+            offerings: merged.into_values().collect(),
+        })
+    }
+}
+
+fn offerings_by_provider(
+    offerings: Vec<CatalogOffering>,
+) -> BTreeMap<String, Vec<CatalogOffering>> {
+    let mut grouped = BTreeMap::new();
+    for offering in offerings {
+        grouped
+            .entry(offering.provider.trim().to_ascii_lowercase())
+            .or_insert_with(Vec::new)
+            .push(offering);
+    }
+    grouped
+}
 
 /// Generation stamp for the live snapshot. Bumped (under the `LIVE_SNAPSHOT`
-/// write lock) by [`set_live_snapshot`] / [`clear_live_snapshot`] so the
-/// memoized merged snapshot below can detect staleness without re-merging.
+/// write lock) by [`set_live_snapshot`], [`merge_live_offerings`], and
+/// [`clear_live_snapshot`] so the memoized merged snapshot below can detect
+/// staleness without re-merging.
 static LIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Memoized result of [`merged_snapshot`], tagged with the `LIVE_GENERATION`
@@ -68,34 +143,94 @@ fn apply_provider_model_cutlines(mut snapshot: CatalogSnapshot) -> CatalogSnapsh
     snapshot
 }
 
-/// Set the live-catalog snapshot. Call this after a background refresh
-/// succeeds; the lake merges live rows over bundled rows on the next read.
-/// Stale or empty snapshots are harmless — a `None` just means "bundled only."
-pub fn set_live_snapshot(snapshot: CatalogSnapshot) {
+/// Set the live-catalog snapshot for a given source (#4188 race fix).
+///
+/// Source-scoped: a Models.dev refresh replaces only Models.dev-sourced rows;
+/// a per-provider refresh replaces only the layers for providers represented
+/// in that snapshot. Other providers and sources are preserved. This
+/// eliminates the race where a Models.dev `set_live_snapshot` would erase
+/// TelecomJS rows merged earlier.
+pub fn set_live_snapshot(snapshot: CatalogSnapshot, source: LiveSource) {
     if let Ok(mut guard) = LIVE_SNAPSHOT.write() {
-        *guard = Some(apply_provider_model_cutlines(snapshot));
+        let snapshot = apply_provider_model_cutlines(snapshot);
+        let changed = match source {
+            LiveSource::ModelsDev => {
+                guard.models_dev = Some(snapshot);
+                true
+            }
+            LiveSource::PerProvider => {
+                let grouped = offerings_by_provider(snapshot.offerings);
+                let changed = !grouped.is_empty();
+                for (provider, offerings) in grouped {
+                    guard
+                        .per_provider
+                        .insert(provider, CatalogSnapshot { offerings });
+                }
+                changed
+            }
+        };
         // Invalidate the memoized merged snapshot while still holding the
         // write lock so no reader can cache the old merge against the new
         // generation.
+        if changed {
+            LIVE_GENERATION.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Clear all live snapshots (both Models.dev and per-provider partitions).
+/// Used by tests and shutdown paths that need a full reset.
+#[allow(dead_code)]
+pub fn clear_live_snapshot() {
+    if let Ok(mut guard) = LIVE_SNAPSHOT.write() {
+        guard.models_dev = None;
+        guard.per_provider.clear();
         LIVE_GENERATION.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-/// Clear the live snapshot (e.g. on cache eviction or shutdown).
-pub fn clear_live_snapshot() {
+/// Merge additional live offerings into provider-scoped live partitions (#4188).
+///
+/// Unlike [`set_live_snapshot`] for `LiveSource::PerProvider` (which replaces
+/// each represented provider's partition), this merges new rows by
+/// `(provider, wire_model_id)` identity within that provider's partition,
+/// preserving every other provider and the Models.dev partition. This is used
+/// by provider catalog refreshes (e.g. TelecomJS `/v1/models`) that need to
+/// coexist with the cross-provider Models.dev live layer.
+pub fn merge_live_offerings(new_offerings: Vec<CatalogOffering>) {
+    if new_offerings.is_empty() {
+        return;
+    }
     if let Ok(mut guard) = LIVE_SNAPSHOT.write() {
-        *guard = None;
+        for (provider, new_rows) in offerings_by_provider(new_offerings) {
+            let existing = guard.per_provider.remove(&provider).unwrap_or_default();
+            let mut merged: BTreeMap<(String, String), CatalogOffering> = BTreeMap::new();
+            for row in existing.offerings {
+                merged.insert((row.provider.clone(), row.wire_model_id.clone()), row);
+            }
+            for row in new_rows {
+                merged.insert((row.provider.clone(), row.wire_model_id.clone()), row);
+            }
+            guard.per_provider.insert(
+                provider,
+                CatalogSnapshot {
+                    offerings: merged.into_values().collect(),
+                },
+            );
+        }
         LIVE_GENERATION.fetch_add(1, Ordering::SeqCst);
     }
 }
 
 /// The merged catalog snapshot: live rows override bundled rows on
 /// `(provider, wire_model_id)` identity (#4188). When no live snapshot is
-/// present, this is just the offline bundled snapshot.
+/// present, this is just the offline bundled snapshot. Per-provider live rows
+/// override Models.dev live rows on collision (gateway-specific wins over
+/// cross-provider).
 ///
-/// Memoized: the merge is recomputed only after [`set_live_snapshot`] /
-/// [`clear_live_snapshot`] bump `LIVE_GENERATION`; every other call returns
-/// the cached `Arc` (the picker calls this per row, so it must be cheap).
+/// Memoized: the merge is recomputed only after a live-layer mutation bumps
+/// `LIVE_GENERATION`; every other call returns the cached `Arc` (the picker
+/// calls this per row, so it must be cheap).
 fn merged_snapshot() -> Arc<CatalogSnapshot> {
     let generation = LIVE_GENERATION.load(Ordering::SeqCst);
     if let Ok(guard) = MERGED_CACHE.read()
@@ -116,11 +251,13 @@ fn merged_snapshot() -> Arc<CatalogSnapshot> {
 
 /// Uncached merge (see [`merged_snapshot`] for the caching seam).
 fn compute_merged_snapshot() -> CatalogSnapshot {
-    let live = LIVE_SNAPSHOT.read().ok().and_then(|guard| guard.clone());
+    let live = LIVE_SNAPSHOT
+        .read()
+        .ok()
+        .and_then(|guard| guard.flattened());
     let merged = match live {
         None => bundled_snapshot().clone(),
         Some(live) => {
-            use std::collections::BTreeMap;
             let mut merged: BTreeMap<(String, String), CatalogOffering> = BTreeMap::new();
             for row in &bundled_snapshot().offerings {
                 merged.insert(
@@ -283,6 +420,7 @@ pub fn all_catalog_providers() -> Vec<ApiProvider> {
 mod tests {
     use super::*;
     use crate::config::{DEFAULT_TOGETHER_FLASH_MODEL, DEFAULT_TOGETHER_MODEL};
+    use codewhale_config::catalog::CatalogSource;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     /// Serialize tests that mutate the process-wide live snapshot.
@@ -468,7 +606,7 @@ mod tests {
                 ..Default::default()
             }],
         };
-        set_live_snapshot(live);
+        set_live_snapshot(live, LiveSource::ModelsDev);
         let merged = all_catalog_models_for_provider(ApiProvider::Deepseek);
         assert!(merged.contains(&"deepseek-v4-synthetic".to_string()));
         // The bundled model is still present.
@@ -501,14 +639,17 @@ mod tests {
             "probe model must not pre-exist in the bundled snapshot"
         );
 
-        set_live_snapshot(CatalogSnapshot {
-            offerings: vec![CatalogOffering {
-                provider: "deepseek".to_string(),
-                wire_model_id: probe.to_string(),
-                endpoint_key: "chat".to_string(),
-                ..Default::default()
-            }],
-        });
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: vec![CatalogOffering {
+                    provider: "deepseek".to_string(),
+                    wire_model_id: probe.to_string(),
+                    endpoint_key: "chat".to_string(),
+                    ..Default::default()
+                }],
+            },
+            LiveSource::ModelsDev,
+        );
         let with_live = merged_snapshot();
         assert!(
             !Arc::ptr_eq(&bundled_only, &with_live),
@@ -561,7 +702,7 @@ mod tests {
             endpoint_key: "messages".to_string(),
             ..Default::default()
         }));
-        set_live_snapshot(CatalogSnapshot { offerings });
+        set_live_snapshot(CatalogSnapshot { offerings }, LiveSource::ModelsDev);
 
         let models: std::collections::BTreeSet<_> =
             all_catalog_models_for_provider(ApiProvider::OpencodeGo)
@@ -624,7 +765,7 @@ mod tests {
                 },
             ],
         };
-        set_live_snapshot(live);
+        set_live_snapshot(live, LiveSource::ModelsDev);
 
         let merged = merged_snapshot();
         let moonshot_rows = merged.offerings_for_provider("moonshot");
@@ -723,9 +864,12 @@ mod tests {
                 .map(|r| r.provider.as_str())
                 .collect::<Vec<_>>()
         );
-        set_live_snapshot(CatalogSnapshot {
-            offerings: live_rows,
-        });
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: live_rows,
+            },
+            LiveSource::ModelsDev,
+        );
 
         let models = all_catalog_models_for_provider(ApiProvider::Moonshot);
         let kimi_count = models.iter().filter(|m| m.as_str() == "kimi-k2.5").count();
@@ -738,6 +882,422 @@ mod tests {
                 .offerings_for_provider("moonshotai")
                 .is_empty()
         );
+        clear_live_snapshot();
+    }
+
+    // ── Source-scoped partition tests (#4188 race fix) ──────────────────────
+
+    #[test]
+    fn provider_live_snapshots_are_scoped_per_provider() {
+        let _live = lock_live_snapshot();
+        clear_live_snapshot();
+
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: vec![CatalogOffering {
+                    provider: "telecomjs".to_string(),
+                    wire_model_id: "deepseek-v4-pro".to_string(),
+                    endpoint_key: "chat".to_string(),
+                    ..Default::default()
+                }],
+            },
+            LiveSource::PerProvider,
+        );
+        let telecom_only = merged_snapshot();
+        assert_eq!(telecom_only.offerings_for_provider("telecomjs").len(), 1);
+
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: vec![CatalogOffering {
+                    provider: "another-gateway".to_string(),
+                    wire_model_id: "another-model".to_string(),
+                    endpoint_key: "chat".to_string(),
+                    ..Default::default()
+                }],
+            },
+            LiveSource::PerProvider,
+        );
+
+        let merged = merged_snapshot();
+        assert_eq!(merged.offerings_for_provider("telecomjs").len(), 1);
+        assert_eq!(merged.offerings_for_provider("another-gateway").len(), 1);
+        assert!(
+            !Arc::ptr_eq(&telecom_only, &merged),
+            "publishing a second provider must invalidate the cached merge"
+        );
+
+        clear_live_snapshot();
+    }
+
+    /// Models.dev→TelecomJS completion order: Models.dev sets its snapshot first,
+    /// then TelecomJS merges per-provider rows. Both sets must be present in the
+    /// final merged view.
+    #[test]
+    fn models_dev_first_then_telecomjs_both_preserved() {
+        let _live = lock_live_snapshot();
+        clear_live_snapshot();
+
+        // 1) Models.dev publishes its cross-provider snapshot.
+        let models_dev_rows = vec![
+            CatalogOffering {
+                provider: "deepseek".to_string(),
+                wire_model_id: "deepseek-chat".to_string(),
+                endpoint_key: "chat".to_string(),
+                family: Some("deepseek".to_string()),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "modelsdev-fp".to_string(),
+                    fetched_at: 1000,
+                },
+                ..Default::default()
+            },
+            CatalogOffering {
+                provider: "zai".to_string(),
+                wire_model_id: "glm-4".to_string(),
+                endpoint_key: "chat".to_string(),
+                family: Some("glm".to_string()),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "modelsdev-fp".to_string(),
+                    fetched_at: 1000,
+                },
+                ..Default::default()
+            },
+        ];
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: models_dev_rows,
+            },
+            LiveSource::ModelsDev,
+        );
+        let before_provider_refresh = merged_snapshot();
+        assert!(
+            before_provider_refresh
+                .offerings_for_provider("telecomjs")
+                .is_empty()
+        );
+
+        // 2) TelecomJS merges its per-provider rows (after Models.dev completes).
+        let telecomjs_rows = vec![
+            CatalogOffering {
+                provider: "telecomjs".to_string(),
+                wire_model_id: "deepseek-chat".to_string(),
+                endpoint_key: "chat".to_string(),
+                family: Some("deepseek".to_string()),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "telecomjs-fp".to_string(),
+                    fetched_at: 2000,
+                },
+                ..Default::default()
+            },
+            CatalogOffering {
+                provider: "telecomjs".to_string(),
+                wire_model_id: "glm-4".to_string(),
+                endpoint_key: "chat".to_string(),
+                family: Some("glm".to_string()),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "telecomjs-fp".to_string(),
+                    fetched_at: 2000,
+                },
+                ..Default::default()
+            },
+        ];
+        merge_live_offerings(telecomjs_rows);
+        assert_eq!(
+            merged_snapshot().offerings_for_provider("telecomjs").len(),
+            2,
+            "provider refresh should invalidate the cached Models.dev-only view"
+        );
+
+        // 3) Both sources' rows are present in the merged snapshot.
+        let merged = merged_snapshot();
+        let deepseek_rows = merged.offerings_for_provider("deepseek");
+        assert!(
+            deepseek_rows
+                .iter()
+                .any(|r| r.wire_model_id == "deepseek-chat"),
+            "Models.dev deepseek row missing: {deepseek_rows:?}"
+        );
+        let zai_rows = merged.offerings_for_provider("zai");
+        assert!(
+            zai_rows.iter().any(|r| r.wire_model_id == "glm-4"),
+            "Models.dev zai row missing: {zai_rows:?}"
+        );
+        let telecomjs_rows_merged = merged.offerings_for_provider("telecomjs");
+        assert_eq!(
+            telecomjs_rows_merged.len(),
+            2,
+            "TelecomJS rows missing: {telecomjs_rows_merged:?}"
+        );
+        assert!(
+            telecomjs_rows_merged
+                .iter()
+                .any(|r| r.wire_model_id == "deepseek-chat"),
+            "TelecomJS deepseek-chat row missing"
+        );
+        assert!(
+            telecomjs_rows_merged
+                .iter()
+                .any(|r| r.wire_model_id == "glm-4"),
+            "TelecomJS glm-4 row missing"
+        );
+
+        clear_live_snapshot();
+    }
+
+    /// TelecomJS→Models.dev completion order: TelecomJS merges first, then
+    /// Models.dev replaces the cross-provider snapshot. TelecomJS rows must
+    /// survive the Models.dev refresh (they live in a separate partition).
+    #[test]
+    fn telecomjs_first_then_models_dev_both_preserved() {
+        let _live = lock_live_snapshot();
+        clear_live_snapshot();
+
+        // 1) TelecomJS merges its per-provider rows first.
+        let telecomjs_rows = vec![
+            CatalogOffering {
+                provider: "telecomjs".to_string(),
+                wire_model_id: "deepseek-chat".to_string(),
+                endpoint_key: "chat".to_string(),
+                family: Some("deepseek".to_string()),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "telecomjs-fp".to_string(),
+                    fetched_at: 2000,
+                },
+                ..Default::default()
+            },
+            CatalogOffering {
+                provider: "telecomjs".to_string(),
+                wire_model_id: "glm-4".to_string(),
+                endpoint_key: "chat".to_string(),
+                family: Some("glm".to_string()),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "telecomjs-fp".to_string(),
+                    fetched_at: 2000,
+                },
+                ..Default::default()
+            },
+        ];
+        merge_live_offerings(telecomjs_rows);
+        assert_eq!(
+            merged_snapshot().offerings_for_provider("telecomjs").len(),
+            2,
+            "provider rows should be visible before Models.dev completes"
+        );
+
+        // 2) Models.dev refreshes and replaces its cross-provider snapshot.
+        //    Before the source-scoped fix, this would have wiped TelecomJS rows.
+        let models_dev_rows = vec![CatalogOffering {
+            provider: "deepseek".to_string(),
+            wire_model_id: "deepseek-chat".to_string(),
+            endpoint_key: "chat".to_string(),
+            family: Some("deepseek".to_string()),
+            source: CatalogSource::Live {
+                base_url_fingerprint: "modelsdev-fp".to_string(),
+                fetched_at: 3000,
+            },
+            ..Default::default()
+        }];
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: models_dev_rows,
+            },
+            LiveSource::ModelsDev,
+        );
+
+        // 3) Both sources' rows are present — TelecomJS rows were NOT erased.
+        let merged = merged_snapshot();
+        let telecomjs_rows_merged = merged.offerings_for_provider("telecomjs");
+        assert_eq!(
+            telecomjs_rows_merged.len(),
+            2,
+            "TelecomJS rows were erased by Models.dev refresh: {telecomjs_rows_merged:?}"
+        );
+        assert!(
+            telecomjs_rows_merged
+                .iter()
+                .any(|r| r.wire_model_id == "deepseek-chat"),
+            "TelecomJS deepseek-chat row erased"
+        );
+        assert!(
+            telecomjs_rows_merged
+                .iter()
+                .any(|r| r.wire_model_id == "glm-4"),
+            "TelecomJS glm-4 row erased"
+        );
+        let deepseek_rows = merged.offerings_for_provider("deepseek");
+        assert!(
+            deepseek_rows
+                .iter()
+                .any(|r| r.wire_model_id == "deepseek-chat"),
+            "Models.dev deepseek row missing: {deepseek_rows:?}"
+        );
+
+        clear_live_snapshot();
+    }
+
+    /// Catalog refresh never deletes previously published rows: a Models.dev
+    /// refresh that adds new rows must preserve existing per-provider rows,
+    /// and a per-provider merge must preserve existing Models.dev rows.
+    #[test]
+    fn catalog_refresh_never_deletes_previously_published_rows() {
+        let _live = lock_live_snapshot();
+        clear_live_snapshot();
+
+        // 1) Initial state: Models.dev publishes rows for deepseek + zai.
+        let initial_models_dev = vec![
+            CatalogOffering {
+                provider: "deepseek".to_string(),
+                wire_model_id: "deepseek-chat".to_string(),
+                endpoint_key: "chat".to_string(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "modelsdev-fp".to_string(),
+                    fetched_at: 1000,
+                },
+                ..Default::default()
+            },
+            CatalogOffering {
+                provider: "zai".to_string(),
+                wire_model_id: "glm-4".to_string(),
+                endpoint_key: "chat".to_string(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "modelsdev-fp".to_string(),
+                    fetched_at: 1000,
+                },
+                ..Default::default()
+            },
+        ];
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: initial_models_dev,
+            },
+            LiveSource::ModelsDev,
+        );
+
+        // 2) TelecomJS merges its rows.
+        let telecomjs_rows = vec![CatalogOffering {
+            provider: "telecomjs".to_string(),
+            wire_model_id: "deepseek-chat".to_string(),
+            endpoint_key: "chat".to_string(),
+            source: CatalogSource::Live {
+                base_url_fingerprint: "telecomjs-fp".to_string(),
+                fetched_at: 2000,
+            },
+            ..Default::default()
+        }];
+        merge_live_offerings(telecomjs_rows);
+
+        // Record what we have before the second refresh.
+        let before_refresh = merged_snapshot();
+        let before_providers: std::collections::BTreeSet<_> = before_refresh
+            .offerings
+            .iter()
+            .map(|r| (r.provider.clone(), r.wire_model_id.clone()))
+            .collect();
+        assert!(
+            before_providers.contains(&("deepseek".to_string(), "deepseek-chat".to_string())),
+            "deepseek row should exist before refresh"
+        );
+        assert!(
+            before_providers.contains(&("telecomjs".to_string(), "deepseek-chat".to_string())),
+            "telecomjs row should exist before refresh"
+        );
+
+        // 3) Models.dev refreshes again with an updated snapshot (adds a new row).
+        let updated_models_dev = vec![
+            CatalogOffering {
+                provider: "deepseek".to_string(),
+                wire_model_id: "deepseek-chat".to_string(),
+                endpoint_key: "chat".to_string(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "modelsdev-fp".to_string(),
+                    fetched_at: 3000,
+                },
+                ..Default::default()
+            },
+            CatalogOffering {
+                provider: "zai".to_string(),
+                wire_model_id: "glm-4".to_string(),
+                endpoint_key: "chat".to_string(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "modelsdev-fp".to_string(),
+                    fetched_at: 3000,
+                },
+                ..Default::default()
+            },
+            // New row added by the refresh.
+            CatalogOffering {
+                provider: "moonshot".to_string(),
+                wire_model_id: "kimi-k2.5".to_string(),
+                endpoint_key: "chat".to_string(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: "modelsdev-fp".to_string(),
+                    fetched_at: 3000,
+                },
+                ..Default::default()
+            },
+        ];
+        set_live_snapshot(
+            CatalogSnapshot {
+                offerings: updated_models_dev,
+            },
+            LiveSource::ModelsDev,
+        );
+
+        // 4) The TelecomJS row is STILL present — it was not deleted.
+        let after_refresh = merged_snapshot();
+        let after_telecomjs: Vec<_> = after_refresh
+            .offerings_for_provider("telecomjs")
+            .iter()
+            .map(|r| r.wire_model_id.clone())
+            .collect();
+        assert!(
+            after_telecomjs.iter().any(|id| id == "deepseek-chat"),
+            "TelecomJS row was deleted by Models.dev refresh! Remaining: {after_telecomjs:?}"
+        );
+
+        // 5) New Models.dev row is also present.
+        let after_moonshot: Vec<_> = after_refresh
+            .offerings_for_provider("moonshot")
+            .iter()
+            .map(|r| r.wire_model_id.clone())
+            .collect();
+        assert!(
+            after_moonshot.iter().any(|id| id == "kimi-k2.5"),
+            "New Models.dev moonshot row missing: {after_moonshot:?}"
+        );
+
+        // 6) Also verify: a per-provider merge does not delete Models.dev rows.
+        let extra_telecomjs = vec![CatalogOffering {
+            provider: "telecomjs".to_string(),
+            wire_model_id: "glm-4".to_string(),
+            endpoint_key: "chat".to_string(),
+            source: CatalogSource::Live {
+                base_url_fingerprint: "telecomjs-fp".to_string(),
+                fetched_at: 4000,
+            },
+            ..Default::default()
+        }];
+        merge_live_offerings(extra_telecomjs);
+
+        let final_merged = merged_snapshot();
+        let final_deepseek: Vec<_> = final_merged
+            .offerings_for_provider("deepseek")
+            .iter()
+            .map(|r| r.wire_model_id.clone())
+            .collect();
+        assert!(
+            final_deepseek.iter().any(|id| id == "deepseek-chat"),
+            "Models.dev deepseek row was deleted by per-provider merge! Remaining: {final_deepseek:?}"
+        );
+        let final_moonshot: Vec<_> = final_merged
+            .offerings_for_provider("moonshot")
+            .iter()
+            .map(|r| r.wire_model_id.clone())
+            .collect();
+        assert!(
+            final_moonshot.iter().any(|id| id == "kimi-k2.5"),
+            "Models.dev moonshot row was deleted by per-provider merge! Remaining: {final_moonshot:?}"
+        );
+
         clear_live_snapshot();
     }
 }

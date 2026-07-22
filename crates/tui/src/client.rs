@@ -1302,8 +1302,23 @@ pub async fn verify_provider_api_key(
         .map_err(|err| format!("request failed: {err:#}"))?;
     let status = response.status();
     if status.is_success() {
-        // Consume the body so the connection returns to the pool.
-        let _ = response.text().await;
+        // TelecomJS verification already returns the key-scoped model roster.
+        // Publish it before returning so the guided model picker can render the
+        // live choices in this session instead of requiring a restart. A valid
+        // 2xx response remains sufficient to verify the key even if the body is
+        // malformed; in that case failure-preserving catalog semantics keep the
+        // existing/static rows.
+        let body = response.text().await.unwrap_or_default();
+        if provider == ApiProvider::Telecomjs
+            && let Ok(offerings) = telecomjs_catalog_offerings_from_body(
+                &body,
+                provider.as_str(),
+                &base_url_fingerprint(base_url),
+                now_unix(),
+            )
+        {
+            crate::provider_lake::merge_live_offerings(offerings);
+        }
         Ok(())
     } else {
         let body = response.text().await.unwrap_or_default();
@@ -1591,6 +1606,8 @@ impl DeepSeekClient {
                     openrouter_to_catalog_offering(item, &provider, &fingerprint, fetched_at)
                 })
                 .collect()
+        } else if provider == "telecomjs" {
+            telecomjs_catalog_offerings_from_body(&body, &provider, &fingerprint, fetched_at)?
         } else {
             let models = apply_provider_model_cutline(
                 self.api_provider,
@@ -1657,6 +1674,60 @@ impl DeepSeekClient {
                 CatalogStatus::Failed { reason }
             }
         }
+    }
+
+    /// Best-effort background refresh of the active provider's own `/v1/models`
+    /// catalog, merging results into the provider lake (#3385).
+    ///
+    /// Unlike [`models_dev_live::spawn_background_refresh`] (which fetches the
+    /// cross-provider Models.dev catalog), this calls the provider's own
+    /// `/v1/models` endpoint and merges the results into the existing live
+    /// snapshot via [`provider_lake::merge_live_offerings`], preserving rows
+    /// from other sources.
+    ///
+    /// Currently activated for providers whose model list is not covered by the
+    /// Models.dev catalog (e.g. TelecomJS TokenHub). The refresh is non-fatal:
+    /// on failure, existing/bundled rows remain available.
+    pub fn spawn_active_provider_catalog_refresh(config: &Config) {
+        let provider = config.api_provider();
+        // Only refresh for providers that serve their own model list and are
+        // not already covered by the Models.dev catalog.
+        if !matches!(provider, ApiProvider::Telecomjs) {
+            return;
+        }
+
+        let client = match DeepSeekClient::new(config) {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::debug!(
+                    target: "provider_catalog",
+                    error = %err,
+                    "skipping provider catalog refresh: client creation failed"
+                );
+                return;
+            }
+        };
+
+        tokio::spawn(async move {
+            match client.fetch_catalog_delta().await {
+                Ok(delta) => {
+                    let count = delta.offerings.len();
+                    crate::provider_lake::merge_live_offerings(delta.offerings);
+                    tracing::debug!(
+                        target: "provider_catalog",
+                        offering_count = count,
+                        "provider catalog refresh merged {count} offerings into provider lake"
+                    );
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        target: "provider_catalog",
+                        error = ?err,
+                        "provider catalog refresh failed; keeping existing rows"
+                    );
+                }
+            }
+        });
     }
 
     /// Generate speech with Xiaomi MiMo TTS models.
@@ -2115,6 +2186,80 @@ fn apply_provider_model_cutline(
     models
 }
 
+/// Convert TelecomJS's bare `/models` response into truthful provider-scoped
+/// catalog rows. Matching model ids on other providers prove no capabilities,
+/// limits, or prices; only an explicit same-provider bundled row may enrich a
+/// live offering.
+fn telecomjs_catalog_offerings_from_body(
+    body: &str,
+    provider: &str,
+    fingerprint: &str,
+    fetched_at: u64,
+) -> Result<Vec<CatalogOffering>, CatalogRefreshError> {
+    let models = parse_models_response(body).map_err(|_| CatalogRefreshError::InvalidResponse)?;
+    if models.is_empty() {
+        return Err(CatalogRefreshError::EmptyList);
+    }
+
+    let bundled = codewhale_config::catalog::bundled_catalog_offerings();
+    let default_model_id = codewhale_config::ProviderKind::Telecomjs
+        .provider()
+        .default_model();
+    Ok(models
+        .into_iter()
+        .map(|model| {
+            let is_default = model.id.eq_ignore_ascii_case(default_model_id);
+            let same_provider_match = bundled.iter().find(|offering| {
+                offering.provider.eq_ignore_ascii_case(provider)
+                    && offering.wire_model_id.eq_ignore_ascii_case(&model.id)
+            });
+            if let Some(matched) = same_provider_match {
+                CatalogOffering {
+                    provider: provider.to_string(),
+                    wire_model_id: model.id,
+                    canonical_model: matched.canonical_model.clone(),
+                    endpoint_key: "chat".to_string(),
+                    default_for_provider: is_default,
+                    family: matched.family.clone(),
+                    limit: matched.limit.clone(),
+                    cost: matched.cost.clone(),
+                    modalities: matched.modalities.clone(),
+                    attachment: matched.attachment,
+                    reasoning: matched.reasoning,
+                    tool_call: matched.tool_call,
+                    structured_output: matched.structured_output,
+                    reasoning_options: matched.reasoning_options.clone(),
+                    source: CatalogSource::Live {
+                        base_url_fingerprint: fingerprint.to_string(),
+                        fetched_at,
+                    },
+                }
+            } else {
+                CatalogOffering {
+                    provider: provider.to_string(),
+                    wire_model_id: model.id,
+                    canonical_model: None,
+                    endpoint_key: "chat".to_string(),
+                    default_for_provider: is_default,
+                    family: None,
+                    limit: None,
+                    cost: None,
+                    modalities: None,
+                    attachment: None,
+                    reasoning: None,
+                    tool_call: None,
+                    structured_output: None,
+                    reasoning_options: Vec::new(),
+                    source: CatalogSource::Live {
+                        base_url_fingerprint: fingerprint.to_string(),
+                        fetched_at,
+                    },
+                }
+            }
+        })
+        .collect())
+}
+
 /// Parse an OpenRouter `/models` response, preserving server-side ordering and
 /// capturing full capability metadata (#3385).
 fn parse_openrouter_models_response(
@@ -2133,13 +2278,15 @@ fn parse_openrouter_models_response(
 
 fn publish_provider_lake_snapshot(cache: &ProviderCatalogCache) {
     // Publish fresh *and* stale/prior rows so pickers keep live catalog coverage
-    // after TTL expiry or a failed refresh (#4139). Empty caches clear the live
-    // layer and fall back to the bundled snapshot.
+    // after TTL expiry or a failed refresh (#4139). An empty cache publishes
+    // nothing: it must not erase a provider-scoped layer populated by another
+    // refresh path.
     let offerings = cache.all_visible_offerings(now_unix());
-    if offerings.is_empty() {
-        crate::provider_lake::clear_live_snapshot();
-    } else {
-        crate::provider_lake::set_live_snapshot(CatalogSnapshot { offerings });
+    if !offerings.is_empty() {
+        crate::provider_lake::set_live_snapshot(
+            CatalogSnapshot { offerings },
+            crate::provider_lake::LiveSource::PerProvider,
+        );
     }
 }
 
@@ -2301,6 +2448,17 @@ pub(super) fn apply_reasoning_effort(
             | ApiProvider::Zai => {
                 body["thinking"] = json!({ "type": "disabled" });
             }
+            // TelecomJS TokenHub: the gateway's OpenAI Chat Completions API
+            // (POST /v1/chat/completions) does not document `reasoning_effort`
+            // or `thinking` as supported parameters. The `thinking` field is
+            // only available on the Anthropic Messages API (POST /v1/messages)
+            // with a different shape ({"type":"enabled","budget_tokens":N}).
+            // Since CodeWhale routes TelecomJS through the Chat Completions
+            // path, we must NOT inject these fields — the gateway may silently
+            // ignore them or reject the request, and not every gateway model
+            // (qwen-max, deepseek-chat, gpt-4o, claude, etc.) accepts the same
+            // reasoning dialect (#4188 review: verify against actual behavior).
+            ApiProvider::Telecomjs => {}
             ApiProvider::OpenaiCodex => {
                 // OpenAI Codex uses Responses API — thinking handled differently
             }
@@ -2368,6 +2526,9 @@ pub(super) fn apply_reasoning_effort(
                 body["reasoning_effort"] = json!("high");
                 body["thinking"] = json!({ "type": "enabled" });
             }
+            // TelecomJS: see comment in the "off" branch above — the gateway's
+            // Chat Completions API does not support reasoning_effort or thinking.
+            ApiProvider::Telecomjs => {}
             // OpenRouter/Novita/Together: pass through the actual user-chosen value.
             // OpenRouter's unified scale is none/minimal/low/medium/high/xhigh;
             // DeepSeek models hosted there accept those directly.
@@ -2462,6 +2623,9 @@ pub(super) fn apply_reasoning_effort(
                 body["reasoning_effort"] = json!("max");
                 body["thinking"] = json!({ "type": "enabled" });
             }
+            // TelecomJS: see comment in the "off" branch above — the gateway's
+            // Chat Completions API does not support reasoning_effort or thinking.
+            ApiProvider::Telecomjs => {}
             ApiProvider::Openrouter | ApiProvider::Novita | ApiProvider::Together => {
                 body["reasoning_effort"] = json!("xhigh");
                 body["thinking"] = json!({ "type": "enabled" });
@@ -2694,7 +2858,7 @@ mod tests {
         tool_to_chat_for_base_url,
     };
     use crate::client::responses::build_responses_body;
-    use crate::config::{ProviderConfig, ProvidersConfig};
+    use crate::config::{DEFAULT_TELECOMJS_MODEL, ProviderConfig, ProvidersConfig};
     use crate::models::{
         ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, Tool,
     };
@@ -5387,6 +5551,31 @@ mod tests {
         assert_eq!(body, json!({ "thinking": { "type": "disabled" } }));
     }
 
+    /// TelecomJS TokenHub: the gateway's OpenAI Chat Completions API does NOT
+    /// support `reasoning_effort` or `thinking` fields (#4188 review). Verify
+    /// that no reasoning fields are injected for any effort level, since not
+    /// every gateway model (qwen-max, deepseek-chat, gpt-4o, claude, etc.)
+    /// accepts the same reasoning dialect.
+    #[test]
+    fn reasoning_effort_telecomjs_does_not_inject_reasoning_fields() {
+        for effort in &["off", "low", "medium", "high", "max", "xhigh"] {
+            let mut body = json!({});
+            apply_reasoning_effort(&mut body, Some(effort), ApiProvider::Telecomjs);
+            assert!(
+                body.get("reasoning_effort").is_none(),
+                "TelecomJS must not inject reasoning_effort for effort={effort}: {body}"
+            );
+            assert!(
+                body.get("thinking").is_none(),
+                "TelecomJS must not inject thinking for effort={effort}: {body}"
+            );
+            assert!(
+                body.get("think").is_none(),
+                "TelecomJS must not inject think for effort={effort}: {body}"
+            );
+        }
+    }
+
     #[test]
     fn moonshot_uses_codewhale_user_agent_not_kimi_cli_identity() {
         let user_agent = client_user_agent(ApiProvider::Moonshot);
@@ -6228,6 +6417,23 @@ mod tests {
         .expect("OpenCode Go client")
     }
 
+    fn telecomjs_client_for(server: &MockServer) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        DeepSeekClient::new(&Config {
+            provider: Some("telecomjs".to_string()),
+            providers: Some(ProvidersConfig {
+                telecomjs: ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    base_url: Some(server.uri()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("TelecomJS client")
+    }
+
     async fn mount_models_json(server: &MockServer, status: u16, body: serde_json::Value) {
         Mock::given(method("GET"))
             .and(path("/v1/models"))
@@ -6339,6 +6545,71 @@ mod tests {
                 .iter()
                 .all(|offering| offering.endpoint_key == "chat")
         );
+    }
+
+    #[tokio::test]
+    async fn telecomjs_live_catalog_keeps_cross_provider_metadata_unknown() {
+        let server = MockServer::start().await;
+        let ambiguous_id = codewhale_config::catalog::bundled_catalog_offerings()
+            .into_iter()
+            .find(|offering| {
+                !offering.provider.eq_ignore_ascii_case("telecomjs")
+                    && !offering
+                        .wire_model_id
+                        .eq_ignore_ascii_case(DEFAULT_TELECOMJS_MODEL)
+                    && (offering.canonical_model.is_some()
+                        || offering.family.is_some()
+                        || offering.limit.is_some()
+                        || offering.cost.is_some()
+                        || offering.reasoning.is_some()
+                        || offering.tool_call.is_some())
+            })
+            .expect("bundled catalog should contain a metadata-bearing non-TelecomJS row")
+            .wire_model_id;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"id": ambiguous_id.clone()},
+                    {"id": DEFAULT_TELECOMJS_MODEL}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let delta = telecomjs_client_for(&server)
+            .fetch_catalog_delta()
+            .await
+            .expect("TelecomJS catalog delta");
+        assert_eq!(delta.provider, "telecomjs");
+        assert_eq!(delta.offerings.len(), 2);
+
+        let ambiguous = delta
+            .offerings
+            .iter()
+            .find(|offering| offering.wire_model_id == ambiguous_id)
+            .expect("ambiguous cross-provider id");
+        assert!(!ambiguous.default_for_provider);
+        assert_eq!(ambiguous.endpoint_key, "chat");
+        assert_eq!(ambiguous.canonical_model, None);
+        assert_eq!(ambiguous.family, None);
+        assert_eq!(ambiguous.limit, None);
+        assert_eq!(ambiguous.cost, None);
+        assert_eq!(ambiguous.modalities, None);
+        assert_eq!(ambiguous.attachment, None);
+        assert_eq!(ambiguous.reasoning, None);
+        assert_eq!(ambiguous.tool_call, None);
+        assert_eq!(ambiguous.structured_output, None);
+        assert!(ambiguous.reasoning_options.is_empty());
+        assert!(matches!(ambiguous.source, CatalogSource::Live { .. }));
+
+        let default = delta
+            .offerings
+            .iter()
+            .find(|offering| offering.wire_model_id == DEFAULT_TELECOMJS_MODEL)
+            .expect("TelecomJS default row");
+        assert!(default.default_for_provider);
     }
 
     #[tokio::test]

@@ -334,6 +334,16 @@ pub struct ProvidersToml {
         alias = "grok"
     )]
     pub xai: ProviderConfigToml,
+    /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "telecom-js",
+        alias = "telecom_js",
+        alias = "telecomjs-cn",
+        alias = "tokenhub"
+    )]
+    pub telecomjs: ProviderConfigToml,
     /// Catch-all table for the dynamic OpenAI-compatible custom provider
     /// identity (#1519). Arbitrary `[providers.<name>]` tables are handled by
     /// the tui-side flatten map; this named slot keeps the canonical
@@ -449,6 +459,7 @@ impl ProvidersToml {
             ProviderKind::OpencodeGo => &self.opencode_go,
             ProviderKind::Meta => &self.meta,
             ProviderKind::Xai => &self.xai,
+            ProviderKind::Telecomjs => &self.telecomjs,
             ProviderKind::Custom => &self.custom,
         }
     }
@@ -489,6 +500,7 @@ impl ProvidersToml {
             ProviderKind::OpencodeGo => &mut self.opencode_go,
             ProviderKind::Meta => &mut self.meta,
             ProviderKind::Xai => &mut self.xai,
+            ProviderKind::Telecomjs => &mut self.telecomjs,
             ProviderKind::Custom => &mut self.custom,
         }
     }
@@ -2352,6 +2364,7 @@ impl ConfigToml {
                 ProviderKind::OpencodeGo => DEFAULT_OPENCODE_GO_BASE_URL.to_string(),
                 ProviderKind::Meta => DEFAULT_META_BASE_URL.to_string(),
                 ProviderKind::Xai => DEFAULT_XAI_BASE_URL.to_string(),
+                ProviderKind::Telecomjs => DEFAULT_TELECOMJS_BASE_URL.to_string(),
                 // The custom provider has no built-in endpoint; fall back to its
                 // descriptor placeholder so the lookup is total. Real custom
                 // routes always supply a configured base_url before this point.
@@ -3021,6 +3034,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::OpencodeGo => DEFAULT_OPENCODE_GO_MODEL,
         ProviderKind::Meta => DEFAULT_META_MODEL,
         ProviderKind::Xai => DEFAULT_XAI_MODEL,
+        ProviderKind::Telecomjs => DEFAULT_TELECOMJS_MODEL,
         // No built-in default model; the registry placeholder keeps this total.
         ProviderKind::Custom => provider.provider().default_model(),
     }
@@ -3062,6 +3076,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::OpencodeGo => DEFAULT_OPENCODE_GO_BASE_URL,
         ProviderKind::Meta => DEFAULT_META_BASE_URL,
         ProviderKind::Xai => DEFAULT_XAI_BASE_URL,
+        ProviderKind::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
         // No built-in default base URL; the registry placeholder keeps this total.
         ProviderKind::Custom => provider.provider().default_base_url(),
     }
@@ -4719,6 +4734,8 @@ struct EnvRuntimeOverrides {
     meta_model: Option<String>,
     xai_base_url: Option<String>,
     xai_model: Option<String>,
+    telecomjs_base_url: Option<String>,
+    telecomjs_model: Option<String>,
 }
 
 impl EnvRuntimeOverrides {
@@ -5007,6 +5024,12 @@ impl EnvRuntimeOverrides {
             xai_model: std::env::var("XAI_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            telecomjs_base_url: std::env::var("TELECOMJS_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            telecomjs_model: std::env::var("TELECOMJS_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         }
     }
 
@@ -5063,6 +5086,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::OpencodeGo => self.opencode_go_base_url.clone(),
             ProviderKind::Meta => self.meta_base_url.clone(),
             ProviderKind::Xai => self.xai_base_url.clone(),
+            ProviderKind::Telecomjs => self.telecomjs_base_url.clone(),
             // No dedicated CODEWHALE_CUSTOM_BASE_URL env override: a custom
             // provider's base URL comes from its `[providers.<name>]` table.
             ProviderKind::Custom => None,
@@ -5097,6 +5121,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::OpencodeGo => self.opencode_go_model.clone(),
             ProviderKind::Meta => self.meta_model.clone(),
             ProviderKind::Xai => self.xai_model.clone(),
+            ProviderKind::Telecomjs => self.telecomjs_model.clone(),
             _ => None,
         }?;
 
