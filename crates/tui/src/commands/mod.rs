@@ -190,7 +190,10 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
             if let Some(result) = groups::skills::run_skill_by_name(app, command.as_str(), arg) {
                 return result;
             }
-            let suggestions = suggest_command_names(command.as_str(), 3);
+            let suggestions =
+                user_registry::with_registry_for_workspace(Some(&app.workspace), |user_commands| {
+                    suggest_command_names(command.as_str(), 3, user_commands)
+                });
             if suggestions.is_empty() {
                 CommandResult::error(format!(
                     "Unknown command: /{command}. Type /help for available commands."
@@ -248,7 +251,42 @@ fn edit_distance(a: &str, b: &str) -> usize {
     previous[b_chars.len()]
 }
 
-fn suggest_command_names(input: &str, limit: usize) -> Vec<String> {
+fn best_suggestion_score<'a>(
+    query: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<(u8, usize)> {
+    let mut best: Option<(u8, usize)> = None;
+    for candidate in candidates {
+        let prefix_match = candidate.starts_with(query) || query.starts_with(candidate);
+        let contains_match = candidate.contains(query) || query.contains(candidate);
+        let distance = edit_distance(candidate, query);
+        let close_typo = distance <= 2;
+        if !(prefix_match || contains_match || close_typo) {
+            continue;
+        }
+
+        let rank = if prefix_match {
+            0
+        } else if contains_match {
+            1
+        } else {
+            2
+        };
+
+        match best {
+            Some((best_rank, best_distance))
+                if rank > best_rank || (rank == best_rank && distance >= best_distance) => {}
+            _ => best = Some((rank, distance)),
+        }
+    }
+    best
+}
+
+fn suggest_command_names(
+    input: &str,
+    limit: usize,
+    user_commands: &user_registry::UserCommandRegistry,
+) -> Vec<String> {
     let query = input.trim().to_ascii_lowercase();
     if query.is_empty() || limit == 0 {
         return Vec::new();
@@ -256,33 +294,34 @@ fn suggest_command_names(input: &str, limit: usize) -> Vec<String> {
 
     let mut scored: Vec<(u8, usize, String)> = Vec::new();
     for command in registry().infos() {
-        let mut best: Option<(u8, usize)> = None;
-        for candidate in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
-            let prefix_match = candidate.starts_with(&query) || query.starts_with(candidate);
-            let contains_match = candidate.contains(&query) || query.contains(candidate);
-            let distance = edit_distance(candidate, &query);
-            let close_typo = distance <= 2;
-            if !(prefix_match || contains_match || close_typo) {
-                continue;
-            }
-
-            let rank = if prefix_match {
-                0
-            } else if contains_match {
-                1
-            } else {
-                2
-            };
-
-            match best {
-                Some((best_rank, best_distance))
-                    if rank > best_rank || (rank == best_rank && distance >= best_distance) => {}
-                _ => best = Some((rank, distance)),
-            }
+        // A user command can shadow a built-in canonical name or just one of
+        // its aliases. Score only the built-in spellings that still dispatch
+        // to the built-in so suggestions never advertise different behavior.
+        if user_commands.get(command.name).is_some() {
+            continue;
         }
-
-        if let Some((rank, distance)) = best {
+        let candidates = std::iter::once(command.name).chain(
+            command
+                .aliases
+                .iter()
+                .copied()
+                .filter(|alias| user_commands.get(alias).is_none()),
+        );
+        if let Some((rank, distance)) = best_suggestion_score(&query, candidates) {
             scored.push((rank, distance, command.name.to_string()));
+        }
+    }
+
+    for command in user_commands.iter().filter(|command| !command.hidden) {
+        let candidates = std::iter::once(command.name.as_str()).chain(
+            command.aliases.iter().map(String::as_str).filter(|alias| {
+                user_commands
+                    .get(alias)
+                    .is_some_and(|resolved| resolved.name == command.name)
+            }),
+        );
+        if let Some((rank, distance)) = best_suggestion_score(&query, candidates) {
+            scored.push((rank, distance, command.name.clone()));
         }
     }
 
@@ -458,11 +497,68 @@ mod tests {
         }
 
         assert!(
-            suggest_command_names("slpo", 3)
+            suggest_command_names("slpo", 3, &user_registry::UserCommandRegistry::new())
                 .iter()
                 .any(|name| name == "debt"),
             "typo suggestions should consider the /slop alias"
         );
+    }
+
+    #[test]
+    fn debt_compat_alias_shadows_control_execution_help_and_suggestions() {
+        let temp = tempdir().unwrap();
+        let commands_dir = temp.path().join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("slop.md"),
+            "---\ndescription: User slop workflow\nusage: /slop <task>\n---\ncustom slop $ARGUMENTS",
+        )
+        .unwrap();
+        std::fs::write(
+            commands_dir.join("review.md"),
+            "---\ndescription: User canzha workflow\nusage: /review <task>\nalias: canzha\n---\ncustom canzha $ARGUMENTS",
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.workspace = temp.path().to_path_buf();
+        user_registry::reload(Some(temp.path()));
+
+        for (input, expected) in [
+            ("/slop now", "custom slop now"),
+            ("/canzha later", "custom canzha later"),
+        ] {
+            let result = execute(input, &mut app);
+            assert!(!result.is_error, "{input} returned {result:?}");
+            assert!(matches!(
+                result.action,
+                Some(AppAction::SendMessage(ref message)) if message == expected
+            ));
+        }
+
+        for (topic, canonical, description, usage) in [
+            ("slop", "slop", "User slop workflow", "/slop <task>"),
+            ("canzha", "review", "User canzha workflow", "/review <task>"),
+        ] {
+            let result = execute(&format!("/help {topic}"), &mut app);
+            assert!(!result.is_error, "/help {topic} returned {result:?}");
+            let message = result.message.expect("user command help text");
+            assert!(
+                message.starts_with(&format!("{canonical}\n")),
+                "{message:?}"
+            );
+            assert!(message.contains(description), "{message:?}");
+            assert!(message.contains(usage), "{message:?}");
+            assert!(!message.starts_with("debt\n"), "{message:?}");
+        }
+
+        for (typo, expected) in [("/slpo", "/slop"), ("/canzh", "/review")] {
+            let result = execute(typo, &mut app);
+            assert!(result.is_error, "{typo} should remain unknown");
+            let message = result.message.expect("unknown-command suggestion");
+            assert!(message.contains(expected), "{message:?}");
+            assert!(!message.contains("/debt"), "{message:?}");
+        }
     }
 
     #[test]

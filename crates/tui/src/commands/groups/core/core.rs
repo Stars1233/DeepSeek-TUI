@@ -17,6 +17,18 @@ use super::CommandResult;
 /// Show help information
 pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
     if let Some(topic) = topic {
+        let user_help = crate::commands::user_registry::with_registry_for_workspace(
+            Some(&app.workspace),
+            |registry| {
+                registry
+                    .get(topic)
+                    .map(|command| user_command_help(app.ui_locale, command))
+            },
+        );
+        if let Some(help) = user_help {
+            return CommandResult::message(help);
+        }
+
         // Show help for specific command
         if let Some(cmd) = crate::commands::get_command_info(topic) {
             let mut help = format!(
@@ -46,6 +58,40 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
         app.view_stack.push(HelpView::new_for_locale(app.ui_locale));
     }
     CommandResult::ok()
+}
+
+fn user_command_help(
+    locale: Locale,
+    command: &crate::commands::user_registry::UserCommandMetadata,
+) -> String {
+    let mut help = command.name.clone();
+    if let Some(description) = command
+        .description
+        .as_deref()
+        .filter(|description| !description.trim().is_empty())
+    {
+        let _ = write!(help, "\n\n  {description}");
+    }
+
+    let usage = command
+        .display_usage()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("/{}", command.name));
+    let _ = write!(
+        help,
+        "\n\n  {} {}",
+        tr(locale, MessageId::HelpUsageLabel),
+        usage
+    );
+    if !command.aliases.is_empty() {
+        let _ = write!(
+            help,
+            "\n  {} {}",
+            tr(locale, MessageId::HelpAliasesLabel),
+            command.aliases.join(", ")
+        );
+    }
+    help
 }
 
 /// Clear conversation history

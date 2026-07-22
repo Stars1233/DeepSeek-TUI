@@ -111,6 +111,11 @@ errors are isolated per file: valid siblings still load, appear, and dispatch.
 Hidden commands participate in shadowing and remain directly dispatchable, but
 are removed from palette and slash-completion discovery.
 
+Explicit `/help <name>` topics and unknown-command typo suggestions resolve
+through the same user-command precedence as execution. When a user command
+owns a built-in name or alias, help shows the user command's metadata and typo
+suggestions point to its canonical name rather than the shadowed built-in.
+
 Dispatch through `user_registry` resets stale command state before sending the
 new command body: hunt objective fields, token/time counters, continuation
 count, allowed tools, pause state, todos, and plan state.
