@@ -32,7 +32,7 @@ fn effective_placement(
 
 /// Responsive work-surface height. The component owns a bounded window; long
 /// work lists scroll instead of consuming the transcript.
-pub fn height(app: &mut App, width: u16, terminal_height: u16, classic_shell: bool) -> u16 {
+pub fn height(app: &mut App, width: u16, _terminal_height: u16, classic_shell: bool) -> u16 {
     let rows = project(app);
     if rows.is_empty() {
         app.work_surface.focused = false;

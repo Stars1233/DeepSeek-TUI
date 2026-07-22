@@ -436,10 +436,6 @@ mod tests {
         }
 
         let rows = super::model::project(&mut app);
-        let labels = rows
-            .iter()
-            .map(|row| row.label.as_str())
-            .collect::<Vec<_>>();
         let activity = rows
             .iter()
             .find(|row| row.id.0 == "activity:aggregate")

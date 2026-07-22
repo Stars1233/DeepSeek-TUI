@@ -1,7 +1,7 @@
 use std::collections::HashSet;
-use std::time::Instant;
 use std::fmt::Write as _;
 use std::path::{Component, Path};
+use std::time::Instant;
 
 use ratatui::layout::Rect;
 
@@ -454,8 +454,7 @@ fn ordered_rows(
     };
 
     let now = surface.now_ms();
-    let user_turn_force_hide =
-        surface.user_turn_epoch != surface.last_handled_user_turn_epoch;
+    let user_turn_force_hide = surface.user_turn_epoch != surface.last_handled_user_turn_epoch;
     if user_turn_force_hide {
         surface.last_handled_user_turn_epoch = surface.user_turn_epoch;
         if actionable == 0 {
@@ -528,9 +527,7 @@ fn ordered_rows(
 
     let heading_label = match (actionable > 0, subject.as_ref()) {
         (true, Some((WorkBucket::Attention, title))) => {
-            format!(
-                "Work · Needs input: {title} · {attention} blocked{source}"
-            )
+            format!("Work · Needs input: {title} · {attention} blocked{source}")
         }
         (true, Some((WorkBucket::Active, title))) => {
             format!("Work · Running: {title} · {active} active{source}")
@@ -616,7 +613,6 @@ fn sanitize_summary_title(raw: &str) -> String {
         prefix
     }
 }
-
 
 fn coordination_row(app: &App) -> Option<RankedWorkRow> {
     let projection = app.coordination_detail.as_ref()?;
@@ -2124,14 +2120,7 @@ mod tests {
         };
         let mut surface = surface();
         surface.set_presentation_now_ms(0);
-        let rows = ordered_rows(
-            &mut surface,
-            None,
-            None,
-            Vec::new(),
-            None,
-            activity.clone(),
-        );
+        let rows = ordered_rows(&mut surface, None, None, Vec::new(), None, activity.clone());
         let activity_row = rows
             .iter()
             .find(|row| row.id.0 == "activity:aggregate")
@@ -2142,18 +2131,9 @@ mod tests {
         assert!(!activity_row.detail.contains("super_secret_pattern_xyz"));
 
         surface.set_presentation_now_ms(ACTIVITY_RECEIPT_TTL_MS);
-        let expired = ordered_rows(
-            &mut surface,
-            None,
-            None,
-            Vec::new(),
-            None,
-            activity,
-        );
+        let expired = ordered_rows(&mut surface, None, None, Vec::new(), None, activity);
         assert!(
-            expired
-                .iter()
-                .all(|row| row.id.0 != "activity:aggregate"),
+            expired.iter().all(|row| row.id.0 != "activity:aggregate"),
             "activity receipt must expire after TTL: {expired:?}"
         );
     }
