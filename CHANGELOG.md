@@ -281,12 +281,13 @@ Thank you to the contributors whose code, reports, and reviews shaped v0.9.1:
   acceptance coverage (PR #4679), plus Enter-send lag diagnosis and fix
   direction for #4605 (PR #4654; landed via the release-lane async-dispatch
   split).
-- [@aboimpinto](https://github.com/aboimpinto) — the exact authored Layer 5.1
-  user-command registry boundary and acceptance audit from PR #4046, preserved
-  intact in the integration graph and completed with the metadata and
-  malformed-sibling follow-ups it identified; the structured, redacted Agent
-  Details and `current_activity` direction preserved from #2694/#2889; and the
-  real-PTY lifecycle acceptance direction from #2886.
+- [@aboimpinto](https://github.com/aboimpinto) — the Layer 5.1 user-command
+  registry boundary from PR #3278; the exact authored evidence commit from PR
+  #4046, preserved intact in the integration graph; and the #2870 follow-up
+  audit whose metadata and malformed-sibling gaps shaped the final corrections.
+  Paulo also provided the structured, redacted Agent Details and
+  `current_activity` direction preserved from #2694/#2889 and the real-PTY
+  lifecycle acceptance direction from #2886.
 - [@baendlorel](https://github.com/baendlorel) — TelecomJS TokenHub provider
   support and key-scoped live-catalog direction from PR #4370, harvested into
   the current provider architecture with co-authorship preserved.
