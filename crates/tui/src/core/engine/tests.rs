@@ -11723,6 +11723,40 @@ async fn post_edit_hook_skips_unknown_tool_names() {
 // ── #3802: non-blocking send for ListSubAgents refresh events ─────────────
 
 #[test]
+fn agent_list_event_carries_the_typed_coordination_projection() {
+    use crate::tools::subagent::coord::{DecisionRecord, DecisionStatus};
+
+    let mut manager = SubAgentManager::new(PathBuf::from("."), 1);
+    manager
+        .record_coordination_decision(DecisionRecord {
+            decision_id: "decision-event".to_string(),
+            subject: "typed event".to_string(),
+            status: DecisionStatus::Accepted,
+            owner: "root".to_string(),
+            scope: Vec::new(),
+            constraints: Vec::new(),
+            evidence_handles: Vec::new(),
+            version: 1,
+            sequence: 0,
+        })
+        .expect("record decision");
+
+    let Event::AgentList {
+        agents,
+        coordination,
+    } = agent_list_event(&manager)
+    else {
+        panic!("expected AgentList event");
+    };
+    assert!(agents.is_empty());
+    assert_eq!(coordination.decisions.len(), 1);
+    assert_eq!(coordination.decisions[0].decision_id, "decision-event");
+    assert_eq!(coordination.decisions[0].status, DecisionStatus::Accepted);
+    assert!(coordination.bounded);
+    assert_eq!(coordination.limit, 24);
+}
+
+#[test]
 fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
     use tokio::sync::mpsc;
 
@@ -11827,7 +11861,11 @@ async fn list_subagents_event_try_send_does_not_block_when_event_channel_full() 
     // Reproduce the handler pattern: try_send an AgentList event.
     // This must return Err immediately — the handler should never hang.
     let agents = vec![];
-    let result = tx_event.try_send(Event::AgentList { agents });
+    let result = tx_event.try_send(Event::AgentList {
+        agents,
+        coordination: crate::tools::subagent::SubAgentManager::new(PathBuf::from("."), 1)
+            .coordination_detail_projection(None, 24),
+    });
     assert!(
         result.is_err(),
         "try_send should fail when event channel is full (backpressure avoided)"

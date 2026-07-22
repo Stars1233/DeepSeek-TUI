@@ -58,8 +58,8 @@ use crate::tools::spec::{
 };
 use crate::tools::subagent::{
     Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion, SubAgentForkContext,
-    SubAgentResult, SubAgentRuntime, SubAgentStatus, SubAgentThinking, SubAgentType,
-    agent_worker_owner_snapshot, ensure_subagent_model_for_provider,
+    SubAgentManager, SubAgentResult, SubAgentRuntime, SubAgentStatus, SubAgentThinking,
+    SubAgentType, agent_worker_owner_snapshot, ensure_subagent_model_for_provider,
     new_shared_subagent_manager_with_timeout, resolve_subagent_assignment_route,
 };
 use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
@@ -83,6 +83,13 @@ use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
 
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
 const GOAL_CONTINUATION_FAILURE_DETAIL_MAX_BYTES: usize = 512;
+
+fn agent_list_event(manager: &SubAgentManager) -> Event {
+    Event::AgentList {
+        agents: manager.list(),
+        coordination: manager.coordination_detail_projection(None, 24),
+    }
+}
 
 /// Snapshot of parent state that can be passed to forked sub-agents without
 /// rewriting the parent transcript.
@@ -2072,17 +2079,18 @@ impl Engine {
                                 crate::tools::subagent::SUBAGENT_LIST_CLEANUP_MIN_INTERVAL,
                             )
                         };
-                        let agents = if due {
+                        let event = if due {
                             let mut manager = self.subagent_manager.write().await;
                             manager.cleanup(Duration::from_secs(60 * 60));
-                            manager.list()
+                            agent_list_event(&manager)
                         } else {
-                            self.subagent_manager.read().await.list()
+                            let manager = self.subagent_manager.read().await;
+                            agent_list_event(&manager)
                         };
                         // #3802: use non-blocking send — this is a refresh event
                         // that can safely be dropped when the channel is full.
                         // The next drain cycle will re-request the list.
-                        if let Err(_e) = self.tx_event.try_send(Event::AgentList { agents }) {
+                        if let Err(_e) = self.tx_event.try_send(event) {
                             tracing::debug!(
                                 "Event channel full; dropping ListSubAgents refresh (will retry next drain)"
                             );
@@ -2092,14 +2100,13 @@ impl Engine {
                         let result = {
                             let mut manager = self.subagent_manager.write().await;
                             match manager.cancel_agent(&agent_id) {
-                                Ok(_) => Ok(manager.list()),
+                                Ok(_) => Ok(agent_list_event(&manager)),
                                 Err(err) => Err(err),
                             }
                         };
                         match result {
-                            Ok(agents) => {
-                                if let Err(_e) = self.tx_event.try_send(Event::AgentList { agents })
-                                {
+                            Ok(event) => {
+                                if let Err(_e) = self.tx_event.try_send(event) {
                                     tracing::debug!(
                                         "Event channel full; dropping CancelSubAgent refresh"
                                     );

@@ -2414,6 +2414,10 @@ pub struct App {
     pub todos: SharedTodoList,
     /// Durable runtime services exposed to model-visible task/automation tools.
     pub runtime_services: RuntimeToolServices,
+    /// Latest bounded coordination receipt delivered by the engine. This is
+    /// the same typed projection returned to headless inspection; the TUI does
+    /// not parse tool text to reconstruct it.
+    pub coordination_detail: Option<crate::tools::subagent::CoordinationDetailProjection>,
     /// Last MCP manager/discovery snapshot shown in the UI.
     pub mcp_snapshot: Option<crate::mcp::McpManagerSnapshot>,
     /// Number of MCP servers declared in the user's config at app boot.
@@ -3584,6 +3588,7 @@ impl App {
                 work: Some(work_runtime),
                 ..RuntimeToolServices::default()
             },
+            coordination_detail: None,
             mcp_snapshot: None,
             // Read the MCP config once at boot to know how many servers
             // the user has declared. The footer chip uses this even when

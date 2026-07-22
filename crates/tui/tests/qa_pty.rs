@@ -375,6 +375,14 @@ fn write_real_pty_evidence(
     metadata: &str,
     frame: &qa_harness::Frame,
 ) -> anyhow::Result<()> {
+    write_real_pty_evidence_dump(name, metadata, &frame.debug_dump())
+}
+
+fn write_real_pty_evidence_dump(
+    name: &str,
+    metadata: &str,
+    frame_dump: &str,
+) -> anyhow::Result<()> {
     let Some(dir) = std::env::var_os("CODEWHALE_QA_EVIDENCE_DIR") else {
         return Ok(());
     };
@@ -382,9 +390,35 @@ fn write_real_pty_evidence(
     std::fs::create_dir_all(&dir)?;
     std::fs::write(
         dir.join(format!("v091-{name}.txt")),
-        format!("real_pty=true\n{metadata}\n\n{}", frame.debug_dump()),
+        format!("real_pty=true\n{metadata}\n\n{frame_dump}"),
     )?;
     Ok(())
+}
+
+/// Capture the exact semantic frame that satisfies `predicate`. Animated
+/// redraws may emit a clear and the replacement composition in separate PTY
+/// drains, so pumping once more after `wait_for` can observe the in-between
+/// clear instead of the product frame that actually met the assertion.
+fn wait_for_frame_dump<F>(
+    h: &mut Harness,
+    mut predicate: F,
+    timeout: Duration,
+) -> anyhow::Result<String>
+where
+    F: FnMut(&qa_harness::Frame) -> bool,
+{
+    let mut captured = None;
+    h.wait_for(
+        |frame| {
+            let matches = predicate(frame);
+            if matches {
+                captured = Some(frame.debug_dump());
+            }
+            matches
+        },
+        timeout,
+    )?;
+    Ok(captured.expect("matching PTY frame must be captured"))
 }
 
 /// Smoke: the binary boots into an alt-screen, paints a composer, and the
@@ -1022,6 +1056,157 @@ fn work_surface_real_rows_own_click_wheel_and_resize() -> anyhow::Result<()> {
     h.wait_for_text("Work", KEY_TIMEOUT)?;
     h.wait_for_text(target, KEY_TIMEOUT)?;
     h.wait_for_text("q/Esc close", KEY_TIMEOUT)?;
+    let _ = h.shutdown();
+    Ok(())
+}
+
+#[test]
+fn real_coordination_details_use_typed_persisted_receipts_in_a_unix_pty() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    let state_dir = ws.workspace().join(".codewhale").join("state");
+    std::fs::create_dir_all(&state_dir)?;
+    std::fs::write(
+        state_dir.join("subagents.v1.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "snapshot_sequence": 6,
+            "agents": [],
+            "workers": [],
+            "coordination": {
+                "schema_version": 1,
+                "sequence": 6,
+                "decisions": [
+                    {
+                        "decision_id": "decision-a",
+                        "subject": "release shell",
+                        "status": "accepted",
+                        "owner": "worker-a",
+                        "scope": ["path:crates/tui"],
+                        "constraints": ["PRIVATE-TRANSCRIPT-MARKER"],
+                        "evidence_handles": [],
+                        "version": 2,
+                        "sequence": 1
+                    },
+                    {
+                        "decision_id": "decision-b",
+                        "subject": "release shell",
+                        "status": "superseded",
+                        "owner": "worker-b",
+                        "scope": ["path:crates/tui"],
+                        "constraints": [],
+                        "evidence_handles": [],
+                        "version": 1,
+                        "sequence": 2
+                    }
+                ],
+                "write_claims": [{
+                    "claim": {
+                        "owner": "worker-a",
+                        "roots": ["crates/tui"],
+                        "exact_files": [],
+                        "contracts": ["ui-contract"]
+                    },
+                    "sequence": 3,
+                    "isolated_worktree": false
+                }],
+                "reconciliations": [{
+                    "reconciliation_id": "reconcile-release-shell",
+                    "subject": "release shell",
+                    "owner": "release-owner",
+                    "input_decisions": ["decision-a", "decision-b"],
+                    "outcome": "candidate-a",
+                    "evidence_handles": [],
+                    "candidate_handles": ["branch:candidate-a", "branch:candidate-b"],
+                    "retry_count": 1,
+                    "retry_limit": 3,
+                    "reviewer_evidence_handles": ["agent:reviewer"],
+                    "verifier_evidence_handles": ["agent:verifier"],
+                    "verification_outcome": "verified",
+                    "sequence": 4
+                }],
+                "projections": [{
+                    "child_id": "worker-a",
+                    "decision_ids": ["decision-a"],
+                    "projected_bytes": 128,
+                    "deduplicated": 1,
+                    "omitted": 0,
+                    "sequence": 5
+                }],
+                "contentions": [{
+                    "claimant": "worker-b",
+                    "conflicting_owner": "worker-a",
+                    "roots": ["crates/tui"],
+                    "exact_files": ["Cargo.toml"],
+                    "contracts": ["ui-contract"],
+                    "disposition": "blocked_pending_isolation_or_serialization",
+                    "sequence": 6
+                }]
+            }
+        }))?,
+    )?;
+
+    let (_ws, mut h) = spawn_minimal_with_env(ws, &[])?;
+    let ambient = wait_for_frame_dump(
+        &mut h,
+        |frame| frame.contains("Coordination Work"),
+        KEY_TIMEOUT,
+    )?;
+    assert!(
+        !ambient.contains("PRIVATE-TRANSCRIPT-MARKER"),
+        "decision constraints leaked into ambient Work chrome:\n{ambient}"
+    );
+
+    h.send(keys::key::alt('w'))?;
+    h.wait_for_idle(Duration::from_millis(80), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    let required_details = [
+        "decision-a · release shell",
+        "status accepted · owner worker-a · version 2",
+        "claimant worker-b · owner worker-a",
+        "paths crates/tui, Cargo.toml",
+        "contracts ui-contract",
+        "disposition blocked_pending_isolation_or_serialization",
+        "release shell · 2 candidates · retry 1/3",
+        "reviewer agent:reviewer",
+        "verifier agent:verifier",
+        "verification verified",
+        "worker-a · decisions decision-a · 128 bytes · 1 deduplicated · 0 omitted",
+    ];
+    for required in required_details {
+        h.wait_for_text(required, KEY_TIMEOUT)?;
+    }
+    let wide = wait_for_frame_dump(
+        &mut h,
+        |frame| required_details.iter().all(|detail| frame.contains(detail)),
+        KEY_TIMEOUT,
+    )?;
+    assert!(!wide.contains("PRIVATE-TRANSCRIPT-MARKER"), "{wide}");
+    write_real_pty_evidence_dump(
+        "coordination-details-wide-140x40",
+        "size=140x40\nstate=persisted-coordination\naction=Alt+W then Enter\nprivate_marker_rendered=false",
+        &wide,
+    )?;
+
+    h.resize(18, 60)?;
+    let narrow = wait_for_frame_dump(
+        &mut h,
+        |frame| {
+            frame.rows() == 18
+                && frame.cols() == 60
+                && frame.contains("Coordination Work")
+                && frame.contains("decision-a")
+        },
+        KEY_TIMEOUT,
+    )?;
+    assert!(!narrow.contains("PRIVATE-TRANSCRIPT-MARKER"), "{narrow}");
+    assert!(narrow.contains("decision-a"), "{narrow}");
+    write_real_pty_evidence_dump(
+        "coordination-details-narrow-60x18",
+        "size=60x18\nstate=persisted-coordination\naction=resize with pager open\nprivate_marker_rendered=false",
+        &narrow,
+    )?;
+
     let _ = h.shutdown();
     Ok(())
 }

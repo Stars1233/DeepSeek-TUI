@@ -192,6 +192,7 @@ impl WorkSurfaceState {
 pub(super) fn project(app: &mut App) -> Vec<WorkRow> {
     let active_session = app.current_session_id.is_some();
     let agents = agent_rows(app);
+    let coordination = coordination_row(app);
     let activity = settled_file_activity(app);
     let capture = app.runtime_services.work.as_ref().map(|work| {
         work.try_capture(app.current_session_id.as_deref())
@@ -218,9 +219,15 @@ pub(super) fn project(app: &mut App) -> Vec<WorkRow> {
     };
 
     let rows = match graph {
-        Some(graph) => graph_rows(&graph, source_state.as_ref(), agents, activity),
-        None if !agents.is_empty() || !activity.is_empty() => {
-            ordered_rows(None, source_state.as_ref(), agents, activity)
+        Some(graph) => graph_rows(
+            &graph,
+            source_state.as_ref(),
+            agents,
+            coordination,
+            activity,
+        ),
+        None if !agents.is_empty() || coordination.is_some() || !activity.is_empty() => {
+            ordered_rows(None, source_state.as_ref(), agents, coordination, activity)
         }
         None => source_state.map_or_else(Vec::new, |state| {
             vec![section_heading(
@@ -243,9 +250,10 @@ fn graph_rows(
     snapshot: &WorkGraphSnapshot,
     source_state: Option<&WorkSourceState>,
     agents: Vec<RankedWorkRow>,
+    coordination: Option<RankedWorkRow>,
     activity: SettledFileActivity,
 ) -> Vec<WorkRow> {
-    ordered_rows(Some(snapshot), source_state, agents, activity)
+    ordered_rows(Some(snapshot), source_state, agents, coordination, activity)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,8 +300,10 @@ fn ordered_rows(
     snapshot: Option<&WorkGraphSnapshot>,
     source_state: Option<&WorkSourceState>,
     mut ranked: Vec<RankedWorkRow>,
+    coordination: Option<RankedWorkRow>,
     activity: SettledFileActivity,
 ) -> Vec<WorkRow> {
+    ranked.extend(coordination);
     if let Some(snapshot) = snapshot {
         ranked.extend(
             snapshot
@@ -353,6 +363,47 @@ fn ordered_rows(
     )];
     rows.extend(ranked.into_iter().map(|item| item.row));
     rows
+}
+
+fn coordination_row(app: &App) -> Option<RankedWorkRow> {
+    let projection = app.coordination_detail.as_ref()?;
+    if projection.decisions.is_empty()
+        && projection.write_claims.is_empty()
+        && projection.reconciliations.is_empty()
+        && projection.context_projections.is_empty()
+        && projection.contentions.is_empty()
+    {
+        return None;
+    }
+    let attention = crate::tui::coordination_detail::needs_attention(projection);
+    let bucket = if attention {
+        WorkBucket::Attention
+    } else {
+        WorkBucket::Recent
+    };
+    Some(RankedWorkRow {
+        bucket,
+        // Coordination is a session-wide receipt, before individual workers
+        // within the same bucket but after live/attention priority sorting.
+        order: 100,
+        row: WorkRow {
+            id: WorkRowId("coordination".to_string()),
+            mark: if attention {
+                crate::tui::glyphs::ATTENTION
+            } else {
+                crate::tui::glyphs::DONE
+            },
+            label: "Coordination Work".to_string(),
+            detail: crate::tui::coordination_detail::summary(projection),
+            tone: bucket_tone(bucket),
+            selectable: true,
+            primary_action: Some(SidebarRowAction::InspectWork {
+                title: "Coordination Work".to_string(),
+                body: crate::tui::coordination_detail::format(projection),
+                stop_action: None,
+            }),
+        },
+    })
 }
 
 fn node_bucket(node: &WorkNode) -> WorkBucket {
@@ -1239,7 +1290,13 @@ mod tests {
             operation(NodeState::Ready, "ready"),
         ];
 
-        let rows = graph_rows(&snapshot, None, Vec::new(), SettledFileActivity::default());
+        let rows = graph_rows(
+            &snapshot,
+            None,
+            Vec::new(),
+            None,
+            SettledFileActivity::default(),
+        );
 
         assert_eq!(
             rows.first().map(|row| row.label.as_str()),
@@ -1277,7 +1334,13 @@ mod tests {
             plan_index: None,
         });
 
-        let rows = graph_rows(&snapshot, None, Vec::new(), SettledFileActivity::default());
+        let rows = graph_rows(
+            &snapshot,
+            None,
+            Vec::new(),
+            None,
+            SettledFileActivity::default(),
+        );
         let labels = rows
             .iter()
             .map(|row| row.label.as_str())
@@ -1322,7 +1385,13 @@ mod tests {
         let mut snapshot = WorkGraphSnapshot::new();
         snapshot.nodes = vec![durable, failed, evidence_pending];
 
-        let rows = graph_rows(&snapshot, None, Vec::new(), SettledFileActivity::default());
+        let rows = graph_rows(
+            &snapshot,
+            None,
+            Vec::new(),
+            None,
+            SettledFileActivity::default(),
+        );
         let labels = rows
             .iter()
             .map(|row| row.label.as_str())
@@ -1349,10 +1418,16 @@ mod tests {
             operation(NodeState::Active, "active"),
         ];
 
-        let labels = graph_rows(&snapshot, None, Vec::new(), SettledFileActivity::default())
-            .into_iter()
-            .map(|row| row.label)
-            .collect::<Vec<_>>();
+        let labels = graph_rows(
+            &snapshot,
+            None,
+            Vec::new(),
+            None,
+            SettledFileActivity::default(),
+        )
+        .into_iter()
+        .map(|row| row.label)
+        .collect::<Vec<_>>();
 
         assert_eq!(
             labels,

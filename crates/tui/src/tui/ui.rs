@@ -1181,7 +1181,7 @@ pub async fn run_tui(
     let engine_config = build_engine_config(&app, config);
 
     // Spawn the Engine - it will handle all API communication
-    let engine_handle = spawn_engine(engine_config, config);
+    let engine_handle = spawn_tui_engine(engine_config, config);
     crate::startup_trace::mark("engine_spawned");
     // The translation client is optional: it never crashes the TUI on
     // startup, even when the API key is missing, the base URL is malformed,
@@ -1700,6 +1700,15 @@ fn handle_memory_quick_add(app: &mut App, input: &str, config: &Config) {
             ));
         }
     }
+}
+
+fn spawn_tui_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
+    let handle = spawn_engine(config, api_config);
+    // Prime durable agent + coordination state through the same engine event
+    // used by later refreshes. All TUI engine replacements use this wrapper,
+    // so workspace switches and provider recovery cannot retain stale Work.
+    let _ = handle.try_send(Op::ListSubAgents);
+    handle
 }
 
 fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
@@ -3775,11 +3784,15 @@ async fn run_event_loop(
                         }
                         subagent_list_refresh_requested = true;
                     }
-                    EngineEvent::AgentList { agents } => {
+                    EngineEvent::AgentList {
+                        agents,
+                        coordination,
+                    } => {
                         let mut sorted = agents.clone();
                         sort_subagents_in_place(&mut sorted);
                         sorted.retain(|a| !a.from_prior_session);
                         app.subagent_cache = sorted.clone();
+                        apply_coordination_detail_projection(app, coordination);
                         reconcile_subagent_activity_state(app);
                         let view_agents = subagent_view_agents(app, &app.subagent_cache);
                         if app.view_stack.update_subagents(&view_agents) {
@@ -4071,7 +4084,7 @@ async fn run_event_loop(
         if let Some(rollback_warning) = respawn_after_provider_rollback {
             let _ = engine_handle.send(Op::Shutdown).await;
             let engine_config = build_engine_config(app, config);
-            engine_handle = spawn_engine(engine_config, config);
+            engine_handle = spawn_tui_engine(engine_config, config);
             if !app.api_messages.is_empty() {
                 let _ = engine_handle
                     .send(Op::SyncSession {
@@ -6574,6 +6587,13 @@ fn clear_work_inspector_after_pager_close(app: &mut App, was_work_inspector: boo
     if was_work_inspector && app.view_stack.top_kind() != Some(ModalKind::Pager) {
         app.work_surface.opened = None;
     }
+}
+
+fn apply_coordination_detail_projection(
+    app: &mut App,
+    projection: crate::tools::subagent::CoordinationDetailProjection,
+) {
+    app.coordination_detail = Some(projection);
 }
 
 /// The event-loop seam for Ctrl+T. Keeping the `KeyEvent` predicate and App
@@ -9814,7 +9834,7 @@ async fn switch_provider(
 
     let _ = engine_handle.send(Op::Shutdown).await;
     let engine_config = build_engine_config(app, config);
-    *engine_handle = spawn_engine(engine_config, config);
+    *engine_handle = spawn_tui_engine(engine_config, config);
 
     if !app.api_messages.is_empty() {
         let _ = engine_handle
@@ -9970,7 +9990,7 @@ async fn apply_provider_fallback_switch(
 
     let _ = engine_handle.send(Op::Shutdown).await;
     let engine_config = build_engine_config(app, config);
-    *engine_handle = spawn_engine(engine_config, config);
+    *engine_handle = spawn_tui_engine(engine_config, config);
 
     if !app.api_messages.is_empty() {
         let _ = engine_handle
@@ -10248,7 +10268,7 @@ async fn apply_command_result(
                 sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                 if respawn {
                     let _ = engine_handle.send(Op::Shutdown).await;
-                    *engine_handle = spawn_engine(build_engine_config(app, config), config);
+                    *engine_handle = spawn_tui_engine(build_engine_config(app, config), config);
                 } else {
                     let _ = engine_handle
                         .send(Op::SetModel {
@@ -10332,7 +10352,7 @@ async fn apply_command_result(
                 app.update_model_compaction_budget();
                 if provider_changed || workspace_changed {
                     let _ = engine_handle.send(Op::Shutdown).await;
-                    *engine_handle = spawn_engine(build_engine_config(app, config), config);
+                    *engine_handle = spawn_tui_engine(build_engine_config(app, config), config);
                 }
                 // SyncSession carries the conversation but not resolved route
                 // limits. Refresh the engine's model first so a loaded,
@@ -10374,7 +10394,7 @@ async fn apply_command_result(
             }
             AppAction::PluginRegistryChanged => {
                 let _ = engine_handle.send(Op::Shutdown).await;
-                *engine_handle = spawn_engine(build_engine_config(app, config), config);
+                *engine_handle = spawn_tui_engine(build_engine_config(app, config), config);
                 if !app.api_messages.is_empty() {
                     let _ = engine_handle
                         .send(Op::SyncSession {
@@ -10947,7 +10967,7 @@ async fn apply_command_result(
                         // Rebuild the engine with the new config so API key/model/base URL take effect.
                         let _ = engine_handle.send(Op::Shutdown).await;
                         let engine_config = build_engine_config(app, config);
-                        *engine_handle = spawn_engine(engine_config, config);
+                        *engine_handle = spawn_tui_engine(engine_config, config);
                         if !app.api_messages.is_empty() {
                             let _ = engine_handle
                                 .send(Op::SyncSession {
@@ -11023,6 +11043,7 @@ fn spawn_external_url_command(mut command: Command) -> Result<()> {
 
 fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: PathBuf) {
     app.workspace = workspace.clone();
+    app.coordination_detail = None;
     app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
     app.active_skill = None;
     app.active_skill_provenance = None;
@@ -11075,7 +11096,7 @@ async fn switch_workspace(
 
     let _ = engine_handle.send(Op::Shutdown).await;
     let engine_config = build_engine_config(app, config);
-    *engine_handle = spawn_engine(engine_config, config);
+    *engine_handle = spawn_tui_engine(engine_config, config);
     if !app.api_messages.is_empty() {
         let _ = engine_handle
             .send(Op::SyncSession {
@@ -12944,7 +12965,8 @@ async fn handle_view_events(
                         sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                         if respawn {
                             let _ = engine_handle.send(Op::Shutdown).await;
-                            *engine_handle = spawn_engine(build_engine_config(app, config), config);
+                            *engine_handle =
+                                spawn_tui_engine(build_engine_config(app, config), config);
                         } else {
                             let _ = engine_handle
                                 .send(Op::SetModel {

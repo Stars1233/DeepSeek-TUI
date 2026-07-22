@@ -518,6 +518,47 @@ fn closing_work_inspector_pager_clears_opened_row_owner() {
 }
 
 #[test]
+fn coordination_event_projection_is_retained_as_typed_app_state() {
+    use crate::tools::subagent::CoordinationDetailProjection;
+    use crate::tools::subagent::coord::{
+        CoordinationDetailMetrics, DecisionRecord, DecisionStatus,
+    };
+
+    let mut app = create_test_app();
+    let projection = CoordinationDetailProjection {
+        schema_version: 1,
+        sequence: 4,
+        decisions: vec![DecisionRecord {
+            decision_id: "decision-app".to_string(),
+            subject: "typed app state".to_string(),
+            status: DecisionStatus::Accepted,
+            owner: "root".to_string(),
+            scope: Vec::new(),
+            constraints: Vec::new(),
+            evidence_handles: Vec::new(),
+            version: 2,
+            sequence: 4,
+        }],
+        write_claims: Vec::new(),
+        reconciliations: Vec::new(),
+        context_projections: Vec::new(),
+        contentions: Vec::new(),
+        metrics: CoordinationDetailMetrics {
+            hottest_paths: Vec::new(),
+            package_or_module_growth: None,
+            route_or_cost: None,
+            note: "No authoritative metric source".to_string(),
+        },
+        bounded: true,
+        limit: 24,
+    };
+
+    apply_coordination_detail_projection(&mut app, projection.clone());
+
+    assert_eq!(app.coordination_detail, Some(projection));
+}
+
+#[test]
 fn approval_mouse_wheel_reviews_transcript_without_closing_card() {
     let mut app = create_test_app();
     app.view_stack.push(ApprovalView::new(ApprovalRequest::new(

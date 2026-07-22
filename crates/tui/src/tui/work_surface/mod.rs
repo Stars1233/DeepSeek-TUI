@@ -220,6 +220,77 @@ mod tests {
     }
 
     #[test]
+    fn coordination_projection_is_one_selectable_work_row_with_shared_details() {
+        use crate::tools::subagent::CoordinationDetailProjection;
+        use crate::tools::subagent::coord::{
+            CoordinationDetailMetrics, DecisionRecord, DecisionStatus,
+        };
+
+        let mut app = app();
+        app.coordination_detail = Some(CoordinationDetailProjection {
+            schema_version: 1,
+            sequence: 7,
+            decisions: vec![DecisionRecord {
+                decision_id: "decision-work".to_string(),
+                subject: "coordination row".to_string(),
+                status: DecisionStatus::Accepted,
+                owner: "release-owner".to_string(),
+                scope: Vec::new(),
+                constraints: vec!["PRIVATE-TRANSCRIPT-MARKER".to_string()],
+                evidence_handles: Vec::new(),
+                version: 2,
+                sequence: 7,
+            }],
+            write_claims: Vec::new(),
+            reconciliations: Vec::new(),
+            context_projections: Vec::new(),
+            contentions: Vec::new(),
+            metrics: CoordinationDetailMetrics {
+                hottest_paths: Vec::new(),
+                package_or_module_growth: None,
+                route_or_cost: None,
+                note: "No active claims".to_string(),
+            },
+            bounded: true,
+            limit: 24,
+        });
+
+        let rows = super::model::project(&mut app);
+        assert_eq!(
+            rows[0].label,
+            "Work · 0 active · 0 needs input · 0 ready · 1 recent"
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.id.0 == "coordination")
+            .expect("coordination Work row");
+        assert_eq!(row.label, "Coordination Work");
+        assert_eq!(row.detail, "1 decisions · 0 contentions · 0 reconciled");
+        let Some(SidebarRowAction::InspectWork { title, body, .. }) = row.primary_action.as_ref()
+        else {
+            panic!("coordination row must open the shared Work inspector");
+        };
+        assert_eq!(title, "Coordination Work");
+        assert!(body.contains("decision-work · coordination row"), "{body}");
+        assert!(
+            body.contains("status accepted · owner release-owner · version 2"),
+            "{body}"
+        );
+        assert!(!body.contains("PRIVATE-TRANSCRIPT-MARKER"), "{body}");
+
+        let narrow = render_text(&mut app, 32, 4);
+        assert!(narrow.contains("Coordination Work"), "{narrow}");
+        let _ = super::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
+        );
+        let action = super::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("Work surface handled Enter")
+            .expect("coordination inspector action");
+        assert!(matches!(action, SidebarRowAction::InspectWork { .. }));
+    }
+
+    #[test]
     fn todos_share_one_ordered_work_projection_without_a_second_heading() {
         let mut app = app();
         {

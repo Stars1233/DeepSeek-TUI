@@ -13,7 +13,7 @@ use crate::error_taxonomy::ErrorEnvelope;
 use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::tools::goal::GoalSnapshot;
 use crate::tools::spec::{ToolError, ToolResult};
-use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult};
+use crate::tools::subagent::{AgentWorkerStatus, CoordinationDetailProjection, SubAgentResult};
 use crate::tools::user_input::UserInputRequest;
 
 /// Final status for a turn.
@@ -240,8 +240,12 @@ pub enum Event {
     /// Sub-agent completed
     AgentComplete { id: String, result: String },
 
-    /// Sub-agent listing
-    AgentList { agents: Vec<SubAgentResult> },
+    /// Sub-agent listing plus the same bounded typed coordination projection
+    /// used by machine-readable `agents/coordinate inspect`.
+    AgentList {
+        agents: Vec<SubAgentResult>,
+        coordination: CoordinationDetailProjection,
+    },
 
     /// Structured sub-agent mailbox envelope (issue #128). Carries the
     /// monotonic seq + the typed `MailboxMessage` so the UI can route each

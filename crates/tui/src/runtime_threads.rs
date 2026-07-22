@@ -5801,7 +5801,7 @@ impl RuntimeThreadManager {
                     )
                     .await?;
                 }
-                EngineEvent::AgentList { agents } => {
+                EngineEvent::AgentList { agents, .. } => {
                     let running = agents
                         .iter()
                         .filter(|agent| matches!(agent.status, SubAgentStatus::Running))

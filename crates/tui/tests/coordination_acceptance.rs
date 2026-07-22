@@ -1,70 +1,14 @@
-//! Process-boundary/source-wiring acceptance for delegated coordination (#4647).
+//! Process-boundary acceptance for delegated coordination (#4647).
 //!
-//! Behavioral state-machine coverage lives beside `SubAgentManager`, where it
-//! can exercise the real private ledger without inventing a second public API.
-//! This integration target locks the public wiring and uses a real tempfile Git
-//! repository to prove that terminal fan-in evidence keeps both candidates.
+//! Typed event/App/Work rendering assertions live beside their production
+//! modules, and `qa_pty::real_coordination_details_*` drives the sealed binary.
+//! This target retains the real-Git fan-in proof: terminal reconciliation must
+//! keep both candidates available instead of reducing them to source strings.
 
 use std::path::Path;
 use std::process::Command;
 
 use tempfile::tempdir;
-
-const COORD_SOURCE: &str = include_str!("../src/tools/subagent/coord.rs");
-const SUBAGENT_SOURCE: &str = include_str!("../src/tools/subagent/mod.rs");
-const WORKER_SOURCE: &str = include_str!("../src/fleet/worker_runtime.rs");
-const FLEET_MANAGER_SOURCE: &str = include_str!("../src/fleet/manager.rs");
-const TEST_SOURCE: &str = include_str!("../src/tools/subagent/tests.rs");
-
-#[test]
-fn coordination_contract_is_live_bounded_and_fail_closed() {
-    for required in [
-        "COORDINATION_SCHEMA_VERSION",
-        "ContextProjectionReceipt",
-        "WriteContentionReceipt",
-        "candidate_handles",
-        "retry_limit",
-        "reviewer_evidence_handles",
-        "verifier_evidence_handles",
-        "verification_outcome",
-    ] {
-        assert!(
-            COORD_SOURCE.contains(required),
-            "coordination ledger lost required field {required}"
-        );
-    }
-    for required in [
-        "nearest_common_fan_in_owner",
-        "project_relevant_decisions",
-        "prompt-only/general launch remains ergonomic",
-        "write-capable agent starts must declare",
-        "register_worker_with_coordination",
-        "context_projections",
-        "hottest_paths",
-    ] {
-        assert!(
-            SUBAGENT_SOURCE.contains(required),
-            "runtime coordination path lost {required}"
-        );
-    }
-    assert!(
-        !SUBAGENT_SOURCE.contains("vec![\".\".to_string()]"),
-        "missing writer declarations must never become an implicit repo-wide claim"
-    );
-    assert!(
-        WORKER_SOURCE.contains("launch_manifest: Some(launch_manifest)"),
-        "Fleet workers must persist the same #414 launch manifest"
-    );
-    assert!(
-        FLEET_MANAGER_SOURCE.contains("preflight_worker_coordination")
-            && FLEET_MANAGER_SOURCE.contains("register_worker_with_coordination"),
-        "Fleet dispatch must enforce claims before its durable running transition"
-    );
-    assert!(
-        TEST_SOURCE.contains("coordination_acceptance_preserves_scopes_candidates_and_replay"),
-        "private-ledger acceptance fixture must remain wired"
-    );
-}
 
 #[test]
 fn terminal_retry_fixture_preserves_both_real_git_candidates() {
