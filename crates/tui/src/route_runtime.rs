@@ -806,12 +806,12 @@ mod tests {
         }
     }
 
-
     #[test]
     fn k3_route_rejects_cross_paired_model_ids_and_allows_canonical_pairs() {
         use crate::config::{
             DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL, KIMI_CODE_K3_MODEL,
-            MOONSHOT_KIMI_K3_MODEL, moonshot_k3_route_display_name, validate_kimi_code_api_model_id,
+            MOONSHOT_KIMI_K3_MODEL, moonshot_k3_route_display_name,
+            validate_kimi_code_api_model_id,
         };
 
         // Canonical pairs succeed.
