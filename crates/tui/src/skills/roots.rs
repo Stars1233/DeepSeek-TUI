@@ -446,6 +446,7 @@ pub fn codewhale_workspace_skills_dir(workspace: &Path) -> Option<PathBuf> {
 
 /// Filter candidate paths to existing directories, preserving order and
 /// de-duplicating by canonical path.
+#[cfg(test)]
 #[must_use]
 pub fn existing_skill_dirs(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::new();

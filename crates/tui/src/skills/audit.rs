@@ -191,6 +191,7 @@ pub trait SkillReadinessProvider {
 }
 
 /// Scan skill roots into a full, unmerged inventory.
+#[cfg(test)]
 #[must_use]
 pub fn scan(
     workspace: &Path,
@@ -1110,9 +1111,7 @@ mod tests {
         let external = snap
             .skills
             .iter()
-            .find(|s| {
-                s.name == "shared" && s.source_kind == SkillSourceKind::CompatibleExternal
-            })
+            .find(|s| s.name == "shared" && s.source_kind == SkillSourceKind::CompatibleExternal)
             .expect("external");
         assert!(!external.import_candidate);
         assert!(!external.conflicts_with.is_empty());

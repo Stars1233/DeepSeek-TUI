@@ -12,6 +12,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
 
+use super::{
+    ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
+    render_modal_footer, render_underwater_surface, truncate_view_text,
+};
 use crate::palette;
 use crate::skills::audit::{
     AuditedSkill, AuditedSkillId, DigestState, IntegrityState, ParserState, PrecedenceState,
@@ -21,10 +25,6 @@ use crate::skills::audit::{
 use crate::skills::mutation::{ConflictPolicy, SkillMutationRequest, SkillTargetScope};
 use crate::skills::roots::SkillRootKind;
 use crate::tui::app::App;
-use super::{
-    ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
-    render_modal_footer, render_underwater_surface, truncate_view_text,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagerMode {
@@ -73,7 +73,13 @@ pub struct SkillsManagerView {
 impl SkillsManagerView {
     #[must_use]
     pub fn new(app: &App) -> Self {
-        Self::from_scan(app, ManagerMode::OwnedOnly, SkillTargetScope::Global, None, None)
+        Self::from_scan(
+            app,
+            ManagerMode::OwnedOnly,
+            SkillTargetScope::Global,
+            None,
+            None,
+        )
     }
 
     #[must_use]
@@ -177,10 +183,7 @@ impl SkillsManagerView {
             SkillTargetScope::Global => SkillTargetScope::Project,
             SkillTargetScope::Project => SkillTargetScope::Global,
         };
-        self.status = Some(format!(
-            "Import target: {}",
-            scope_label(self.import_scope)
-        ));
+        self.status = Some(format!("Import target: {}", scope_label(self.import_scope)));
     }
 
     fn emit_action(&mut self, kind: SkillActionKind) -> ViewAction {
@@ -367,10 +370,7 @@ impl SkillsManagerView {
         }
 
         let visible = usize::from(inner.height).max(1);
-        let offset = self
-            .selected
-            .saturating_add(1)
-            .saturating_sub(visible);
+        let offset = self.selected.saturating_add(1).saturating_sub(visible);
         let end = (offset + visible).min(self.skills.len());
 
         for (row, idx) in (offset..end).enumerate() {
@@ -414,8 +414,11 @@ impl SkillsManagerView {
         block.render(area, buf);
 
         let Some(skill) = self.selected_skill() else {
-            EmptyState::new("Nothing selected", "Install or import a skill to get started.")
-                .render(inner, buf);
+            EmptyState::new(
+                "Nothing selected",
+                "Install or import a skill to get started.",
+            )
+            .render(inner, buf);
             return;
         };
 
@@ -599,9 +602,7 @@ fn digest_label(state: &DigestState) -> String {
 
 fn provenance_label(state: &ProvenanceState) -> String {
     match state {
-        ProvenanceState::Managed { spec, .. } => {
-            spec.clone().unwrap_or_else(|| "managed".into())
-        }
+        ProvenanceState::Managed { spec, .. } => spec.clone().unwrap_or_else(|| "managed".into()),
         ProvenanceState::Manual => "manual".into(),
         ProvenanceState::External => "external".into(),
         ProvenanceState::BuiltIn => "built-in".into(),
@@ -709,7 +710,9 @@ impl ModalView for SkillsManagerView {
             "  scan={}   import-target={}   {}",
             self.mode.label(),
             scope_label(self.import_scope),
-            self.status.as_deref().unwrap_or("j/k move · actions in footer")
+            self.status
+                .as_deref()
+                .unwrap_or("j/k move · actions in footer")
         );
         buf.set_stringn(
             header.x,
@@ -831,7 +834,10 @@ mod tests {
         let mut view = SkillsManagerView::new(&app);
         assert_eq!(view.mode, ManagerMode::OwnedOnly);
         assert_eq!(view.kind(), ModalKind::SkillsManager);
-        assert!(matches!(view.handle_key(key(KeyCode::Esc)), ViewAction::Close));
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Esc)),
+            ViewAction::Close
+        ));
     }
 
     #[test]

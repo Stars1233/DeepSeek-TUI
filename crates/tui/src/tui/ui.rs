@@ -10762,9 +10762,10 @@ async fn apply_command_result(
             }
             AppAction::OpenSkillsManager => {
                 if app.view_stack.top_kind() != Some(ModalKind::SkillsManager) {
-                    app.view_stack.push(
-                        crate::tui::views::skills_manager::SkillsManagerView::new(app),
-                    );
+                    app.view_stack
+                        .push(crate::tui::views::skills_manager::SkillsManagerView::new(
+                            app,
+                        ));
                 }
             }
             AppAction::OpenFleetRoster => {
@@ -12716,8 +12717,8 @@ fn refresh_skills_manager_if_open(
     };
     let rebuilt = if let Some(prev) = boxed
         .as_any_mut()
-        .downcast_mut::<crate::tui::views::skills_manager::SkillsManagerView>()
-    {
+        .downcast_mut::<crate::tui::views::skills_manager::SkillsManagerView>(
+    ) {
         crate::tui::views::skills_manager::SkillsManagerView::rebuild_preserving(
             app, prev, status, focus,
         )
@@ -12778,7 +12779,10 @@ async fn handle_skill_mutation_requested(
         Ok(receipt) => {
             let msg = match &receipt.outcome {
                 SkillMutationOutcome::Installed => {
-                    format!("Installed '{}' → {}", receipt.name, receipt.safe_target_path)
+                    format!(
+                        "Installed '{}' → {}",
+                        receipt.name, receipt.safe_target_path
+                    )
                 }
                 SkillMutationOutcome::Updated => format!("Updated '{}'", receipt.name),
                 SkillMutationOutcome::NoChange => {
@@ -13752,8 +13756,8 @@ async fn handle_view_events(
                 {
                     if let Some(view) = boxed
                         .as_any_mut()
-                        .downcast_mut::<crate::tui::views::skills_manager::SkillsManagerView>()
-                    {
+                        .downcast_mut::<crate::tui::views::skills_manager::SkillsManagerView>(
+                    ) {
                         crate::tui::views::skills_manager::apply_toggle_compatible(view, app);
                     }
                     app.view_stack.push_boxed(boxed);

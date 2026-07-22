@@ -1315,7 +1315,11 @@ mod tests {
         let network = NetworkPolicy::default();
         let c = ctx(&workspace, &home, &network);
 
-        write_skill(&workspace.join(".codewhale").join("skills"), "dup", "project");
+        write_skill(
+            &workspace.join(".codewhale").join("skills"),
+            "dup",
+            "project",
+        );
         write_skill(&home.join(".codewhale").join("skills"), "dup", "global");
 
         let err = resolve_owned_skill_by_name(&c, "dup", None).unwrap_err();
@@ -1342,7 +1346,11 @@ mod tests {
         let c = ctx(&workspace, &home, &network);
 
         fs::create_dir_all(workspace.join(".codewhale").join("skills")).unwrap();
-        write_skill(&workspace.join(".claude").join("skills"), "only-ext", "body");
+        write_skill(
+            &workspace.join(".claude").join("skills"),
+            "only-ext",
+            "body",
+        );
         let sentinel = workspace.join(".claude").join("skills").join("SENTINEL");
         fs::write(&sentinel, "untouched").unwrap();
 

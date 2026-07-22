@@ -1107,10 +1107,7 @@ mod tests {
         let _home = IsolatedHome::new(&tmpdir);
         let mut app = create_test_app_with_tmpdir(&tmpdir);
         let result = list_skills(&mut app, None);
-        assert!(matches!(
-            result.action,
-            Some(AppAction::OpenSkillsManager)
-        ));
+        assert!(matches!(result.action, Some(AppAction::OpenSkillsManager)));
     }
 
     #[test]
@@ -1496,7 +1493,10 @@ mod tests {
         assert_eq!(scope, None);
         assert_eq!(rest, "github:o/r");
         // Bare install (no --project/--global) maps to the CodeWhale global root.
-        assert_eq!(scope.unwrap_or(SkillTargetScope::Global), SkillTargetScope::Global);
+        assert_eq!(
+            scope.unwrap_or(SkillTargetScope::Global),
+            SkillTargetScope::Global
+        );
 
         let (scope, rest) = parse_scope_args("--project my-skill").unwrap();
         assert_eq!(scope, Some(SkillTargetScope::Project));
@@ -1524,7 +1524,11 @@ mod tests {
             "---\nname: ext-only\ndescription: d\n---\nbody\n",
         )
         .unwrap();
-        let sentinel = tmpdir.path().join(".claude").join("skills").join("SENTINEL");
+        let sentinel = tmpdir
+            .path()
+            .join(".claude")
+            .join("skills")
+            .join("SENTINEL");
         std::fs::write(&sentinel, "keep").unwrap();
 
         let mut app = create_test_app_with_tmpdir(&tmpdir);

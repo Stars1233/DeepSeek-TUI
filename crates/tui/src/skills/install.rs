@@ -507,6 +507,7 @@ pub fn uninstall(name: &str, skills_dir: &Path) -> Result<()> {
 ///
 /// Refuses to mark system skills (no `.installed-from`) so the bundled
 /// `skill-creator` doesn't accidentally inherit elevated tool privileges.
+#[cfg(test)]
 pub fn trust(name: &str, skills_dir: &Path) -> Result<()> {
     let target = skill_target_path(name, skills_dir)?;
     if !target.exists() {
