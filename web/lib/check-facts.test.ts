@@ -74,7 +74,10 @@ function freshFacts(overrides: Partial<RepoFacts> = {}): RepoFacts {
     sourceCommittedAt: null,
     version: "0.8.64",
     crates: ["cli", "config", "tui"],
-    sandboxBackends: ["landlock (Linux)", "seatbelt (macOS)"],
+    sandboxBackends: [
+      "seatbelt (macOS, when available)",
+      "bubblewrap (Linux, opt-in when installed)",
+    ],
     providers: [
       { id: "deepseek", label: "DeepSeek", env: "DEEPSEEK_API_KEY" },
       { id: "anthropic", label: "Anthropic", env: "ANTHROPIC_API_KEY" },

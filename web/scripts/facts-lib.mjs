@@ -5,7 +5,7 @@
  *
  * Sources of truth:
  *   - <repo>/Cargo.toml                         → version, workspace crates
- *   - <repo>/crates/tui/src/sandbox/*.rs        → sandbox backends
+ *   - <repo>/crates/tui/src/sandbox/mod.rs      → enforced sandbox markers
  *   - <repo>/crates/tui/src/config.rs           → provider list (ApiProvider enum), DEFAULT_TEXT_MODEL
  *   - <repo>/npm/codewhale/package.json         → node engines
  *   - <repo>/crates/tui/src/tools/*.rs          → tool count (ToolSpec impls)
@@ -42,15 +42,16 @@ export function deriveCrates() {
 }
 
 export function deriveSandboxBackends() {
-  const dir = join(REPO_ROOT, "crates/tui/src/sandbox");
-  if (!existsSync(dir)) return [];
-  const files = readdirSync(dir)
-    .filter((f) => f.endsWith(".rs"))
-    .map((f) => f.replace(/\.rs$/, ""))
-    .filter((f) => !["mod", "policy", "backend", "opensandbox", "windows"].includes(f))
-    .sort();
-  const map = { seatbelt: "seatbelt (macOS)", landlock: "landlock (Linux)" };
-  return files.map((f) => map[f] ?? f);
+  const source = read("crates/tui/src/sandbox/mod.rs");
+  return source ? deriveSandboxBackendsFromSource(source) : [];
+}
+
+export function deriveSandboxBackendsFromSource(source) {
+  const marker = source.match(
+    /pub const PUBLIC_SANDBOX_BACKENDS\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/,
+  );
+  if (!marker) return [];
+  return [...marker[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
 }
 
 /**

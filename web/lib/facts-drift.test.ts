@@ -29,16 +29,18 @@ function installGitHubFixture(toolCountSource: string | null): void {
           }),
         );
       }
-      if (url.includes("/contents/crates/tui/src/sandbox?")) {
-        return response(JSON.stringify([{ name: "seatbelt.rs", type: "file" }]));
-      }
-
       const rawPath = url.split(`/${REVISION}/`)[1];
       const sources: Record<string, string> = {
         "Cargo.toml": 'version = "0.9.2"\nmembers = ["crates/tui"]',
         "crates/tui/src/config.rs":
           'pub enum ApiProvider {\n    Deepseek,\n}\nconst DEFAULT_TEXT_MODEL: &str = "remote-model";',
         "crates/tui/src/config/models.rs": "",
+        "crates/tui/src/sandbox/mod.rs": `
+          pub const PUBLIC_SANDBOX_BACKENDS: &[&str] = &[
+            "seatbelt (macOS, when available)",
+            "bubblewrap (Linux, opt-in when installed)",
+          ];
+        `,
         "npm/codewhale/package.json": JSON.stringify({ engines: { node: ">=18" } }),
         LICENSE: "MIT License\n",
       };
@@ -67,6 +69,14 @@ describe("deriveFactsFromRemote", () => {
     expect(facts?.sourceRevision).toBe(REVISION);
     expect(facts?.version).toBe("0.9.2");
     expect(facts?.toolCount).toBe(73);
+    expect(facts?.sandboxBackends).toEqual([
+      "seatbelt (macOS, when available)",
+      "bubblewrap (Linux, opt-in when installed)",
+    ]);
+    const fetchMock = vi.mocked(fetch);
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes("/contents/")),
+    ).toBe(false);
   });
 
   it("fails derivation when the exact revision has no valid tool count", async () => {

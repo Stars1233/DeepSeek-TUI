@@ -41,7 +41,7 @@ logs and adapter logs are stored under `.codewhale/fleet/` and
 
 ### Interactive and persistent status
 
-CodeWhale has two similarly named status surfaces with different scopes:
+Codewhale has two similarly named status surfaces with different scopes:
 
 - In the TUI, `/fleet status` (or `/subagents`) shows the sub-agents attached
   to the current interactive session. It does not read the persistent Fleet

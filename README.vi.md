@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:acc243c2dc85 -->
+<!-- source: README.md sha256:a14f7d3aa7d1 -->
 # Codewhale
 
-**Một runtime. Mọi model. Máy của bạn.**
+**Một runtime. Các model hosted và local được hỗ trợ. Máy của bạn.**
 
 Codewhale là một coding agent cho terminal của bạn. Hoạt động với các model
 hosted và local được hỗ trợ; ưu tiên model mở. Đưa cho nó một provider, một model và một nhiệm vụ: nó đọc
@@ -16,9 +16,11 @@ bằng Rust, giấy phép MIT, chạy trên máy của bạn.
   runtime và một bộ công cụ. Ngân sách ngữ cảnh và giá lấy từ route thật; giá
   chưa rõ hiển thị là chưa rõ, không bao giờ là $0.
 - **An toàn từ thiết kế.** Chế độ Plan chỉ đọc. Mọi lệnh gọi rủi ro đều qua
-  phê duyệt. Sandbox của hệ điều hành giữ vững — Seatbelt, Landlock, seccomp,
-  bwrap. `constitution.json` của repo được biên dịch thành các chốt chặn ghi
-  mà ngay cả Full Access cũng không thể bỏ qua.
+  phê duyệt. Codewhale chỉ báo sandbox lệnh của hệ điều hành khi lệnh thực sự
+  được bọc: Seatbelt trên macOS khi khả dụng và bubblewrap trên Linux khi đã
+  cài đặt và bật rõ ràng. Windows hiện báo không có sandbox. `constitution.json`
+  của repo được biên dịch thành các chốt chặn ghi mà ngay cả Full Access cũng
+  không thể bỏ qua.
 - **Công việc không mất.** Fleet ghi lại từng bước vào sổ cái chỉ ghi thêm;
   `fleet resume` tiếp tục từ chỗ bạn dừng. Mỗi lượt đều để lại một biên nhận
   bạn có thể kiểm tra.

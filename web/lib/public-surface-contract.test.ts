@@ -1,7 +1,19 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { FACTS } from "./facts.generated";
+import { SNIPPETS } from "./install-binary-snippets";
 
 const root = new URL("../../", import.meta.url);
 
@@ -13,7 +25,12 @@ type PublicSurfaceMatrix = {
     license: string;
     terminology: Record<string, string>;
   };
-  sourceCandidate: { version: string; providerCount: number; toolCount: number };
+  sourceCandidate: {
+    version: string;
+    providerCount: number;
+    toolCount: number;
+    sandboxBackends: string[];
+  };
   latestPublishedRelease: {
     tag: string;
     version: string;
@@ -94,6 +111,7 @@ describe("public surface contracts", () => {
     expect(matrix.sourceCandidate.version).toBe(FACTS.version);
     expect(matrix.sourceCandidate.providerCount).toBe(FACTS.providers.length);
     expect(matrix.sourceCandidate.toolCount).toBe(FACTS.toolCount);
+    expect(matrix.sourceCandidate.sandboxBackends).toEqual(FACTS.sandboxBackends);
     expect({
       tag: matrix.latestPublishedRelease.tag,
       version: matrix.latestPublishedRelease.version,
@@ -158,6 +176,137 @@ describe("public surface contracts", () => {
     expect(changelog).toContain("## [0.9.1] - Unreleased candidate");
     expect(changelog).toContain("v0.9.1 source candidate");
     expect(changelog).not.toContain("compare/v0.9.1...HEAD");
+  });
+
+  it("distinguishes two Cargo packages from the three installed commands", () => {
+    const installDoc = text("docs/INSTALL.md");
+    const installPage = text("web/app/[locale]/install/page.tsx");
+
+    expect(installDoc).toContain("Two Cargo packages are required");
+    expect(installDoc).toContain(
+      "`codewhale-cli` installs the `codewhale` and `codew` commands",
+    );
+    expect(installDoc).toContain(
+      "Download all three matching `codewhale`, `codew`, and `codewhale-tui`",
+    );
+    expect(installPage).toContain(
+      "# Install two Cargo packages; together they provide three commands",
+    );
+    expect(installPage).toContain("# codewhale + codew");
+    expect(installPage).toContain("The two Cargo packages install three commands");
+    expect(installPage).not.toContain("Install both binaries");
+    expect(installDoc).not.toContain("install both binaries from the release tag");
+    for (const platform of [
+      "macos-arm64",
+      "macos-x64",
+      "linux-arm64",
+      "linux-x64",
+    ] as const) {
+      expect(SNIPPETS[platform], platform).toContain(`codew-${platform}`);
+      expect(SNIPPETS[platform], platform).toContain(
+        `sudo mv codew-${platform} /usr/local/bin/codew`,
+      );
+    }
+    for (const arch of ["x64", "arm64"] as const) {
+      expect(SNIPPETS[`windows-${arch}`], arch).toContain(`codew-windows-${arch}.exe`);
+      expect(SNIPPETS[`windows-${arch}`], arch).toContain(
+        'Get-FileHash "$dest\\codew.exe"',
+      );
+    }
+  });
+
+  it("checks Unix release assets under their manifest filenames before renaming", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "codewhale-install-checksum-"));
+    const mockBin = join(scratch, "bin");
+    const curlPath = join(mockBin, "curl");
+    const checksumPath = join(mockBin, "checksum");
+
+    try {
+      const mkdir = spawnSync("/bin/mkdir", ["-p", mockBin]);
+      expect(mkdir.status, mkdir.stderr.toString()).toBe(0);
+
+      writeFileSync(
+        curlPath,
+        `#!/bin/sh
+output=""
+url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift; output="$1" ;;
+    http*) url="$1" ;;
+  esac
+  shift
+done
+[ -n "$output" ] || output=$(basename "$url")
+if [ "$output" = codewhale-artifacts-sha256.txt ]; then
+  for platform in macos-arm64 macos-x64 linux-arm64 linux-x64; do
+    for binary in codewhale codew codewhale-tui; do
+      printf 'fixture-hash  %s-%s\\n' "$binary" "$platform"
+    done
+  done > "$output"
+else
+  printf 'fixture payload for %s\\n' "$output" > "$output"
+fi
+`,
+      );
+      writeFileSync(
+        checksumPath,
+        `#!/bin/sh
+while [ "$#" -gt 0 ]; do shift; done
+while read -r _hash filename; do
+  if [ ! -f "$filename" ]; then
+    echo "manifest target missing: $filename" >&2
+    exit 1
+  fi
+done
+`,
+      );
+      chmodSync(curlPath, 0o755);
+      chmodSync(checksumPath, 0o755);
+      for (const command of ["shasum", "sha256sum"]) {
+        const link = spawnSync("/bin/ln", ["-s", checksumPath, join(mockBin, command)]);
+        expect(link.status, link.stderr.toString()).toBe(0);
+      }
+
+      for (const platform of [
+        "macos-arm64",
+        "macos-x64",
+        "linux-arm64",
+        "linux-x64",
+      ] as const) {
+        const lines = SNIPPETS[platform].split("\n");
+        const checksumLine = lines.findIndex((line) => line.includes(" -c -"));
+        expect(checksumLine, platform).toBeGreaterThan(-1);
+        const result = spawnSync(
+          "/bin/bash",
+          ["-o", "pipefail", "-eu", "-c", lines.slice(0, checksumLine + 1).join("\n")],
+          {
+            cwd: scratch,
+            env: { ...process.env, PATH: `${mockBin}:${process.env.PATH ?? ""}` },
+          },
+        );
+        expect(result.status, `${platform}: ${result.stderr.toString()}`).toBe(0);
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("qualifies the resolved audit path and best-effort persistence", () => {
+    const installPage = text("web/app/[locale]/install/page.tsx");
+
+    expect(matrix.trust.audit).toContain("best-effort");
+    expect(matrix.trust.audit).toContain("$CODEWHALE_HOME");
+    expect(installPage).toContain(
+      "const CONFIG_TREE = `$CODEWHALE_HOME/ (default: ~/.codewhale/)",
+    );
+    expect(installPage).toContain(
+      "best-effort credential / approval / elevation events",
+    );
+    expect(installPage).toContain("尽力写入的凭证 / 审批 / 提权事件");
+    expect(installPage).not.toContain(
+      "audit.log        credential / approval / elevation audit trail",
+    );
   });
 
   it("keeps modes, permission postures, and idle shortcuts exact", () => {

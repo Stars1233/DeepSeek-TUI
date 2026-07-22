@@ -172,7 +172,9 @@ drives turns through Chat Completions.
   - `mod.rs` - Sandbox type definitions
   - `policy.rs` - Sandbox policy configuration
   - `seatbelt.rs` - macOS Seatbelt profile generation
+  - `bwrap.rs` - opt-in Linux bubblewrap command wrapper
   - `landlock.rs` - Linux Landlock detection and future helper contract
+  - `seccomp.rs` - dormant Linux seccomp implementation; not wired into commands
   - `windows.rs` - Windows helper contract; not advertised until a Job
     Object process-containment helper exists
 
@@ -218,7 +220,7 @@ drives turns through Chat Completions.
 2. Tool registry looks up handler
 3. Pre-execution hooks run
 4. Approval requested when the effective permission posture and policy require it
-5. Tool executed (possibly sandboxed on macOS)
+5. Tool executed (possibly wrapped by Seatbelt on macOS or opt-in bubblewrap on Linux)
 6. Post-execution hooks run
 7. Result metadata is retained on runtime item records
 8. **LSP post-edit hook**: after a `File` write, edit, or patch action (including a replay-only legacy alias), the engine runs `run_post_edit_lsp_hook()` when LSP is enabled to collect diagnostics
@@ -296,9 +298,10 @@ command = "echo 'Running tool: $TOOL_NAME'"
    holds. Side-effectful MCP tools use the same boundary.
 3. **Extensibility**: MCP, skills, and hooks allow customization without code changes
 4. **Cross-platform**: Core works on Linux/macOS/Windows. Sandbox guarantees
-   are platform-specific: macOS Seatbelt is the active policy path; Linux and
-   Windows require helper enforcement before they should be treated as full OS
-   sandboxing.
+   are platform-specific: macOS uses Seatbelt when available; Linux uses an
+   installed bubblewrap executable only when explicitly enabled; Windows has
+   no advertised OS command sandbox. Landlock, seccomp, and the Windows helper
+   contract are not wired into command execution.
 5. **Minimal dependencies**: Careful dependency selection for build speed
 6. **Local-first runtime API**: HTTP/SSE endpoints are intended for trusted localhost access and are served by the `crates/tui` runtime today
 

@@ -33,9 +33,10 @@ Codewhale's security model has three distinct layers on Android:
    user has granted to Termux. See the
    [Android application sandbox](https://source.android.com/docs/security/app-sandbox)
    and [Termux filesystem layout](https://github.com/termux/termux-packages/wiki/Termux-file-system-layout).
-2. **Codewhale's per-command sandbox backend** — Seatbelt (macOS) or
-   Landlock/bwrap (Linux) can further narrow what a child command may access.
-   Codewhale does not currently provide that additional layer on Android.
+2. **Codewhale's per-command sandbox backend** — Seatbelt (macOS) or the
+   opt-in bubblewrap wrapper (Linux) can further narrow what a child command
+   may access. Codewhale does not currently provide that additional layer on
+   Android.
 3. **Codewhale's own gates** — workspace trust, approval prompts,
    `allow_shell`/`disallowed-tools`, and the file-tool permission system.
    These share the cross-platform application code path; their Android
@@ -43,15 +44,15 @@ Codewhale's security model has three distinct layers on Android:
 
 ### Codewhale sandbox backend: none
 
-Codewhale's existing Seatbelt and Landlock/bwrap integrations do not target
+Codewhale's existing Seatbelt and Linux bubblewrap integrations do not target
 Android. Consequently, `codewhale doctor --json` reports the sandbox as
 `{"available": false, "kind": null}` on Android. That status describes the
 absence of an additional Codewhale child-process sandbox; it does not mean
 Android or Termux provides no OS isolation.
 
 - `get_platform_sandbox()` returns `None` on Android.
-- No Linux-only sandbox modules (Landlock, bwrap) are compiled into the
-  Android build — they are `#[cfg(target_os = "linux")]`-gated and Rust
+- No Linux-only bubblewrap wrapper is compiled into the Android build — it is
+  `#[cfg(target_os = "linux")]`-gated and Rust
   treats `android` as a distinct target from `linux`.
 - Shell commands retain Termux's Android app boundary but receive no
   Codewhale-specific filesystem narrowing. Treat every location available to
@@ -95,7 +96,7 @@ skipped entirely on Android (Bionic libc).
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Android app sandbox | ✅ inherited | Per-app UID plus Android platform protections |
-| Codewhale command sandbox | ❌ unavailable | No Landlock/bwrap/Seatbelt backend on Android |
+| Codewhale command sandbox | ❌ unavailable | No bubblewrap/Seatbelt backend on Android |
 | Codewhale keyring backend | ❌ unavailable | Falls back to file-backed secrets |
 | Approvals / gates | ⚠️ implemented | Device QA pending |
 | File tools | ⚠️ implemented | Device QA pending |

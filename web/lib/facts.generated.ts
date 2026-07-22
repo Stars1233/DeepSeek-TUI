@@ -27,7 +27,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-07-21T23:08:04.820Z",
+  "generatedAt": "2026-07-22T00:51:16.685Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.1",
@@ -52,11 +52,8 @@ export const FACTS: RepoFacts = {
     "workflow-js"
   ],
   "sandboxBackends": [
-    "bwrap",
-    "landlock (Linux)",
-    "process_hardening",
-    "seatbelt (macOS)",
-    "seccomp"
+    "seatbelt (macOS, when available)",
+    "bubblewrap (Linux, opt-in when installed)"
   ],
   "providers": [
     {

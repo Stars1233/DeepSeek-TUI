@@ -1,13 +1,13 @@
-<!-- source: README.md sha256:acc243c2dc85 -->
+<!-- source: README.md sha256:a14f7d3aa7d1 -->
 # Codewhale
 
-**一个运行时。所有模型。你的机器。**
+**一个运行时。支持的托管与本地模型。你的机器。**
 
 Codewhale 是运行在终端里的编程智能体。适配受支持的托管与本地模型；开放模型优先。给它一个 provider、一个模型和一个任务：它会读你的代码、改文件、跑命令、检查自己的工作，在任务完成或需要你介入时停下。任务中途用 `/model` 切换模型。交互式工作用 TUI，脚本和 CI 用 `codewhale exec`。Rust 编写，MIT 许可，运行在你自己的机器上。
 
 **为什么选 Codewhale：**
 - **不被锁定。** DeepSeek、Claude、GPT、Kimi、GLM 等 30 多家 provider，以及你自己的 vLLM、SGLang、Ollama——无需 key——都跑在同一套运行时和同一套工具之上。上下文预算与价格取自真实路由；价格未知时显示未知，绝不显示 $0。
-- **安全靠构造。** Plan 模式只读。审批把关每一次高风险调用。操作系统级沙箱守住底线——Seatbelt、Landlock、seccomp、bwrap。仓库的 `constitution.json` 会编译成写入拦截，连 Full Access 也无法跳过。
+- **安全靠构造。** Plan 模式只读。审批把关每一次高风险调用。Codewhale 只有在命令实际经由 OS 沙箱包装器运行时才报告沙箱：macOS 上是可用时启用的 Seatbelt，Linux 上是已安装且显式启用的 bubblewrap；Windows 当前报告无 OS 沙箱。仓库的 `constitution.json` 会编译成写入拦截，连 Full Access 也无法跳过。
 - **工作不丢失。** Fleet 把每一步记录在只追加的账本里；`fleet resume` 从你停下的地方继续。每一轮都留下可查验的回执。
 
 它诞生于 `deepseek-tui`。社区需要更多 provider，于是我们造了一个把模型当组件、而不是当产品的运行时。

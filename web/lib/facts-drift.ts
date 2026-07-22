@@ -51,29 +51,6 @@ async function fetchText(
   }
 }
 
-async function fetchListing(
-  dir: string,
-  revision: string,
-  ghToken?: string,
-): Promise<string[] | null> {
-  // Use GitHub Contents API to list a directory.
-  const url = `https://api.github.com/repos/Hmbown/CodeWhale/contents/${dir}?ref=${revision}`;
-  const headers: Record<string, string> = {
-    "Accept": "application/vnd.github+json",
-    "User-Agent": "codewhale-web-drift",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-  if (ghToken) headers["Authorization"] = `Bearer ${ghToken}`;
-  try {
-    const r = await fetch(url, { headers });
-    if (!r.ok) return null;
-    const arr = (await r.json()) as { name: string; type: string }[];
-    return arr.filter((e) => e.type === "file").map((e) => e.name);
-  } catch {
-    return null;
-  }
-}
-
 async function fetchSourceMarker(ghToken?: string): Promise<SourceMarker | null> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
@@ -184,16 +161,12 @@ function deriveDefaultModel(cfg: string): string | null {
   return m ? m[1] : null;
 }
 
-function deriveSandboxBackends(files: string[]): string[] {
-  const map: Record<string, string> = {
-    seatbelt: "seatbelt (macOS)",
-    landlock: "landlock (Linux)",
-  };
-  return files
-    .map((f) => f.replace(/\.rs$/, ""))
-    .filter((name) => !["mod", "policy", "backend", "opensandbox", "windows"].includes(name))
-    .sort()
-    .map((name) => map[name] ?? name);
+function deriveSandboxBackends(source: string): string[] {
+  const marker = source.match(
+    /pub const PUBLIC_SANDBOX_BACKENDS\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/,
+  );
+  if (!marker) return [];
+  return [...marker[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
 }
 
 async function fetchLatestPublishedRelease(
@@ -262,11 +235,11 @@ export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts
   const source = await fetchSourceMarker(ghToken);
   if (!source) return null;
 
-  const [cargo, configRs, configModels, sandboxFiles, npmPkg, licText, generatedFacts, latestPublishedRelease] = await Promise.all([
+  const [cargo, configRs, configModels, sandboxSource, npmPkg, licText, generatedFacts, latestPublishedRelease] = await Promise.all([
     fetchText("Cargo.toml", source.revision, ghToken),
     fetchText("crates/tui/src/config.rs", source.revision, ghToken),
     fetchText("crates/tui/src/config/models.rs", source.revision, ghToken),
-    fetchListing("crates/tui/src/sandbox", source.revision, ghToken),
+    fetchText("crates/tui/src/sandbox/mod.rs", source.revision, ghToken),
     fetchText("npm/codewhale/package.json", source.revision, ghToken),
     fetchText("LICENSE", source.revision, ghToken),
     fetchText("web/lib/facts.generated.ts", source.revision, ghToken),
@@ -288,7 +261,9 @@ export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts
     sourceCommittedAt: source.committedAt,
     version: deriveVersion(cargo),
     crates: deriveCrates(cargo),
-    sandboxBackends: sandboxFiles ? deriveSandboxBackends(sandboxFiles) : BUILD_FACTS.sandboxBackends,
+    sandboxBackends: sandboxSource
+      ? deriveSandboxBackends(sandboxSource)
+      : BUILD_FACTS.sandboxBackends,
     providers: deriveProvidersFromConfig(configRs),
     defaultModel: deriveDefaultModel(`${configRs}\n${configModels ?? ""}`),
     nodeEngines: (() => {

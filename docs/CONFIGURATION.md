@@ -1285,9 +1285,10 @@ If you are upgrading from older releases:
   auto-approval.
 - `approval_policy` (string, optional): `on-request`, `untrusted`, or `never`. Runtime `approval_mode` editing in `/config` also accepts `on-request` and `untrusted` aliases.
 - `sandbox_mode` (string, optional): `read-only`, `workspace-write`, `danger-full-access`, `external-sandbox`.
-  Platform support is not identical. macOS uses Seatbelt for policy
-  enforcement. Linux support is helper-gated around Landlock. Windows does not
-  currently advertise an OS sandbox; the planned Windows helper contract starts
+  Platform support is not identical. macOS uses Seatbelt when its runtime
+  probe succeeds. Linux uses bubblewrap only when `prefer_bwrap = true` and
+  `/usr/bin/bwrap` is executable; without that opt-in it reports no OS command
+  sandbox. Windows does not currently advertise an OS sandbox; its planned helper contract starts
   with process-tree containment only and must not be described as read-only
   filesystem isolation, workspace-write enforcement, network blocking,
   registry isolation, or AppContainer isolation until those are implemented.

@@ -46,7 +46,7 @@ You will receive status updates at each phase. If the timeline slips, we will co
 ### In scope (what counts)
 
 - Remote code execution through crafted prompts or model responses
-- Sandbox escape — breaking out of the YOLO-mode workspace boundary or shell `cwd` confinement
+- Sandbox escape — breaking out of an active Seatbelt/bubblewrap wrapper or a declared workspace boundary
 - Credential leak — exfiltration of API keys, tokens, or environment secrets
 - Arbitrary file read/write outside the intended workspace (`PathEscape` bypass)
 - SSRF via `fetch_url` or `web_search` against internal network endpoints

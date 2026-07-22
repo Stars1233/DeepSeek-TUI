@@ -225,9 +225,9 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
         provider you select receives the prompt, project context, tool definitions,
         and tool results required for that turn. Use a loopback local-model route to
         keep model inference local.
-        Sandbox backends: <strong>seatbelt</strong> (macOS), <strong>landlock</strong> (Linux), restricted tokens (Windows).
+        OS command sandboxing is platform-specific: Codewhale uses <strong>Seatbelt</strong> on macOS when available. On Linux it uses <strong>bubblewrap</strong> only when <code className="inline">prefer_bwrap = true</code> and <code className="inline">/usr/bin/bwrap</code> is executable; otherwise commands have no Codewhale OS wrapper. Windows currently reports no OS sandbox.
         Workspace boundaries default to <code className="inline">--workspace</code>. <code className="inline">/trust</code> lifts them.
-        Permission posture is configurable per session. All credential/approval/elevation events are written to <code className="inline">~/.codewhale/audit.log</code>.
+        Permission posture is configurable per session. Sensitive credential, approval, and elevation events are appended best-effort to <code className="inline">$CODEWHALE_HOME/audit.log</code> (default <code className="inline">~/.codewhale/audit.log</code>); write failures are logged.
       </>
     ),
     sources: ["SECURITY.md", "docs/PROVIDERS.md", "docs/RUNTIME_API.md"],
@@ -572,9 +572,9 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
         Codewhale 运行时、工作区状态与审计日志保留在你的机器上；Codewhale
         没有产品遥测，也不要求经过托管中继。你选择的托管 provider 会收到本轮所需的
         prompt、项目上下文、工具定义与工具结果。若要让模型推理也保持本地，请使用回环地址上的本地模型路由。
-        沙箱后端：<strong>seatbelt</strong>（macOS）、<strong>landlock</strong>（Linux）、受限令牌（Windows）。
+        OS 命令沙箱因平台而异：macOS 在可用时使用 <strong>Seatbelt</strong>。Linux 仅在 <code className="inline">prefer_bwrap = true</code> 且 <code className="inline">/usr/bin/bwrap</code> 可执行时使用 <strong>bubblewrap</strong>；否则命令没有 Codewhale OS 包装器。Windows 当前报告无 OS 沙箱。
         工作区边界默认为 <code className="inline">--workspace</code>。<code className="inline">/trust</code> 可解除边界。
-        权限姿态可按会话配置。所有凭证/审批/提权事件写入 <code className="inline">~/.codewhale/audit.log</code>。
+        权限姿态可按会话配置。敏感的凭证、审批和提权事件会尽力追加到 <code className="inline">$CODEWHALE_HOME/audit.log</code>（默认 <code className="inline">~/.codewhale/audit.log</code>）；写入失败会记录日志。
       </>
     ),
     sources: ["SECURITY.md", "docs/PROVIDERS.md", "docs/RUNTIME_API.md"],

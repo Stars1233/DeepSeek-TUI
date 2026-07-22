@@ -17,9 +17,14 @@
     "version": "0.9.1",
     "providerCount": 34,
     "toolCount": 66,
+    "sandboxBackends": [
+      "seatbelt (macOS, when available)",
+      "bubblewrap (Linux, opt-in when installed)"
+    ],
     "sources": [
       "Cargo.toml",
       "crates/tui/src/config.rs",
+      "crates/tui/src/sandbox/mod.rs",
       "web/scripts/derive-facts.mjs"
     ]
   },
@@ -102,7 +107,8 @@
     "telemetry": "no Codewhale product telemetry or mandatory hosted relay",
     "account": "no account required for the local runtime",
     "plan": "Plan is read-only",
-    "sandbox": "sandbox implementations and limitations are platform-specific",
+    "sandbox": "Seatbelt is used on macOS when available; Linux bubblewrap is opt-in and must be installed; Windows currently reports no OS sandbox",
+    "audit": "sensitive events append best-effort to $CODEWHALE_HOME/audit.log (default ~/.codewhale/audit.log); write failures are logged",
     "usage": "provider token and cache usage is shown locally when available",
     "sources": [
       "docs/PROVIDERS.md",
@@ -110,7 +116,9 @@
       "docs/SANDBOX.md",
       "docs/RUNTIME_API.md",
       "docs/WEB.md",
-      "web/app/[locale]/faq/page.tsx"
+      "crates/tui/src/audit.rs",
+      "web/app/[locale]/faq/page.tsx",
+      "web/app/[locale]/install/page.tsx"
     ]
   },
   "platforms": {

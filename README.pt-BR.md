@@ -1,7 +1,7 @@
-<!-- source: README.md sha256:acc243c2dc85 -->
+<!-- source: README.md sha256:a14f7d3aa7d1 -->
 # Codewhale
 
-**Um runtime. Todos os modelos. Sua máquina.**
+**Um runtime. Modelos hospedados e locais compatíveis. Sua máquina.**
 
 O Codewhale é um agente de código para o seu terminal. Funciona com modelos
 hospedados e locais compatíveis; modelos abertos em primeiro lugar. Você informa um provedor, um
@@ -17,9 +17,12 @@ sua máquina.
   um único conjunto de ferramentas. Orçamentos de contexto e preços vêm da
   rota real. Um preço desconhecido aparece como desconhecido, nunca como $0.
 - **Seguro por construção.** O modo Plan é somente leitura. Aprovações
-  controlam cada chamada arriscada. O sandbox do sistema operacional segura —
-  Seatbelt, Landlock, seccomp, bwrap. O `constitution.json` de um repositório
-  é compilado em bloqueios de escrita que nem o Full Access consegue pular.
+  controlam cada chamada arriscada. O Codewhale só informa um sandbox de
+  comandos do sistema operacional quando ele realmente envolve o comando:
+  Seatbelt no macOS quando disponível e bubblewrap opcional no Linux quando
+  instalado. O Windows atualmente informa que não há sandbox. O
+  `constitution.json` de um repositório é compilado em bloqueios de escrita
+  que nem o Full Access consegue pular.
 - **Trabalho que sobrevive.** Fleets registram cada passo em um livro-razão
   de apenas inclusão; `fleet resume` retoma de onde você parou. Cada turno
   deixa um recibo que você pode inspecionar.

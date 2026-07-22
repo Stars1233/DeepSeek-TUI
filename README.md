@@ -1,6 +1,6 @@
 # Codewhale
 
-**One runtime. Every model. Your machine.**
+**One runtime. Supported hosted and local models. Your machine.**
 
 Codewhale is a coding agent for your terminal. It works with supported hosted
 and local models; open models first. Give it a provider, a model, and a task: it reads your
@@ -15,9 +15,11 @@ runs on your machine.
   and one toolset. Context budgets and prices come from the real route. An
   unknown price shows as unknown, never as $0.
 - **Safe by construction.** Plan mode is read-only. Approvals gate every
-  risky call. The OS sandbox holds — Seatbelt, Landlock, seccomp, bwrap.
-  A repo's `constitution.json` compiles into write holds that even Full
-  Access cannot skip.
+  risky call. Codewhale reports an OS command sandbox only when it actually
+  wraps the command: Seatbelt on macOS when available, and opt-in bubblewrap
+  on Linux when installed. Windows currently reports none. A repo's
+  `constitution.json` compiles into write holds that even Full Access cannot
+  skip.
 - **Work that survives.** Fleets record every step in an append-only
   ledger; `fleet resume` picks up where you stopped. Every turn leaves a
   receipt you can inspect.

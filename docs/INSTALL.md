@@ -182,7 +182,7 @@ codewhale-tui --version
 Known limitations:
 
 - Commands inherit Android's per-app UID, SELinux, and seccomp protections and
-  any permissions granted to Termux. Codewhale's additional Landlock/bwrap
+  any permissions granted to Termux. Codewhale's opt-in bubblewrap
   child-process sandbox is Linux-only and is not built on Android, so approved
   commands receive no Codewhale-specific filesystem narrowing.
 - The Termux build has no supported Android Keystore or desktop Secret Service
@@ -244,7 +244,7 @@ npm install -g codewhale
 codewhale --version   # prints the published version that was installed
 ```
 
-`postinstall` downloads the right pair of binaries from the matching GitHub
+`postinstall` downloads the matching three binaries from the GitHub
 release, verifies a SHA-256 manifest, and exposes `codewhale`, `codew`, and
 `codewhale-tui` on your `PATH`.
 
@@ -274,8 +274,9 @@ Useful environment variables:
 ## 4. Install via Cargo (any Tier-1 Rust target)
 
 If GitHub releases are slow, blocked, or you're on an unsupported architecture,
-install from crates.io directly. Both crates are required — the dispatcher
-delegates to the TUI runtime at runtime.
+install from crates.io directly. Two Cargo packages are required:
+`codewhale-cli` installs the `codewhale` and `codew` commands, while
+`codewhale-tui` installs the `codewhale-tui` command used by the dispatcher.
 
 ```bash
 # Requires Rust 1.88+ (https://rustup.rs)
@@ -481,7 +482,7 @@ explicitly. Replace `X.Y.Z` with the version you want to restore.
 # npm wrapper, only for versions that were published to npm
 npm install -g codewhale@X.Y.Z
 
-# Cargo install path; both crates are required
+# Cargo path: two packages provide codewhale + codew + codewhale-tui
 cargo install codewhale-cli --version X.Y.Z --locked --force
 cargo install codewhale-tui --version X.Y.Z --locked --force
 ```
@@ -752,7 +753,8 @@ The legacy `DEEPSEEK_TUI_RELEASE_BASE_URL` name is still accepted.
 
 `codewhale update` normally contacts GitHub Releases for metadata and binary
 assets. On networks where GitHub is blocked or unreliable, use the CNB source
-mirror instead and install both binaries from the release tag:
+mirror instead and install both Cargo packages from the release tag. Together,
+they provide the `codewhale`, `codew`, and `codewhale-tui` commands:
 
 To check the latest release without downloading or replacing binaries, run
 `codewhale update --check`.
@@ -786,8 +788,9 @@ The package requires the Cargo feature called `edition2024`, but that feature
 is not stabilized in this version of Cargo
 ```
 
-Install current stable Rust through rustup, then rerun the two Cargo install
-commands from [Section 4](#4-install-via-cargo-any-tier-1-rust-target). For
+Install current stable Rust through rustup, then rerun the two Cargo package
+install commands from [Section 4](#4-install-via-cargo-any-tier-1-rust-target).
+Together they provide `codewhale`, `codew`, and `codewhale-tui`. For
 mainland China networks, this rsproxy-based sequence has been verified to work:
 
 ```bash
@@ -817,7 +820,8 @@ sudo apt-get install -y build-essential pkg-config libdbus-1-dev
 WSL2 uses the same Linux source-build path as Ubuntu. If `cargo install
 codewhale-tui --locked` fails while compiling the keyring or D-Bus secret
 storage crates, install the Linux build dependencies inside the WSL distro,
-then rerun both Cargo install commands:
+then rerun the two Cargo package install commands. Together they install
+`codewhale`, `codew`, and `codewhale-tui`:
 
 ```bash
 sudo apt-get update
@@ -921,9 +925,9 @@ Use one of these paths:
 3. Install via Cargo, which builds locally and does not download GitHub release
    assets. See [Section 4](#4-install-via-cargo-any-tier-1-rust-target).
 
-4. Download both `codewhale` and `codewhale-tui` manually from the
-   [Releases page](https://github.com/Hmbown/CodeWhale/releases), place them
-   in a directory on `PATH`, and make them executable. See
+4. Download all three matching `codewhale`, `codew`, and `codewhale-tui`
+   binaries from the [Releases page](https://github.com/Hmbown/CodeWhale/releases),
+   place them in a directory on `PATH`, and make them executable. See
    [Section 6](#6-manual-download-from-github-releases).
 
 ---

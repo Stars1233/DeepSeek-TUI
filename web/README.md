@@ -143,7 +143,7 @@ default model, Node engines) are never hand-written into pages:
 
 1. **Build time** — `scripts/derive-facts.mjs` runs as `prebuild` (and before
    `npm run dev`), parses the parent repo (`Cargo.toml`, `crates/tui/src/config.rs`,
-   `crates/tui/src/sandbox/`, `npm/codewhale/package.json`) and writes
+   `crates/tui/src/sandbox/mod.rs`, `npm/codewhale/package.json`) and writes
    `lib/facts.generated.ts`. Never edit that file by hand.
 2. **Published release** — `data/latest-published-release.json` records the
    latest GitHub Release separately from the source candidate. Install commands

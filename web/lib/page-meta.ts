@@ -6,7 +6,7 @@ export const SITE_URL = "https://codewhale.net";
 export const SITE_NAME = "Codewhale";
 
 /** The one-line product identity, used as the default OG image alt text. */
-export const IDENTITY_PHRASE = "One runtime. Every model. Your machine.";
+export const IDENTITY_PHRASE = "One runtime. Supported hosted and local models. Your machine.";
 
 /** Shared OG card rendered by app/opengraph-image.tsx (1200×630 PNG). */
 const OG_IMAGE = {

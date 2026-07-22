@@ -158,8 +158,8 @@ export const DOC_TOPICS: DocTopic[] = [
     slug: "sandbox",
     label: { en: "Sandbox & Approval", zh: "沙箱与审批" },
     description: {
-      en: "seatbelt (macOS), landlock (Linux), Windows containment, and approval policies.",
-      zh: "seatbelt（macOS）、landlock（Linux）、Windows 隔离和审批策略。",
+      en: "Available Seatbelt (macOS), opt-in bubblewrap (Linux), platform gaps, and approval policies.",
+      zh: "可用的 Seatbelt（macOS）、显式启用的 bubblewrap（Linux）、平台缺口和审批策略。",
     },
     repoSource: "docs/SANDBOX.md",
     hasPage: false,

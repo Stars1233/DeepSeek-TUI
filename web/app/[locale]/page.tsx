@@ -72,7 +72,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 <>
                   一个运行时。
                   <br />
-                  所有模型。
+                  支持的托管与本地模型。
                   <br />
                   <span>你的机器。</span>
                 </>
@@ -80,7 +80,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 <>
                   One runtime.
                   <br />
-                  Every model.
+                  Supported hosted and local models.
                   <br />
                   <span>Your machine.</span>
                 </>

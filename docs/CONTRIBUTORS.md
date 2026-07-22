@@ -75,7 +75,7 @@ notes, and relevant issue/PR comments.
   visibility in the phase strip (PR #4474)
 - **[Fred Leitz / fleitz](https://github.com/fleitz)** — canonical `Bash`
   no-`cwd` workspace resolution and its regression test, keeping isolated
-  sub-agent commands inside their selected worktree (PR #4673 / #4674)
+  sub-agent commands inside their selected worktree (PR #4673; issue #4674)
 - **[Sh1Zuku / SparkofSpike](https://github.com/SparkofSpike)** — exact
   Vim-space regression reproduction and verification that the v0.9.1 input
   path already contains the needed global binding (PR #4477)
