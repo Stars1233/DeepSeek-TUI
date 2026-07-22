@@ -1954,6 +1954,376 @@ fn pty_text_sse(content: &str) -> String {
     .join("")
 }
 
+/// Sealed loopback fixture for the #4636 File-mutation receipt. One canonical
+/// `File.patch` call performs an update, create, delete, and byte-identical
+/// delete/create rename in a single transaction; the second response settles
+/// the turn. No provider or external network is involved.
+fn spawn_file_mutation_screen_fixture()
+-> anyhow::Result<(String, std::thread::JoinHandle<anyhow::Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let patch = r"diff --git a/old-name.txt b/old-name.txt
+--- a/old-name.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-RENAME-SENTINEL
+diff --git a/new-name.txt b/new-name.txt
+--- /dev/null
++++ b/new-name.txt
+@@ -0,0 +1 @@
++RENAME-SENTINEL
+diff --git a/update.txt b/update.txt
+--- a/update.txt
++++ b/update.txt
+@@ -1 +1 @@
+-DIFF-OLD-SENTINEL
++DIFF-NEW-SENTINEL
+diff --git a/create.txt b/create.txt
+--- /dev/null
++++ b/create.txt
+@@ -0,0 +1 @@
++CREATE-SENTINEL
+diff --git a/delete.txt b/delete.txt
+--- a/delete.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-DELETE-SENTINEL
+";
+    let replies = [
+        pty_tool_call_sse(
+            "call_file_mutation_pty",
+            "File",
+            serde_json::json!({"action": "patch", "patch": patch}),
+        ),
+        pty_text_sse("FILE-MUTATION-FIXTURE-DONE"),
+    ];
+
+    let handle = std::thread::spawn(move || -> anyhow::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut chat_index = 0_usize;
+        let mut contract_errors = Vec::new();
+        while chat_index < replies.len() && Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            let request = read_http_request(&mut stream)?;
+            let request_line = request.lines().next().unwrap_or_default();
+            let (content_type, body) = if request_line.starts_with("GET ")
+                && request_line.contains("/models")
+            {
+                (
+                    "application/json",
+                    serde_json::json!({
+                        "object": "list",
+                        "data": [{"id": "deepseek-v4-pro", "object": "model"}]
+                    })
+                    .to_string(),
+                )
+            } else if request_line.starts_with("POST ")
+                && request_line.contains("/chat/completions")
+            {
+                let request_body = request
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body)
+                    .unwrap_or_default();
+                let request_json: serde_json::Value = serde_json::from_str(request_body)?;
+                let request_contract = request_json.to_string();
+                match chat_index {
+                    0 if !request_contract
+                        .contains("exercise the canonical File mutation receipt") =>
+                    {
+                        contract_errors.push("initial request omitted the fixture prompt".into());
+                    }
+                    1 if !(request_contract.contains("call_file_mutation_pty")
+                        && request_contract.contains("files_applied")
+                        && request_contract.contains("\"role\":\"tool\"")) =>
+                    {
+                        let sample = request_contract.chars().take(1_200).collect::<String>();
+                        contract_errors.push(format!(
+                            "settling request omitted the successful File result: {sample}"
+                        ));
+                    }
+                    0 | 1 => {}
+                    _ => unreachable!("bounded File fixture"),
+                }
+                let body = replies[chat_index].clone();
+                chat_index += 1;
+                ("text/event-stream", body)
+            } else {
+                ("text/plain", "not found".to_string())
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes())?;
+            stream.flush()?;
+        }
+        anyhow::ensure!(
+            chat_index == replies.len(),
+            "File fixture served {chat_index}/{} chat requests",
+            replies.len()
+        );
+        if !contract_errors.is_empty() {
+            anyhow::bail!(
+                "File fixture contract errors:\n{}",
+                contract_errors.join("\n")
+            );
+        }
+        Ok(())
+    });
+    Ok((format!("http://{address}"), handle))
+}
+
+fn spawn_file_mutation_harness(
+    ws: &qa_harness::harness::SealedWorkspace,
+    base_url: &str,
+    rows: u16,
+    cols: u16,
+    ascii_safe: bool,
+) -> anyhow::Result<Harness> {
+    let codewhale_home = ws.home().join(".codewhale");
+    let codex_home = ws.home().join(".codex");
+    let mut builder = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("CODEWHALE_HOME", codewhale_home.to_string_lossy())
+        .env(
+            "DEEPSEEK_CONFIG_PATH",
+            codewhale_home.join("config.toml").to_string_lossy(),
+        )
+        .env("CODEX_HOME", codex_home.to_string_lossy())
+        .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", base_url)
+        .env("CODEWHALE_BASE_URL", base_url)
+        .env("DEEPSEEK_MODEL", "deepseek-v4-pro")
+        .env("CODEWHALE_MODEL", "deepseek-v4-pro")
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+            "--skip-onboarding",
+            "--mouse-capture",
+        ])
+        .size(rows, cols);
+    if ascii_safe {
+        builder = builder.env("CODEWHALE_ASCII_SAFE", "1");
+    }
+    builder.spawn()
+}
+
+/// #4636: real terminal frames for the persisted full/summary/off contract.
+/// The three cases jointly cover Ask/Auto/Full Access, narrow/wide, dark/light,
+/// reduced-motion, and ASCII-safe operation. The off case is changed through
+/// `/config --save` and then rebooted before execution, proving the setting
+/// survives restart.
+#[test]
+fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let cases = [
+        (
+            "full", 140_u16, 40_u16, "dark", false, false, "ask", "ask", true,
+        ),
+        (
+            "summary", 100, 32, "light", false, false, "auto", "auto", true,
+        ),
+        (
+            "off",
+            80,
+            24,
+            "dark",
+            true,
+            true,
+            "full-access",
+            "Full Access",
+            false,
+        ),
+    ];
+
+    for (
+        mode,
+        cols,
+        rows,
+        theme,
+        ascii_safe,
+        persist_through_restart,
+        permission_posture,
+        permission_label,
+        approve_once,
+    ) in cases
+    {
+        let ws = make_sealed_workspace()?;
+        let codewhale_home = ws.home().join(".codewhale");
+        let codex_home = ws.home().join(".codex");
+        std::fs::create_dir_all(&codex_home)?;
+        std::fs::write(
+            codewhale_home.join("config.toml"),
+            "reasoning_effort = \"low\"\n\n[retry]\nenabled = false\n\n[update]\ncheck_for_updates = false\n",
+        )?;
+        let initial_mode = if persist_through_restart {
+            "full"
+        } else {
+            mode
+        };
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            format!(
+                "theme = \"{theme}\"\nlocale = \"en\"\ndefault_mode = \"agent\"\npermission_posture = \"{permission_posture}\"\ninline_diffs = \"{initial_mode}\"\nlow_motion = true\nfancy_animations = false\ncomposer_border = true\n"
+            ),
+        )?;
+        std::fs::write(
+            codex_home.join("models_cache.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "fetched_at": chrono::Utc::now(),
+                "models": [{"slug": "deepseek-v4-pro", "priority": 1}]
+            }))?,
+        )?;
+        std::fs::write(ws.workspace().join("old-name.txt"), "RENAME-SENTINEL\n")?;
+        std::fs::write(ws.workspace().join("update.txt"), "DIFF-OLD-SENTINEL\n")?;
+        std::fs::write(ws.workspace().join("delete.txt"), "DELETE-SENTINEL\n")?;
+
+        if persist_through_restart {
+            let mut setup =
+                spawn_file_mutation_harness(&ws, "http://127.0.0.1:1", rows, cols, ascii_safe)?;
+            enter_launch_session(&mut setup)?;
+            setup.paste("/config inline_diffs off --save")?;
+            setup.wait_for_text("/config inline_diffs off --save", KEY_TIMEOUT)?;
+            setup.send(keys::key::enter())?;
+            setup.wait_for_text("inline_diffs = off (saved)", KEY_TIMEOUT)?;
+            let _ = setup.shutdown();
+            let persisted = std::fs::read_to_string(codewhale_home.join("settings.toml"))?;
+            anyhow::ensure!(
+                persisted.contains("inline_diffs = \"off\""),
+                "off mode did not persist before restart: {persisted}"
+            );
+        }
+
+        let (base_url, server) = spawn_file_mutation_screen_fixture()?;
+        let mut h = spawn_file_mutation_harness(&ws, &base_url, rows, cols, ascii_safe)?;
+        enter_launch_session(&mut h)?;
+        assert_real_pty_frame_geometry(h.frame(), cols, rows);
+        assert_control_grammar(h.frame(), "act", permission_label, COMPOSER_READY_TEXT);
+
+        let prompt = "exercise the canonical File mutation receipt";
+        h.paste(prompt)?;
+        h.wait_for_text(prompt, KEY_TIMEOUT)?;
+        h.send(keys::key::enter())?;
+        if approve_once {
+            h.wait_for_text("Approve once", Duration::from_secs(10))?;
+            h.send(b"y")?;
+        }
+        h.wait_for_text("FILE-MUTATION-FIXTURE-DONE", Duration::from_secs(20))?;
+        h.wait_for(
+            |frame| frame.contains("Wrote 4 files") && frame.contains("done"),
+            Duration::from_secs(10),
+        )?;
+        h.wait_for_idle(Duration::from_millis(250), Duration::from_secs(3))?;
+
+        assert_eq!(
+            std::fs::read_to_string(ws.workspace().join("new-name.txt"))?,
+            "RENAME-SENTINEL\n"
+        );
+        assert!(!ws.workspace().join("old-name.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(ws.workspace().join("update.txt"))?,
+            "DIFF-NEW-SENTINEL\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.workspace().join("create.txt"))?,
+            "CREATE-SENTINEL\n"
+        );
+        assert!(!ws.workspace().join("delete.txt").exists());
+
+        let settled_frame = h.frame().text();
+        std::thread::sleep(Duration::from_millis(300));
+        h.pump();
+        assert_eq!(
+            settled_frame,
+            h.frame().text(),
+            "reduced-motion settled frame moved in {mode} mode"
+        );
+        assert_real_pty_frame_geometry(h.frame(), cols, rows);
+        if ascii_safe {
+            assert!(
+                h.frame().text().is_ascii(),
+                "ASCII-safe mutation frame emitted non-ASCII cells:\n{}",
+                h.frame().debug_dump()
+            );
+        }
+
+        match mode {
+            "full" => {
+                assert!(
+                    scroll_until(&mut h, ScrollDir::Up, "DIFF-NEW-SENTINEL"),
+                    "full mode omitted the added line:\n{}",
+                    h.frame().debug_dump()
+                );
+                assert!(h.frame().contains("DIFF-OLD-SENTINEL"));
+                let old_row = visible_row_with_text(h.frame(), "DIFF-OLD-SENTINEL")
+                    .expect("deleted line row");
+                let new_row =
+                    visible_row_with_text(h.frame(), "DIFF-NEW-SENTINEL").expect("added line row");
+                let old_color = foreground_at_text(h.frame(), old_row, "DIFF-OLD-SENTINEL");
+                let new_color = foreground_at_text(h.frame(), new_row, "DIFF-NEW-SENTINEL");
+                assert_ne!(old_color, vt100::Color::Default);
+                assert_ne!(new_color, vt100::Color::Default);
+                assert_ne!(old_color, new_color, "added/deleted ANSI roles collapsed");
+            }
+            "summary" => {
+                assert!(
+                    scroll_until(&mut h, ScrollDir::Up, "+2 -2"),
+                    "summary mode omitted semantic stats:\n{}",
+                    h.frame().debug_dump()
+                );
+                assert!(!scroll_until(&mut h, ScrollDir::Up, "DIFF-NEW-SENTINEL"));
+                assert!(!scroll_until(&mut h, ScrollDir::Down, "DIFF-NEW-SENTINEL"));
+            }
+            "off" => {
+                assert!(
+                    scroll_until(&mut h, ScrollDir::Up, "4 files"),
+                    "off mode lost the concise File outcome:\n{}",
+                    h.frame().debug_dump()
+                );
+                assert!(!scroll_until(&mut h, ScrollDir::Up, "+2 -2"));
+                assert!(!scroll_until(&mut h, ScrollDir::Down, "+2 -2"));
+                assert!(!scroll_until(&mut h, ScrollDir::Up, "DIFF-NEW-SENTINEL"));
+                assert!(!scroll_until(&mut h, ScrollDir::Down, "DIFF-NEW-SENTINEL"));
+
+                h.send(keys::key::alt('v'))?;
+                h.wait_for_text("Raw detail", KEY_TIMEOUT)?;
+                assert!(
+                    scroll_until(&mut h, ScrollDir::Down, "Exact File change"),
+                    "off mode lost the exact-evidence section:\n{}",
+                    h.frame().debug_dump()
+                );
+                assert!(
+                    scroll_until(&mut h, ScrollDir::Down, "DIFF-NEW-SENTINEL"),
+                    "off mode exact evidence omitted the applied diff:\n{}",
+                    h.frame().debug_dump()
+                );
+            }
+            _ => unreachable!("bounded diff mode matrix"),
+        }
+
+        write_real_pty_evidence(
+            &format!("file-mutation-{mode}-{cols}x{rows}"),
+            &format!(
+                "size={cols}x{rows}\ntheme={theme}\ninline_diffs={mode}\npermission={permission_posture}\nreduced_motion=true\nascii_safe={ascii_safe}\nprovider=sealed-loopback"
+            ),
+            h.frame(),
+        )?;
+        let _ = h.shutdown();
+        server.join().expect("File fixture server thread")?;
+    }
+    Ok(())
+}
+
 /// Three-turn loopback fixture for the real screen acceptance path:
 /// `work_update` establishes canonical To-do/Work state, then an actual Bash
 /// call waits on a test-owned workspace sentinel, then a long final answer
