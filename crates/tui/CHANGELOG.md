@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.1] - Unreleased candidate
+## [0.9.1] - 2026-07-22
 
 The Codewhale v0.9.1 source candidate includes a first-class local web client over the Runtime API,
 first-class OpenCode Go and TelecomJS TokenHub providers and restored xAI device login,

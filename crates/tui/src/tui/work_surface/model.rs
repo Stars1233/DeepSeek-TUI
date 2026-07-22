@@ -616,11 +616,21 @@ fn sanitize_summary_title(raw: &str) -> String {
 
 fn coordination_row(app: &App) -> Option<RankedWorkRow> {
     let projection = app.coordination_detail.as_ref()?;
+    let has_context_receipt = projection.context_projections.iter().any(|receipt| {
+        !receipt.decision_ids.is_empty()
+            || receipt.projected_bytes > 0
+            || receipt.deduplicated > 0
+            || receipt.omitted > 0
+    });
+    let has_metrics = !projection.metrics.hottest_paths.is_empty()
+        || projection.metrics.package_or_module_growth.is_some()
+        || projection.metrics.route_or_cost.is_some();
     if projection.decisions.is_empty()
         && projection.write_claims.is_empty()
         && projection.reconciliations.is_empty()
-        && projection.context_projections.is_empty()
         && projection.contentions.is_empty()
+        && !has_context_receipt
+        && !has_metrics
     {
         return None;
     }

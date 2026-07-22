@@ -173,7 +173,9 @@ describe("public surface contracts", () => {
     ]) {
       expect(npmArtifacts).toContain(binary);
     }
-    expect(changelog).toContain("## [0.9.1] - Unreleased candidate");
+    expect(changelog).toMatch(
+      /^## \[0\.9\.1\] - (?:Unreleased candidate|\d{4}-\d{2}-\d{2})$/m,
+    );
     expect(changelog).toContain("v0.9.1 source candidate");
     expect(changelog).not.toContain("compare/v0.9.1...HEAD");
   });

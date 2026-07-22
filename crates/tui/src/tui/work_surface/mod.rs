@@ -297,6 +297,86 @@ mod tests {
     }
 
     #[test]
+    fn empty_coordination_projection_does_not_create_work_chrome() {
+        use crate::tools::subagent::CoordinationDetailProjection;
+        use crate::tools::subagent::coord::{ContextProjectionReceipt, CoordinationDetailMetrics};
+
+        let mut app = app();
+        app.coordination_detail = Some(CoordinationDetailProjection {
+            schema_version: 1,
+            sequence: 3,
+            decisions: Vec::new(),
+            write_claims: Vec::new(),
+            reconciliations: Vec::new(),
+            context_projections: ["agent-a", "agent-b", "agent-c"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, child_id)| ContextProjectionReceipt {
+                    child_id: child_id.to_string(),
+                    decision_ids: Vec::new(),
+                    projected_bytes: 0,
+                    deduplicated: 0,
+                    omitted: 0,
+                    sequence: u64::try_from(index + 1).expect("small fixture sequence"),
+                })
+                .collect(),
+            contentions: Vec::new(),
+            metrics: CoordinationDetailMetrics {
+                hottest_paths: Vec::new(),
+                package_or_module_growth: None,
+                route_or_cost: None,
+                note: "growth and route/cost stay null when the coordination ledger has no authoritative source".to_string(),
+            },
+            bounded: true,
+            limit: 24,
+        });
+
+        let rows = super::model::project(&mut app);
+        assert!(
+            rows.is_empty(),
+            "zero-byte, no-decision coordination receipts must not create Work chrome: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn nonempty_context_projection_remains_inspectable_work() {
+        use crate::tools::subagent::CoordinationDetailProjection;
+        use crate::tools::subagent::coord::{ContextProjectionReceipt, CoordinationDetailMetrics};
+
+        let mut app = app();
+        app.coordination_detail = Some(CoordinationDetailProjection {
+            schema_version: 1,
+            sequence: 1,
+            decisions: Vec::new(),
+            write_claims: Vec::new(),
+            reconciliations: Vec::new(),
+            context_projections: vec![ContextProjectionReceipt {
+                child_id: "agent-a".to_string(),
+                decision_ids: vec!["decision-a".to_string()],
+                projected_bytes: 32,
+                deduplicated: 0,
+                omitted: 0,
+                sequence: 1,
+            }],
+            contentions: Vec::new(),
+            metrics: CoordinationDetailMetrics {
+                hottest_paths: Vec::new(),
+                package_or_module_growth: None,
+                route_or_cost: None,
+                note: String::new(),
+            },
+            bounded: true,
+            limit: 24,
+        });
+
+        let rows = super::model::project(&mut app);
+        assert!(
+            rows.iter().any(|row| row.id.0 == "coordination"),
+            "non-empty context projection must remain inspectable: {rows:?}"
+        );
+    }
+
+    #[test]
     fn current_blocked_contention_uses_attention_bucket_mark_and_tone() {
         use crate::tools::subagent::CoordinationDetailProjection;
         use crate::tools::subagent::coord::{

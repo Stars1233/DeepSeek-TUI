@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.1] - Unreleased candidate
+## [0.9.1] - 2026-07-22
 
 The Codewhale v0.9.1 source candidate includes a first-class local web client over the Runtime API,
 first-class OpenCode Go and TelecomJS TokenHub providers and restored xAI device login,
@@ -3959,7 +3959,7 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
 [Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...HEAD
-[0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...main
+[0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1
 [0.8.68]: https://github.com/Hmbown/CodeWhale/compare/v0.8.67...v0.8.68
 [0.8.67]: https://github.com/Hmbown/CodeWhale/compare/v0.8.66...v0.8.67
 [0.8.66]: https://github.com/Hmbown/CodeWhale/compare/v0.8.65...v0.8.66
