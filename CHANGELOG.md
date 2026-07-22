@@ -50,6 +50,10 @@ restart recovery, and the community site's content boundaries.
   role vocabulary with alias parser and `SubAgentType` mapping (#3934).
 - `load_skill` tool now supports listing: omit `name` or pass `"list"` to
   see all available skills without loading one (#4651).
+- Add a unified `/skills` manager with one precedence-aware root catalog,
+  bounded duplicate/shadow/conflict auditing, package provenance, and
+  validated install, update, remove, and trust mutations (PR #4679 by
+  @SamhandsomeLee).
 - Runtime API provider registry and atomic provider-switch endpoints
   (`GET /v1/providers`, `GET /v1/providers/{id}/models`,
   `POST /v1/providers/{id}/switch`) so the web GUI renders a dynamic
@@ -145,6 +149,9 @@ restart recovery, and the community site's content boundaries.
   instead of tinting it green-grey through the default underwater Ombre
   treatment, while retaining foreground ambient life (#4457 by
   @AiurArtanis; PR #4471 by @nightt5879).
+- Register `/slop` and `/canzha` as compatibility aliases of `/debt`, while
+  keeping user-command ownership truthful across dispatch, help, slash
+  completion, alias copy, and typo suggestions (PR #4680 by @nightt5879).
 - Fail closed on legacy Kimi CLI credential imports: remove Codewhale's
   hard-coded first-party-client impersonation and refresh request, never
   auto-enable or rewrite imported credentials, and label the compatibility
@@ -246,9 +253,11 @@ Thank you to the contributors whose code, reports, and reviews shaped v0.9.1:
   and idle-timeout progress telemetry (PR #4657).
 - [@gaord](https://github.com/gaord) — Runtime API provider registry and
   atomic provider-switch endpoints (PR #4658).
-- [@SamhandsomeLee](https://github.com/SamhandsomeLee) — Enter-send lag
-  diagnosis and fix direction for #4605 (PR #4654; landed via the release
-  lane async-dispatch split).
+- [@SamhandsomeLee](https://github.com/SamhandsomeLee) — the unified `/skills`
+  root catalog, audit/provenance model, validated mutations, manager UI, and
+  acceptance coverage (PR #4679), plus Enter-send lag diagnosis and fix
+  direction for #4605 (PR #4654; landed via the release-lane async-dispatch
+  split).
 - [@baendlorel](https://github.com/baendlorel) — TelecomJS TokenHub provider
   support and key-scoped live-catalog direction from PR #4370, harvested into
   the current provider architecture with co-authorship preserved.
@@ -259,8 +268,9 @@ Thank you to the contributors whose code, reports, and reviews shaped v0.9.1:
 - [@seanthefuturegorilla](https://github.com/seanthefuturegorilla) — the
   canonical OpenCode Go/Zen provider request and acceptance direction
   (#1481).
-- [@nightt5879](https://github.com/nightt5879) — the Solarized Light
-  background preservation fix (PR #4471).
+- [@nightt5879](https://github.com/nightt5879) — `/debt` compatibility aliases
+  with dispatch-consistent user-command shadowing across discovery surfaces
+  (PR #4680), plus the Solarized Light background preservation fix (PR #4471).
 - [@AiurArtanis](https://github.com/AiurArtanis) — the Solarized Light
   regression report and reproduction (#4457).
 - [@shenjackyuanjie](https://github.com/shenjackyuanjie) — the HarmonyOS

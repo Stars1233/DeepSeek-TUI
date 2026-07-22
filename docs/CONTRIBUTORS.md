@@ -36,9 +36,11 @@ notes, and relevant issue/PR comments.
   idle-timeout progress telemetry (PR #4657)
 - **[gaord](https://github.com/gaord)** — Runtime API provider registry and
   atomic provider-switch endpoints (PR #4658)
-- **[SamhandsomeLee](https://github.com/SamhandsomeLee)** — Enter-send lag
-  diagnosis and fix direction for #4605 (PR #4654; landed through the
-  release-lane async-dispatch split)
+- **[SamhandsomeLee](https://github.com/SamhandsomeLee)** — the unified
+  `/skills` root catalog, audit/provenance model, validated mutations, manager
+  UI, and acceptance coverage (PR #4679), plus Enter-send lag diagnosis and
+  fix direction for #4605 (PR #4654; landed through the release-lane
+  async-dispatch split)
 - **[baendlorel](https://github.com/baendlorel)** — TelecomJS TokenHub provider
   and key-scoped live-catalog direction, source-partitioned refresh behavior,
   and both refresh-order regressions from PR #4370, harvested into the current
@@ -51,8 +53,10 @@ notes, and relevant issue/PR comments.
 - **[Sean Tse / seanthefuturegorilla](https://github.com/seanthefuturegorilla)**
   — the canonical OpenCode Go/Zen provider request and acceptance direction in
   #1481
-- **[nightt5879](https://github.com/nightt5879)** — the Solarized Light
-  background preservation fix for the underwater shell (PR #4471)
+- **[nightt5879](https://github.com/nightt5879)** — `/debt` compatibility
+  aliases with dispatch-consistent user-command shadowing across help and
+  slash discovery (PR #4680), plus the Solarized Light background preservation
+  fix for the underwater shell (PR #4471)
 - **[AiurArtanis](https://github.com/AiurArtanis)** — the Solarized Light
   v0.9.0 regression report and reproduction (#4457)
 - **[shenjackyuanjie](https://github.com/shenjackyuanjie)** — the HarmonyOS

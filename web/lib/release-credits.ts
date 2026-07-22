@@ -34,12 +34,12 @@ export const RELEASE_CONTRIBUTORS: string[] = [
   "@dmitri-0",
   "@fleitz",
   "@baendlorel",
+  "@SamhandsomeLee",
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */
 export const RELEASE_HELPERS: string[] = [
   "@AiurArtanis",
-  "@SamhandsomeLee",
   "@seanthefuturegorilla",
   "@SparkofSpike",
 ];
