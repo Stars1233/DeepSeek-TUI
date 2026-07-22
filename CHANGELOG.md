@@ -249,6 +249,9 @@ Thank you to the contributors whose code, reports, and reviews shaped v0.9.1:
 - [@SamhandsomeLee](https://github.com/SamhandsomeLee) — Enter-send lag
   diagnosis and fix direction for #4605 (PR #4654; landed via the release
   lane async-dispatch split).
+- [@baendlorel](https://github.com/baendlorel) — TelecomJS TokenHub provider
+  support and key-scoped live-catalog direction from PR #4370, harvested into
+  the current provider architecture with co-authorship preserved.
 - [@zhangweiii](https://github.com/zhangweiii) and
   [@sternelee](https://github.com/sternelee) — the original first-class
   OpenCode Go implementations (PRs #773 and #1050), harvested into the
