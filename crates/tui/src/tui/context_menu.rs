@@ -90,10 +90,6 @@ pub struct ContextMenuView {
 }
 
 impl ContextMenuView {
-    pub fn new(entries: Vec<ContextMenuEntry>, column: u16, row: u16, title: String) -> Self {
-        Self::new_with_motion(entries, column, row, title, false)
-    }
-
     pub fn new_with_motion(
         entries: Vec<ContextMenuEntry>,
         column: u16,
@@ -145,12 +141,13 @@ impl ContextMenuView {
             .entries
             .iter()
             .map(|entry| {
-                UnicodeWidthStr::width(entry.glyph.as_str())
-                    + 1
-                    + UnicodeWidthStr::width(entry.label.as_str())
-                    + 2
-                    + UnicodeWidthStr::width(entry.hint.as_str())
-                    + 4
+                let action_width = UnicodeWidthStr::width(entry.glyph.as_str())
+                    .saturating_add(UnicodeWidthStr::width(entry.label.as_str()))
+                    .saturating_add(UnicodeWidthStr::width(entry.hint.as_str()))
+                    .saturating_add(7);
+                let detail_width =
+                    UnicodeWidthStr::width(entry.description.as_str()).saturating_add(4);
+                action_width.max(detail_width)
             })
             .max()
             .unwrap_or(20)
@@ -160,12 +157,14 @@ impl ContextMenuView {
     }
 
     fn visual_row_count(&self) -> usize {
-        // title + entries + optional section dividers
+        // title + entries + optional section dividers + a stable selected-detail row
         let dividers = self.entries.iter().filter(|e| e.section_start).count();
+        let detail_rows = usize::from(self.entries.iter().any(|e| !e.description.is_empty())) * 2;
         self.entries
             .len()
             .saturating_add(1)
             .saturating_add(dividers)
+            .saturating_add(detail_rows)
     }
 
     fn menu_rect(&self, area: Rect) -> Rect {
@@ -400,6 +399,27 @@ impl ModalView for ContextMenuView {
             lines.push(Line::from(Span::styled(text, style)));
         }
 
+        if self
+            .entries
+            .iter()
+            .any(|entry| !entry.description.is_empty())
+        {
+            let divider = "─".repeat(inner_width.min(48));
+            lines.push(Line::from(Span::styled(
+                format!(" {divider}"),
+                Style::default().fg(palette::BORDER_COLOR).bg(elevated),
+            )));
+            let description = self
+                .entries
+                .get(self.selected)
+                .map(|entry| trim_to_width(&entry.description, inner_width.saturating_sub(2)))
+                .unwrap_or_default();
+            lines.push(Line::from(Span::styled(
+                format!(" {description}"),
+                Style::default().fg(palette::TEXT_HINT).bg(elevated),
+            )));
+        }
+
         let body = Rect {
             x: menu_area.x,
             y: menu_area.y.saturating_add(1),
@@ -420,7 +440,10 @@ pub fn with_git_actions(
     let Some(path) = path.filter(|p| !p.is_empty()) else {
         return entries;
     };
-    for (label, id) in crate::tui::worktree_manager::context_menu_git_actions(path, branch) {
+    for (index, (label, id)) in crate::tui::worktree_manager::context_menu_git_actions(path, branch)
+        .into_iter()
+        .enumerate()
+    {
         let action = if id == "worktrees" {
             ContextMenuAction::ExecuteCommand {
                 command: "/workspace worktrees".into(),
@@ -433,16 +456,21 @@ pub fn with_git_actions(
             ContextMenuAction::ExecuteCommand {
                 command: format!("/open {rest}"),
             }
+        } else if let Some(rest) = id.strip_prefix("branch:") {
+            ContextMenuAction::CopyText {
+                text: rest.to_string(),
+            }
         } else {
             ContextMenuAction::CopyText {
                 text: label.clone(),
             }
         };
-        entries.push(
-            ContextMenuEntry::new(label, id, action)
-                .with_glyph("⌥")
-                .section_start(),
-        );
+        let entry = ContextMenuEntry::new(label, id, action).with_glyph("⌥");
+        entries.push(if index == 0 {
+            entry.section_start()
+        } else {
+            entry
+        });
     }
     entries
 }
@@ -508,7 +536,7 @@ mod tests {
             ContextMenuEntry::new("Copy", "", ContextMenuAction::CopySelection),
             ContextMenuEntry::new("Paste", "", ContextMenuAction::Paste).primary(),
         ];
-        let view = ContextMenuView::new(entries, 0, 0, "menu".into());
+        let view = ContextMenuView::new_with_motion(entries, 0, 0, "menu".into(), false);
         assert_eq!(view.selected, 1);
     }
 
