@@ -65,23 +65,6 @@ pub fn settled_style(base_fg: Color) -> Style {
     Style::default().fg(base_fg)
 }
 
-/// Fixed-width animated ellipsis so neighboring layout never shifts.
-/// Cycle length is always 3 columns of content (or dots under reduced motion).
-#[must_use]
-pub fn breathing_ellipsis(elapsed_ms: u128, reduced_motion: bool) -> &'static str {
-    if reduced_motion {
-        return "…";
-    }
-    // Three frames, each display-width 3 when using fullwidth-aware terminals
-    // for "..." variants; use fixed ASCII for width stability.
-    match (elapsed_ms / 400) % 4 {
-        0 => ".  ",
-        1 => ".. ",
-        2 => "...",
-        _ => "   ",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,15 +82,5 @@ mod tests {
         let (settled, hot) = split_hot_tail("abcdef", false, 12);
         assert_eq!(settled, "abcdef");
         assert!(hot.is_empty());
-    }
-
-    #[test]
-    fn ellipsis_is_fixed_width() {
-        use unicode_width::UnicodeWidthStr;
-        for ms in [0, 400, 800, 1200] {
-            let e = breathing_ellipsis(ms, false);
-            assert_eq!(e.width(), 3, "ellipsis frame {e:?} shifted layout");
-        }
-        assert_eq!(breathing_ellipsis(0, true).width(), 1); // … is one wide glyph
     }
 }

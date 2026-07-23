@@ -474,10 +474,6 @@ fn member_routing_with_session(member: &AgentProfile, session_model: Option<&str
     }
 }
 
-fn member_detail_lines(member: &AgentProfile) -> Vec<Line<'static>> {
-    member_detail_lines_with_session(member, None)
-}
-
 fn member_detail_lines_with_session(
     member: &AgentProfile,
     session_model: Option<&str>,
@@ -795,7 +791,7 @@ mod tests {
     fn detail_lines_carry_overlay_source_for_project_members() {
         let view = view_with_overrides();
         let reviewer = view.members.iter().find(|m| m.id == "reviewer").unwrap();
-        let text = member_detail_lines(reviewer)
+        let text = member_detail_lines_with_session(reviewer, None)
             .iter()
             .map(|line| {
                 line.spans

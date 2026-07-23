@@ -15925,6 +15925,7 @@ fn underwater_animation_interval_ms(app: &App) -> u64 {
         // Measured display Hz can raise atmosphere cadence on high-Hz
         // panels; missing probe falls back to the historical ~12.5 fps.
         crate::tui::display_refresh::adaptive_animation_interval_ms(false)
+            .min(UI_UNDERWATER_ANIMATION_MS)
     }
 }
 
