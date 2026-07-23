@@ -28,6 +28,7 @@ pub mod context_inspector;
 pub mod context_menu;
 pub(crate) mod coordination_detail;
 pub mod diff_render;
+pub mod display_refresh;
 pub mod event_broker;
 pub mod external_editor;
 pub mod feedback_picker;
