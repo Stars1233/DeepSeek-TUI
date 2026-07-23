@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::future::Future;
-use std::io::{self, Stdout, Write};
+use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{
@@ -898,6 +898,12 @@ pub async fn run_tui(
             .unwrap_or(osc8_default_on),
     );
 
+    // Fail fast with a clear message when the interactive TUI is launched
+    // without a controlling TTY (#4716). Without this, enable_raw_mode fails
+    // with opaque "Device not configured" / "Input/output error" and some
+    // terminal hosts surface only "[Process completed]".
+    require_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
+
     // Terminal probe with timeout to prevent hanging on unresponsive terminals.
     //
     // The blocking task cannot be cancelled once the timeout fires, so a slow
@@ -1326,6 +1332,35 @@ pub async fn run_tui(
     }
 
     result
+}
+
+/// Refuse to enter raw mode unless both interactive streams are TTYs.
+///
+/// Keeping this check independent from `std::io` makes the launch contract
+/// testable without trying to manipulate the test runner's own terminal.
+fn require_interactive_terminal(stdin_is_tty: bool, stdout_is_tty: bool) -> Result<()> {
+    if stdin_is_tty && stdout_is_tty {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "Codewhale TUI requires an interactive terminal (stdin and stdout must be a TTY).\n\
+         Open a real terminal (Terminal.app, iTerm, Windows Terminal, …) and run `codew` \
+         or `codewhale` there — not from a pipe, cron job, or non-TTY launcher.\n\
+         For headless prompts use `codewhale exec \"…\"` instead."
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn tui_launch_preflight_explains_non_tty_failure() {
+    assert!(require_interactive_terminal(true, true).is_ok());
+    for (stdin_is_tty, stdout_is_tty) in [(false, true), (true, false), (false, false)] {
+        let err = require_interactive_terminal(stdin_is_tty, stdout_is_tty)
+            .expect_err("a missing TTY must fail before raw mode");
+        let message = err.to_string();
+        assert!(message.contains("interactive terminal"), "{message}");
+        assert!(message.contains("codewhale exec"), "{message}");
+    }
 }
 
 fn should_show_resume_hint(session_id: Option<&str>) -> bool {

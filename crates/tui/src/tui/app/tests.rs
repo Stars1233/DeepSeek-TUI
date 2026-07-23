@@ -1662,6 +1662,46 @@ fn paste_under_threshold_does_not_consolidate() {
 }
 
 #[test]
+fn large_multiline_paste_preserves_exact_bytes_through_submit() {
+    // #4719: large multi-line pastes must not byte-corrupt before submission.
+    // Real dogfood saw paths like `codewhale-v091-exact-88a158-ci` arrive as
+    // `work-88a158-ci` — assert exact fidelity for a representative payload.
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut opts = test_options(false);
+    opts.workspace = tmp.path().to_path_buf();
+    let mut app = App::new(opts, &Config::default());
+
+    let payload = format!(
+        "Mission path: /Volumes/VIXinSSD/CW/worktrees/codewhale-v091-exact-88a158-ci\n\
+         SHA: 0dfe9170a10e081fe48b23239f22d33260f4fa24\n\
+         Branch: codex/v091-local-candidate-20260722\n\
+         Paths that must not truncate: codewhale-v091-exact-88a158-ci worktrees/codewhale-v091-exact-88a158-ci\n\
+         Mixed punctuation: a;b:c[m]<n> digits 0123456789 and hyphens-ok\n\
+         Unicode: 你好世界 café — keep every codepoint.\n\
+         {}",
+        "line-body-".repeat(200)
+    );
+    // Stay under MAX_SUBMITTED_INPUT_CHARS so submit returns the inline text
+    // (no @paste consolidation) and we can compare exact bytes.
+    assert!(
+        payload.chars().count() < MAX_SUBMITTED_INPUT_CHARS,
+        "fixture must stay under submit consolidation threshold"
+    );
+
+    app.insert_paste_text(&payload);
+    assert_eq!(
+        app.input, payload,
+        "composer input must equal pasted payload exactly"
+    );
+
+    let submitted = app.submit_input().expect("submit");
+    assert_eq!(
+        submitted, payload,
+        "submitted bytes must equal pasted payload exactly"
+    );
+}
+
+#[test]
 fn submit_input_consolidates_oversized_input_into_paste_file() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut opts = test_options(false);

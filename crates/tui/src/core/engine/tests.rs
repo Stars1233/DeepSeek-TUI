@@ -8746,14 +8746,48 @@ async fn session_snapshot_omits_id_for_legacy_root_custom_route() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn edit_last_turn_preserves_current_mode() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // EditLastTurn dispatches a real replacement turn. Pin that turn to a
+    // local, completing SSE response instead of depending on whichever
+    // provider configuration or network state the parallel test process has.
+    let _lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-edit-mode\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"Revised plan.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-edit-mode\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
         model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
         ..Default::default()
     };
-    let (engine, handle) = Engine::new(config, &Config::default());
+    let (engine, handle) = Engine::new(config, &api_config);
 
     let run = tokio::spawn(engine.run());
     let seeded_messages = vec![
@@ -8808,14 +8842,24 @@ async fn edit_last_turn_preserves_current_mode() {
         })
         .await
         .expect("request snapshot");
-    let snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+    let snapshot = tokio::time::timeout(model_turn_event_timeout(), rx)
         .await
         .expect("snapshot response")
         .expect("snapshot");
 
     assert_eq!(snapshot.mode, "plan");
 
-    run.abort();
+    let requests = server
+        .received_requests()
+        .await
+        .expect("recorded replacement request");
+    assert_eq!(
+        requests.len(),
+        1,
+        "edit must dispatch exactly one replacement turn"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
 }
 
 #[tokio::test]

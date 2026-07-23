@@ -5,7 +5,6 @@ use ratatui::text::{Line, Span};
 
 use crate::palette;
 use crate::tui::markdown_render;
-use crate::tui::ui_text::truncate_line_to_width;
 
 /// Reasoning header opener. Replaces the spinner glyph on thinking cells —
 /// reasoning is a slow exhale, not a tool spin.
@@ -273,43 +272,31 @@ pub(super) fn render_thinking(
 }
 
 pub(super) fn render_hidden_thinking_activity(
-    width: u16,
+    _width: u16,
     duration_secs: Option<f32>,
     low_motion: bool,
 ) -> Vec<Line<'static>> {
     let state = ThinkingVisualState::Live;
-    let rail_style = Style::default().fg(thinking_state_accent(state));
-    let body_style = thinking_style().italic();
-    let content_width = width.saturating_sub(3).max(1) as usize;
-
     let mut header_spans = vec![
         Span::styled(
             format!("{REASONING_OPENER} "),
             Style::default().fg(thinking_state_accent(state)),
         ),
-        Span::styled("reasoning", thinking_title_style()),
-        Span::styled(" ", Style::default()),
-        Span::styled(thinking_status_label(state), thinking_status_style(state)),
+        // A hidden live block needs one receipt, not stacked variants of the
+        // same state ("reasoning live" plus "reasoning hidden; working").
+        Span::styled("reasoning hidden", thinking_title_style()),
     ];
     if let Some(dur) = duration_secs {
         header_spans.push(Span::styled(" · ", Style::default().fg(palette::TEXT_DIM)));
         header_spans.push(Span::styled(format!("{dur:.1}s"), thinking_meta_style()));
     }
-
-    let mut body =
-        truncate_line_to_width("reasoning hidden; model is still working", content_width);
     if !low_motion {
-        body.push(' ');
-        body.push_str(REASONING_CURSOR);
+        header_spans.push(Span::styled(
+            format!(" {REASONING_CURSOR}"),
+            Style::default().fg(palette::ACCENT_REASONING_LIVE),
+        ));
     }
-
-    vec![
-        Line::from(header_spans),
-        Line::from(vec![
-            Span::styled(REASONING_RAIL.to_string(), rail_style),
-            Span::styled(body, body_style),
-        ]),
-    ]
+    vec![Line::from(header_spans)]
 }
 
 fn thinking_style() -> Style {

@@ -1335,17 +1335,11 @@ impl ConfigView {
                 editable: false,
                 scope: ConfigScope::Session,
             },
-            ConfigRow {
-                section: ConfigSection::Model,
-                key: "default_model".to_string(),
-                value: settings
-                    .default_model
-                    .as_deref()
-                    .unwrap_or(&*tr(app.ui_locale, MessageId::ConfigDefaultValue))
-                    .to_string(),
-                editable: false,
-                scope: ConfigScope::Saved,
-            },
+            // DeepSeek-only legacy fallback: hide on non-DeepSeek providers so
+            // it is not misread as an active setting (#4717). Keep the field
+            // and routing behavior; surface the row only for DeepSeek routes
+            // (or when an explicit value is set and the operator needs to see it).
+            // Built below after provider check so non-DeepSeek menus stay clean.
             ConfigRow {
                 section: ConfigSection::Model,
                 key: "reasoning_effort".to_string(),
@@ -1653,6 +1647,35 @@ impl ConfigView {
                 scope: ConfigScope::Saved,
             },
         ];
+        // #4717: only show the DeepSeek-only fallback model row when the active
+        // provider is a DeepSeek route (or an explicit value is set, so operators
+        // can still see/clear a leftover). Non-DeepSeek providers use
+        // provider-scoped models; the legacy row is inert there.
+        let show_deepseek_fallback = matches!(
+            app.api_provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+        ) || settings.default_model.is_some();
+        if show_deepseek_fallback {
+            let insert_at = rows
+                .iter()
+                .position(|row| row.key == "fast_model")
+                .map(|i| i + 1)
+                .unwrap_or(rows.len());
+            rows.insert(
+                insert_at,
+                ConfigRow {
+                    section: ConfigSection::Model,
+                    key: "default_model".to_string(),
+                    value: settings
+                        .default_model
+                        .as_deref()
+                        .unwrap_or(&*tr(app.ui_locale, MessageId::ConfigDefaultValue))
+                        .to_string(),
+                    editable: false,
+                    scope: ConfigScope::Saved,
+                },
+            );
+        }
         let external_status_rows = [ApiProvider::OpenaiCodex, ApiProvider::Xai]
             .into_iter()
             .filter_map(|provider| {
@@ -2409,7 +2432,7 @@ fn config_label_for_key(key: &str) -> String {
         "provider_url" => "Provider API URL",
         "model" => "Active provider model",
         "fast_model" => "Fast model (derived)",
-        "default_model" => "DeepSeek fallback model",
+        "default_model" => "Legacy fallback model (DeepSeek routes only)",
         "reasoning_effort" => "Reasoning level",
         "approval_mode" => "This session's permission",
         "permission_posture" => "New sessions' permission",
@@ -4748,6 +4771,7 @@ api_key_env = "ACME_API_KEY"
 
     #[test]
     fn config_view_explains_zai_fast_sibling() {
+        let _guard = ConfigSettingsEnvGuard::new("");
         let mut app = create_test_app();
         app.api_provider = crate::config::ApiProvider::Zai;
         app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
@@ -4766,6 +4790,60 @@ api_key_env = "ACME_API_KEY"
 
         assert_eq!(active.value, "zai / GLM-5.2");
         assert_eq!(fast.value, "GLM-5-Turbo");
+        // #4717: DeepSeek-only fallback must not appear on non-DeepSeek providers.
+        assert!(
+            view.rows.iter().all(|row| row.key != "default_model"),
+            "default_model row must be hidden for zai when unset"
+        );
+    }
+
+    #[test]
+    fn config_view_hides_deepseek_fallback_on_non_deepseek_providers() {
+        let _guard = ConfigSettingsEnvGuard::new("");
+        let mut app = create_test_app();
+        for provider in [
+            crate::config::ApiProvider::Zai,
+            crate::config::ApiProvider::Xai,
+            crate::config::ApiProvider::Openrouter,
+            crate::config::ApiProvider::Ollama,
+        ] {
+            app.api_provider = provider;
+            let view = ConfigView::new_for_app(&app);
+            assert!(
+                view.rows.iter().all(|row| row.key != "default_model"),
+                "default_model must stay hidden for {:?}",
+                provider
+            );
+        }
+
+        // DeepSeek providers still show the diagnostic row.
+        app.api_provider = crate::config::ApiProvider::Deepseek;
+        let view = ConfigView::new_for_app(&app);
+        assert!(
+            view.rows
+                .iter()
+                .any(|row| row.key == "default_model" && !row.editable),
+            "DeepSeek must keep the fallback diagnostic row"
+        );
+    }
+
+    #[test]
+    fn config_view_marks_saved_deepseek_fallback_as_legacy_off_route() {
+        let _guard = ConfigSettingsEnvGuard::new("default_model = \"deepseek-v4-pro\"\n");
+        let mut app = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Zai;
+
+        let view = ConfigView::new_for_app(&app);
+        let row = view
+            .rows
+            .iter()
+            .find(|row| row.key == "default_model")
+            .expect("saved legacy fallback should remain visible for cleanup");
+        assert!(!row.editable, "legacy fallback must remain diagnostic-only");
+        assert_eq!(
+            config_label_for_key(&row.key),
+            "Legacy fallback model (DeepSeek routes only)"
+        );
     }
 
     #[test]

@@ -453,7 +453,8 @@ fn specialized_bash_and_mcp_cells_share_the_calm_evidence_receipt() {
         lines_text(&ToolCell::Mcp(mcp).lines_with_motion(80, true)),
     ] {
         assert!(rendered.contains("Exact evidence retained"), "{rendered}");
-        assert!(rendered.contains("Option+V to inspect"), "{rendered}");
+        // Option+V is a global details affordance, not a per-card stamp (#4718).
+        assert!(!rendered.contains("Option+V to inspect"), "{rendered}");
         assert!(!rendered.contains("retrieve_tool_result"), "{rendered}");
         assert!(!rendered.contains("head"), "{rendered}");
     }
@@ -472,8 +473,9 @@ fn adaptive_evidence_receipt_is_calm_path_free_and_width_bounded() {
         );
         assert!(!rendered.contains("/Users"));
         assert!(!rendered.contains("hash.txt"));
-        if width >= 48 {
-            assert_eq!(rendered, "  Exact evidence retained · Option+V to inspect");
+        assert!(!rendered.contains("Option+V"));
+        if width >= 32 {
+            assert_eq!(rendered, "  Exact evidence retained");
         }
     }
 }
@@ -1108,6 +1110,15 @@ fn render_hidden_streaming_thinking_shows_activity_without_content() {
     assert!(
         text.contains("reasoning hidden"),
         "hidden live thinking should still show progress: {text}"
+    );
+    assert_eq!(
+        lines.len(),
+        1,
+        "hidden reasoning should have one compact status treatment: {text}"
+    );
+    assert!(
+        !text.contains("reasoning live") && !text.contains("model is still working"),
+        "hidden reasoning should not stack duplicate live-state copy: {text}"
     );
     assert!(
         !text.contains("private chain of thought"),

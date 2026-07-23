@@ -1803,7 +1803,10 @@ impl GenericToolCell {
 /// retained as exact evidence. The receipt stays calm and path-free; the
 /// activity-detail shortcut opens the verified retained file.
 fn render_spillover_annotation(_path: &std::path::Path, width: u16) -> Line<'static> {
-    let receipt = "  Exact evidence retained · Option+V to inspect";
+    // Keep the per-card receipt path-free and short. The Option+V / details
+    // shortcut is a global chrome affordance — stamping it under every tool
+    // card made transcript density too high (#4718).
+    let receipt = "  Exact evidence retained";
     Line::from(Span::styled(
         truncate_text(receipt, usize::from(width).max(8)),
         Style::default().fg(palette::TEXT_MUTED).italic(),
