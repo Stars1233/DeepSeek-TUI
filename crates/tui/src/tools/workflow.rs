@@ -6256,7 +6256,11 @@ reviewer = "reviewer"
         std::fs::write(workflow_dir.join("issue_audit.workflow.js"), fixture)
             .expect("write fixture into workspace");
 
-        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let mut ctx = ToolContext::new(tmp.path().to_path_buf());
+        ctx.runtime.work = Some(crate::work_graph::new_shared_work_runtime(
+            crate::tools::todo::new_shared_todo_list(),
+            crate::tools::plan::new_shared_plan_state(),
+        ));
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
         let (client, calls) = fake_chat_client("audited").await;
         let runtime = SubAgentRuntime::new(
@@ -6316,6 +6320,53 @@ reviewer = "reviewer"
                 .iter()
                 .any(|message| message == "phase: parallel-audit")
         );
+
+        // Operate projects Workflow fan-out/fan-in and its children through
+        // the same canonical Work Graph. The Workflow remains the accountable
+        // operation identity while the worker bindings stay inspectable; no
+        // second plan/strategy lifecycle is created for the reduce step.
+        let work = ctx.runtime.work.as_ref().expect("work runtime");
+        let graph = work
+            .capture(Some(&ctx.state_namespace))
+            .expect("capture workflow work")
+            .expect("workflow graph")
+            .graph;
+        let workflow_external = format!(
+            "workflow:{}",
+            payload["run_id"].as_str().expect("workflow run id")
+        );
+        let workflow_operations = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.external == workflow_external)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            workflow_operations.len(),
+            1,
+            "one accountable Workflow operation: {graph:#?}"
+        );
+        assert_eq!(
+            workflow_operations[0].state,
+            crate::work_graph::NodeState::Completed
+        );
+        for child_id in payload["child_ids"].as_array().expect("workflow child ids") {
+            let worker_external = format!(
+                "worker:{}",
+                child_id.as_str().expect("workflow child id string")
+            );
+            assert!(
+                graph.nodes.iter().any(|node| {
+                    node.binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.external == worker_external)
+                }),
+                "Workflow worker {worker_external} must remain inspectable in the same graph: {graph:#?}"
+            );
+        }
     }
 
     #[tokio::test]
