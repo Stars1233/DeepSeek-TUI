@@ -37,6 +37,38 @@ pub struct CompactionConfig {
     /// into the successor-brief prompt so the summary weights what the user
     /// said matters. `None` for automatic compaction.
     pub focus: Option<String>,
+    /// Typed live runtime state for post-compact rehydrate (todos, workers,
+    /// shells, approvals, mode/permission). Host-owned snapshot; pure format
+    /// lives in [`format_live_state_reminder`].
+    pub live_state: Option<CompactionLiveState>,
+}
+
+/// Host-captured live state injected after compaction so the successor agent
+/// does not reconstruct todos/workers/mode from prose alone (compactionidea P1).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompactionLiveState {
+    pub mode: Option<String>,
+    pub permission_posture: Option<String>,
+    /// Preformatted todo lines (status + content), newest or checklist order.
+    pub todos: Vec<String>,
+    /// Running background shell commands (id + command).
+    pub background_shells: Vec<String>,
+    /// Running sub-agents / fleet workers (id + role + objective).
+    pub running_workers: Vec<String>,
+    /// Open approval prompts still awaiting the user.
+    pub open_approvals: Vec<String>,
+}
+
+impl CompactionLiveState {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.mode.is_none()
+            && self.permission_posture.is_none()
+            && self.todos.is_empty()
+            && self.background_shells.is_empty()
+            && self.running_workers.is_empty()
+            && self.open_approvals.is_empty()
+    }
 }
 
 impl Default for CompactionConfig {
@@ -63,7 +95,38 @@ impl Default for CompactionConfig {
             effective_context_window: None,
             cache_summary: true,
             focus: None,
+            live_state: None,
         }
+    }
+}
+
+/// Minimum non-whitespace characters for a usable successor summary.
+/// Below this (or missing required section headings), treat as degenerate and
+/// retry once rather than shipping amnesia (compactionidea failure ladder).
+const MIN_SUMMARY_SEED_CHARS: usize = 80;
+const DEGENERATE_SUMMARY_REQUIRED_MARKERS: &[&str] =
+    &["Primary request", "Pending tasks", "Current work"];
+
+/// Failure kind for compaction LLM calls (deterministic vs transient).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionFailureKind {
+    /// Same payload will fail again — do not sleep/retry unchanged.
+    Deterministic,
+    /// May resolve on retry (network, rate limit, timeout).
+    Transient,
+    /// Context overflow — rebuild a smaller summary input before retry.
+    ContextOverflow,
+}
+
+impl CompactionFailureKind {
+    #[must_use]
+    pub fn is_transient(self) -> bool {
+        matches!(self, Self::Transient)
+    }
+
+    #[must_use]
+    pub fn allows_input_ladder(self) -> bool {
+        matches!(self, Self::ContextOverflow)
     }
 }
 
@@ -983,17 +1046,38 @@ pub struct CompactionResult {
     pub retries_used: u32,
 }
 
-/// Check if an error is transient and worth retrying. Categories that map to
-/// transient retry: Network, RateLimit, Timeout. Anything else (auth, parse,
-/// invalid request, etc.) is permanent and propagates.
-fn is_transient_error(e: &anyhow::Error) -> bool {
-    let category = crate::error_taxonomy::classify_error_message(&e.to_string());
-    matches!(
-        category,
+/// Classify a compaction LLM failure for the retry / input-ladder policy.
+fn classify_compaction_failure(e: &anyhow::Error) -> CompactionFailureKind {
+    let text = e.to_string();
+    if is_context_window_error_message(&text) {
+        return CompactionFailureKind::ContextOverflow;
+    }
+    let category = crate::error_taxonomy::classify_error_message(&text);
+    match category {
         crate::error_taxonomy::ErrorCategory::Network
-            | crate::error_taxonomy::ErrorCategory::RateLimit
-            | crate::error_taxonomy::ErrorCategory::Timeout
-    )
+        | crate::error_taxonomy::ErrorCategory::RateLimit
+        | crate::error_taxonomy::ErrorCategory::Timeout => CompactionFailureKind::Transient,
+        _ => CompactionFailureKind::Deterministic,
+    }
+}
+
+/// Check if an error is transient and worth retrying. Categories that map to
+/// transient retry: Network, RateLimit, Timeout. Context overflow is *not*
+/// transient — it needs a smaller input (ladder), not the same payload.
+fn is_transient_error(e: &anyhow::Error) -> bool {
+    classify_compaction_failure(e).is_transient()
+}
+
+fn is_context_window_error_message(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("too long for this model")
+        || lower.contains("prompt is too long")
+        || lower.contains("maximum prompt length")
+        || lower.contains("maximum context length")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("context window")
+        || (lower.contains("context")
+            && (lower.contains("token") || lower.contains("too long") || lower.contains("maximum")))
 }
 
 /// Compact messages with retry and backoff for transient errors.
@@ -1191,8 +1275,10 @@ pub async fn compact_messages(
         .map(|&idx| messages[idx].clone())
         .collect();
 
-    // Create a summary of the unpinned portion of the conversation
-    let summary = create_summary(
+    // Create a summary of the unpinned portion of the conversation.
+    // Failure ladder: on context overflow, retry with a smaller input rung;
+    // on degenerate output, resample once before shipping amnesia.
+    let summary = create_summary_with_ladder(
         client,
         &to_summarize,
         &config.model,
@@ -1206,6 +1292,13 @@ pub async fn compact_messages(
     drop(to_summarize);
 
     let anchors_section = anchor_summary_section(workspace);
+    let project_instructions = project_instructions_section(workspace);
+    let live_reminder = config
+        .live_state
+        .as_ref()
+        .map(format_live_state_reminder)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
 
     // Build new message list with enhanced summary as system block
     let summary_block = SystemBlock {
@@ -1218,9 +1311,12 @@ pub async fn compact_messages(
              ## 🔍 Workflow Context\n\n\
              {workflow_context}\n\n\
              ---\n\n\
+             {live_reminder}\
+             {project_instructions}\
              ## 💡 What to Do Next\n\n\
              You have just resumed from a context compaction. The conversation above was summarized to save space. \
-             Review the summary and workflow context, then continue helping the user with their task. \
+             Review the summary, live state, and project instructions, then continue the same task. \
+             Prefer exact paths and commands from the summary over re-discovery. \
              If you need more details about the summarized portion, ask the user to clarify.\n\n\
              ---\n\n\
              Pinned messages follow:"
@@ -1247,16 +1343,151 @@ pub async fn compact_messages(
     ))
 }
 
-async fn create_summary(
+/// Summary input ladder rungs: full → lossy-formatted → extreme-truncate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryInputRung {
+    Full,
+    Lossy,
+    Extreme,
+}
+
+async fn create_summary_with_ladder(
     client: &dyn ModelClient,
     messages: &[Message],
     model: &str,
     effective_context_window: Option<u32>,
     focus: Option<&str>,
 ) -> Result<String> {
-    let limits = summary_input_limits_for_model(model, effective_context_window);
-    let used_cache_aligned =
-        should_use_cache_aligned_summary(model, effective_context_window, messages);
+    let rungs = [
+        SummaryInputRung::Full,
+        SummaryInputRung::Lossy,
+        SummaryInputRung::Extreme,
+    ];
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for (idx, rung) in rungs.iter().enumerate() {
+        match create_summary(
+            client,
+            messages,
+            model,
+            effective_context_window,
+            focus,
+            *rung,
+        )
+        .await
+        {
+            Ok(summary) if is_degenerate_summary(&summary) => {
+                logging::warn(format!(
+                    "Compaction summary rung {rung:?} produced degenerate output \
+                     ({} chars); retrying next ladder rung",
+                    summary.chars().count()
+                ));
+                // Degenerate is not a hard error: try next rung, or if last, return
+                // the best effort only when non-empty after a second full retry.
+                if idx + 1 < rungs.len() {
+                    last_err = Some(anyhow::anyhow!(
+                        "degenerate compaction summary ({} chars)",
+                        summary.chars().count()
+                    ));
+                    continue;
+                }
+                // Final rung still degenerate: one explicit resample of Extreme.
+                match create_summary(
+                    client,
+                    messages,
+                    model,
+                    effective_context_window,
+                    focus,
+                    SummaryInputRung::Extreme,
+                )
+                .await
+                {
+                    Ok(retry) if !is_degenerate_summary(&retry) => return Ok(retry),
+                    Ok(retry) if !retry.trim().is_empty() => {
+                        logging::warn(
+                            "Compaction summary still thin after ladder; shipping best effort",
+                        );
+                        return Ok(retry);
+                    }
+                    Ok(_) => {
+                        return Err(anyhow::anyhow!(
+                            "compaction summary empty after failure ladder"
+                        ));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            Ok(summary) => return Ok(summary),
+            Err(err) => {
+                let kind = classify_compaction_failure(&err);
+                if kind.allows_input_ladder() && idx + 1 < rungs.len() {
+                    logging::warn(format!(
+                        "Compaction summary rung {rung:?} hit context overflow ({err}); \
+                         retrying smaller input ladder rung"
+                    ));
+                    last_err = Some(err);
+                    continue;
+                }
+                if kind.is_transient() && idx + 1 < rungs.len() {
+                    last_err = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("compaction summary ladder exhausted")))
+}
+
+/// True when the model returned an empty or useless successor brief.
+fn is_degenerate_summary(summary: &str) -> bool {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let seed_chars = trimmed.chars().filter(|c| !c.is_whitespace()).count();
+    if seed_chars < MIN_SUMMARY_SEED_CHARS {
+        return true;
+    }
+    // Structured brief must land at least one load-bearing section heading.
+    // Free-form walls of text that omit every marker still count as amnesia.
+    let lower = trimmed.to_ascii_lowercase();
+    !DEGENERATE_SUMMARY_REQUIRED_MARKERS
+        .iter()
+        .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
+}
+
+async fn create_summary(
+    client: &dyn ModelClient,
+    messages: &[Message],
+    model: &str,
+    effective_context_window: Option<u32>,
+    focus: Option<&str>,
+    rung: SummaryInputRung,
+) -> Result<String> {
+    let mut limits = summary_input_limits_for_model(model, effective_context_window);
+    match rung {
+        SummaryInputRung::Full => {}
+        SummaryInputRung::Lossy => {
+            limits.input_max_chars /= 2;
+            limits.input_head_chars /= 2;
+            limits.input_tail_chars /= 2;
+            limits.text_snippet_chars /= 2;
+            limits.tool_result_snippet_chars /= 2;
+        }
+        SummaryInputRung::Extreme => {
+            limits.input_max_chars = (limits.input_max_chars / 4).max(4_000);
+            limits.input_head_chars = (limits.input_head_chars / 4).max(2_000);
+            limits.input_tail_chars = (limits.input_tail_chars / 4).max(1_500);
+            limits.text_snippet_chars = (limits.text_snippet_chars / 4).max(200);
+            limits.tool_result_snippet_chars = (limits.tool_result_snippet_chars / 4).max(120);
+        }
+    }
+
+    // Cache-aligned only on the Full rung; smaller rungs always use formatted.
+    let used_cache_aligned = matches!(rung, SummaryInputRung::Full)
+        && should_use_cache_aligned_summary(model, effective_context_window, messages);
     let request = if used_cache_aligned {
         build_cache_aligned_summary_request(model, messages, limits, focus)
     } else {
@@ -1311,6 +1542,83 @@ async fn create_summary(
         .join("\n");
 
     Ok(summary)
+}
+
+/// Format a typed post-compact system-reminder from real runtime state.
+pub fn format_live_state_reminder(state: &CompactionLiveState) -> String {
+    if state.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "## 🔄 Live State (post-compact rehydrate)\n\n\
+         These facts come from the live runtime, not the summary model. Trust them over prose guesses.\n\n",
+    );
+    if let Some(mode) = state.mode.as_deref() {
+        let _ = writeln!(out, "- Mode: `{mode}`");
+    }
+    if let Some(posture) = state.permission_posture.as_deref() {
+        let _ = writeln!(out, "- Permission posture: `{posture}`");
+    }
+    if !state.todos.is_empty() {
+        out.push_str("\n### Todos\n");
+        for line in &state.todos {
+            let _ = writeln!(out, "- {line}");
+        }
+    }
+    if !state.background_shells.is_empty() {
+        out.push_str("\n### Running background shells\n");
+        for line in &state.background_shells {
+            let _ = writeln!(out, "- {line}");
+        }
+    }
+    if !state.running_workers.is_empty() {
+        out.push_str("\n### Running workers / sub-agents\n");
+        for line in &state.running_workers {
+            let _ = writeln!(out, "- {line}");
+        }
+    }
+    if !state.open_approvals.is_empty() {
+        out.push_str("\n### Open approvals\n");
+        for line in &state.open_approvals {
+            let _ = writeln!(out, "- {line}");
+        }
+    }
+    out.push_str("\n---\n\n");
+    out
+}
+
+/// Re-inject project instructions (AGENTS.md / CLAUDE.md) **verbatim** after
+/// compaction so they do not depend on the summarizer (compactionidea P1).
+fn project_instructions_section(workspace: Option<&Path>) -> String {
+    let Some(ws) = workspace else {
+        return String::new();
+    };
+    // Same precedence as project_context: AGENTS.md first, then CLAUDE.md.
+    const CANDIDATES: &[&str] = &["AGENTS.md", "CLAUDE.md", "Claude.md"];
+    for name in CANDIDATES {
+        let path = ws.join(name);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Bound size so a huge AGENTS file cannot blow the post-compact budget.
+        const MAX_CHARS: usize = 12_000;
+        let body = if trimmed.chars().count() > MAX_CHARS {
+            let head: String = trimmed.chars().take(MAX_CHARS).collect();
+            format!("{head}\n\n[… project instructions truncated for compaction budget …]")
+        } else {
+            trimmed.to_string()
+        };
+        return format!(
+            "## 📜 Project instructions (verbatim rehydrate)\n\n\
+             <project_instructions source=\"{name}\">\n{body}\n</project_instructions>\n\n\
+             ---\n\n"
+        );
+    }
+    String::new()
 }
 
 // Retained for tests; production compaction now falls back on any
@@ -2039,6 +2347,78 @@ mod tests {
         assert!(!is_context_window_error(&anyhow::anyhow!(
             "503 Service Unavailable"
         )));
+    }
+
+    #[test]
+    fn live_state_reminder_formats_typed_runtime_facts() {
+        let state = CompactionLiveState {
+            mode: Some("operate".into()),
+            permission_posture: Some("Ask".into()),
+            todos: vec!["[in_progress] #1 land fix".into()],
+            background_shells: vec!["`sh_1`: `cargo test -p foo`".into()],
+            running_workers: vec!["`agent_a` (role: implementer) — fix flaky".into()],
+            open_approvals: vec!["shell: git push".into()],
+        };
+        let text = format_live_state_reminder(&state);
+        assert!(text.contains("Live State"));
+        assert!(text.contains("operate"));
+        assert!(text.contains("Ask"));
+        assert!(text.contains("land fix"));
+        assert!(text.contains("cargo test"));
+        assert!(text.contains("agent_a"));
+        assert!(text.contains("git push"));
+        assert!(format_live_state_reminder(&CompactionLiveState::default()).is_empty());
+    }
+
+    #[test]
+    fn project_instructions_section_reinjects_agents_md_verbatim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("AGENTS.md"),
+            "# Project rules\n\nNever force-push main.\n",
+        )
+        .unwrap();
+        let section = project_instructions_section(Some(tmp.path()));
+        assert!(section.contains("Project instructions"));
+        assert!(section.contains("<project_instructions source=\"AGENTS.md\">"));
+        assert!(section.contains("Never force-push main."));
+        assert!(project_instructions_section(None).is_empty());
+    }
+
+    #[test]
+    fn degenerate_summary_detects_empty_short_and_unstructured() {
+        assert!(is_degenerate_summary(""));
+        assert!(is_degenerate_summary("   ok   "));
+        assert!(is_degenerate_summary(
+            "This is a long enough free-form paragraph that has many characters but no section \
+             headings at all so the successor cannot recover open items or in-flight edits \
+             from structure alone."
+        ));
+        assert!(!is_degenerate_summary(
+            "1. Primary request and intent — fix the flaky test in auth.\n\
+             2. Key technical concepts — tokio, race on mutex.\n\
+             7. Pending tasks — re-run cargo test -p auth.\n\
+             8. Current work — editing crates/auth/src/lib.rs.\n\
+             More padding so non-whitespace length clears the seed floor for the ladder."
+        ));
+    }
+
+    #[test]
+    fn classify_compaction_failure_splits_overflow_transient_and_deterministic() {
+        let overflow = anyhow::anyhow!("prompt is too long for this model's context window");
+        assert_eq!(
+            classify_compaction_failure(&overflow),
+            CompactionFailureKind::ContextOverflow
+        );
+        let network = anyhow::anyhow!("connection timed out contacting api");
+        // Taxonomy may map timeout/network; if not, still not overflow.
+        let kind = classify_compaction_failure(&network);
+        assert_ne!(kind, CompactionFailureKind::ContextOverflow);
+        let auth = anyhow::anyhow!("401 unauthorized: invalid api key");
+        assert_eq!(
+            classify_compaction_failure(&auth),
+            CompactionFailureKind::Deterministic
+        );
     }
 
     #[test]

@@ -427,10 +427,15 @@ impl Engine {
                     .send(Event::status("Auto-compacting context...".to_string()))
                     .await;
                 let auto_messages_before = self.session.messages.len();
+                let mut auto_compaction_config = self.config.compaction.clone();
+                let live = self.capture_compaction_live_state().await;
+                if !live.is_empty() {
+                    auto_compaction_config.live_state = Some(live);
+                }
                 match compact_messages_safe(
                     client.as_ref(),
                     &self.session.messages,
-                    &self.config.compaction,
+                    &auto_compaction_config,
                     Some(&self.session.workspace),
                     Some(&compaction_pins),
                     Some(&compaction_paths),

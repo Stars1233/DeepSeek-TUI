@@ -25,7 +25,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::DeepSeekClient;
 use crate::compaction::{
-    CompactionConfig, compact_messages_safe, merge_system_prompts, should_compact,
+    CompactionConfig, CompactionLiveState, compact_messages_safe, merge_system_prompts,
+    should_compact,
 };
 use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL};
 use crate::core::model_client::SharedModelClient;
@@ -3581,6 +3582,68 @@ impl Engine {
         outcome
     }
 
+    /// Capture typed live state for post-compact rehydrate (todos, workers,
+    /// shells, mode, permission). Pure formatting lives in compaction.rs.
+    async fn capture_compaction_live_state(&self) -> CompactionLiveState {
+        let todos = {
+            let guard = self.config.todos.lock().await;
+            let snap = guard.snapshot();
+            if snap.is_empty() {
+                Vec::new()
+            } else {
+                snap.plain_text()
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }
+        };
+
+        let running_workers = {
+            let mut guard = self.subagent_manager.write().await;
+            guard.cleanup(Duration::from_secs(60 * 60));
+            guard
+                .list()
+                .into_iter()
+                .filter(|s| matches!(s.status, SubAgentStatus::Running))
+                .map(|s| {
+                    let role = s.assignment.role.as_deref().unwrap_or("-");
+                    let goal = if s.assignment.objective.is_empty() {
+                        "(no objective)"
+                    } else {
+                        s.assignment.objective.as_str()
+                    };
+                    format!("`{}` (role: {role}) — {goal}", s.agent_id)
+                })
+                .collect()
+        };
+
+        let background_shells = match self.shell_manager.lock() {
+            Ok(mut manager) => manager
+                .list_jobs()
+                .into_iter()
+                .filter(|job| matches!(job.status, crate::tools::shell::ShellStatus::Running))
+                .map(|job| format!("`{}`: `{}`", job.id, job.command))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
+        CompactionLiveState {
+            mode: Some(self.current_mode.as_setting().to_string()),
+            permission_posture: Some(
+                self.session
+                    .approval_mode
+                    .permission_chip_label()
+                    .to_string(),
+            ),
+            todos,
+            background_shells,
+            running_workers,
+            open_approvals: Vec::new(),
+        }
+    }
+
     async fn handle_manual_compaction(&mut self) {
         let id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let zero_usage = Usage {
@@ -3622,10 +3685,16 @@ impl Engine {
         let mut turn_status = TurnOutcomeStatus::Completed;
         let mut turn_error = None;
 
+        let mut compaction_config = self.config.compaction.clone();
+        let live = self.capture_compaction_live_state().await;
+        if !live.is_empty() {
+            compaction_config.live_state = Some(live);
+        }
+
         match compact_messages_safe(
             &client,
             &self.session.messages,
-            &self.config.compaction,
+            &compaction_config,
             Some(&self.session.workspace),
             Some(&compaction_pins),
             Some(&compaction_paths),
@@ -3858,6 +3927,10 @@ impl Engine {
             .token_threshold
             .min(target_budget.saturating_sub(1))
             .max(1);
+        let live = self.capture_compaction_live_state().await;
+        if !live.is_empty() {
+            forced_config.live_state = Some(live);
+        }
 
         // Preserve the working-set pins on the emergency/preflight path too.
         // Previously this passed None/None, so a compaction routed here (which,
