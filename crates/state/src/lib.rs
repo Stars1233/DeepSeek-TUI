@@ -291,14 +291,33 @@ impl StateStore {
         }
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open state db {}", db_path.display()))?;
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .with_context(|| format!("failed to enable foreign keys for {}", db_path.display()))?;
+        Self::configure_connection(&conn, &db_path)?;
         Self::init_schema(&conn)?;
         Ok(Self {
             db_path,
             session_index_path,
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Apply connection-level SQLite settings that must hold for every open.
+    ///
+    /// Enables WAL so readers and writers from concurrent CodeWhale processes
+    /// do not block each other as aggressively as the default rollback journal,
+    /// and sets a multi-second busy timeout so a second process retries on
+    /// `SQLITE_BUSY` instead of failing immediately (issue #4734).
+    fn configure_connection(conn: &Connection, db_path: &Path) -> Result<()> {
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .with_context(|| format!("failed to enable foreign keys for {}", db_path.display()))?;
+        // WAL is a persistent DB-level mode; applying it on every open is
+        // idempotent and keeps freshly created files on the right journal.
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .with_context(|| format!("failed to enable WAL for {}", db_path.display()))?;
+        // A few seconds covers brief writer contention between processes
+        // (e.g. TUI + app-server, or two CLI invocations sharing state.db).
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .with_context(|| format!("failed to set busy_timeout for {}", db_path.display()))?;
+        Ok(())
     }
 
     /// Returns the filesystem path of the underlying SQLite database.
@@ -2076,6 +2095,99 @@ mod tests {
             .query_row("PRAGMA foreign_keys;", [], |row| row.get(0))
             .expect("read foreign_keys pragma");
         assert_eq!(foreign_keys, 1);
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+            .expect("read journal_mode pragma");
+        assert_eq!(
+            journal_mode.to_ascii_lowercase(),
+            "wal",
+            "open should enable WAL for multi-process readers/writers"
+        );
+    }
+
+    /// Two independent connections (as two CodeWhale processes would open)
+    /// must be able to write concurrently without failing with SQLITE_BUSY
+    /// once WAL + busy_timeout are applied at open (#4734).
+    ///
+    /// Uses `upsert_job` so the test only stresses SQLite (not the session
+    /// index JSONL path, which is a separate single-process file).
+    #[test]
+    fn two_connections_can_write_concurrently_without_sqlite_busy() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "codewhale-state-concurrent-write-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp state dir");
+        let db_path = dir.join("state.db");
+
+        // Create schema once so both writers share a real file.
+        let bootstrap = StateStore::open(Some(db_path.clone())).expect("bootstrap open");
+        {
+            let conn = bootstrap.conn().expect("bootstrap conn");
+            let journal_mode: String = conn
+                .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+                .expect("journal_mode");
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        }
+        drop(bootstrap);
+
+        let path_a = db_path.clone();
+        let path_b = db_path.clone();
+        const WRITES_PER_CONN: usize = 50;
+
+        let handle_a = std::thread::spawn(move || {
+            let store = StateStore::open(Some(path_a)).expect("open store a");
+            for i in 0..WRITES_PER_CONN {
+                let job = JobStateRecord {
+                    id: format!("job-a-{i}"),
+                    name: format!("writer-a-{i}"),
+                    status: JobStateStatus::Running,
+                    progress: Some((i % 100) as u8),
+                    detail: Some("concurrent write a".to_string()),
+                    created_at: i as i64,
+                    updated_at: i as i64,
+                };
+                store.upsert_job(&job).unwrap_or_else(|err| {
+                    panic!("connection A write {i} failed (must not be SQLITE_BUSY): {err:#}");
+                });
+            }
+        });
+        let handle_b = std::thread::spawn(move || {
+            let store = StateStore::open(Some(path_b)).expect("open store b");
+            for i in 0..WRITES_PER_CONN {
+                let job = JobStateRecord {
+                    id: format!("job-b-{i}"),
+                    name: format!("writer-b-{i}"),
+                    status: JobStateStatus::Running,
+                    progress: Some((i % 100) as u8),
+                    detail: Some("concurrent write b".to_string()),
+                    created_at: i as i64,
+                    updated_at: i as i64,
+                };
+                store.upsert_job(&job).unwrap_or_else(|err| {
+                    panic!("connection B write {i} failed (must not be SQLITE_BUSY): {err:#}");
+                });
+            }
+        });
+
+        handle_a.join().expect("writer A panicked");
+        handle_b.join().expect("writer B panicked");
+
+        let store = StateStore::open(Some(db_path)).expect("reopen for verify");
+        let listed = store
+            .list_jobs(Some(WRITES_PER_CONN * 2))
+            .expect("list jobs");
+        assert_eq!(
+            listed.len(),
+            WRITES_PER_CONN * 2,
+            "both connections should have persisted all jobs"
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

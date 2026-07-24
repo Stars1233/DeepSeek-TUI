@@ -651,7 +651,8 @@ mod tests {
         )
         .expect("write workflow");
 
-        let registry = UserCommandRegistry::load_with_sources(&[], std::slice::from_ref(&workflow_dir));
+        let registry =
+            UserCommandRegistry::load_with_sources(&[], std::slice::from_ref(&workflow_dir));
         let command = registry.get("pr-review").expect("workflow command");
         assert_eq!(
             command.description.as_deref(),

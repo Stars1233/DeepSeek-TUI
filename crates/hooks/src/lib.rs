@@ -129,8 +129,16 @@ impl HookSink for StdoutHookSink {
 /// The file is created (along with any missing parent directories) on the
 /// first emitted event. Each line is a JSON object of the form
 /// `{"at": "<ISO 8601 timestamp>", "event": {...}}`.
+///
+/// Concurrent [`emit`](HookSink::emit) calls serialize on an internal mutex so
+/// that each JSON event is written and flushed as a complete line; without that
+/// lock, overlapping `write_all` calls can interleave partial lines and corrupt
+/// the JSONL log (see issue #4739).
 pub struct JsonlHookSink {
     path: PathBuf,
+    /// Serializes open+append+flush so concurrent tool-call emits cannot
+    /// interleave bytes mid-line.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl JsonlHookSink {
@@ -139,7 +147,10 @@ impl JsonlHookSink {
     /// Parent directories are created lazily on the first [`HookSink::emit`]
     /// call.
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            write_lock: tokio::sync::Mutex::new(()),
+        }
     }
 }
 
@@ -151,17 +162,20 @@ impl HookSink for JsonlHookSink {
                 format!("failed to create hook log directory {}", parent.display())
             })?;
         }
+        // Encode outside the lock so only I/O is serialized.
+        let payload = json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": event
+        });
+        let encoded = serde_json::to_string(&payload).context("failed to encode hook event")?;
+
+        let _guard = self.write_lock.lock().await;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .await
             .with_context(|| format!("failed to open hook log {}", self.path.display()))?;
-        let payload = json!({
-            "at": Utc::now().to_rfc3339(),
-            "event": event
-        });
-        let encoded = serde_json::to_string(&payload).context("failed to encode hook event")?;
         file.write_all(encoded.as_bytes())
             .await
             .context("failed to write hook event")?;
@@ -169,7 +183,9 @@ impl HookSink for JsonlHookSink {
             .await
             .context("failed to write hook event newline")?;
         // Flush before drop so sequential emits (and tests that read the
-        // file immediately after) observe every completed line.
+        // file immediately after) observe every completed line. Holding the
+        // mutex through flush guarantees concurrent writers never observe a
+        // partial line at EOF.
         file.flush().await.context("failed to flush hook event")?;
         Ok(())
     }
@@ -387,6 +403,69 @@ mod tests {
         assert_eq!(first["event"]["response_id"], "resp-1");
         assert_eq!(second["event"]["type"], "response_end");
         assert_eq!(second["event"]["response_id"], "resp-1");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Concurrent emits must not interleave partial lines (#4739).
+    ///
+    /// Spawns many tasks writing through one shared [`JsonlHookSink`] and
+    /// asserts every line in the resulting file is complete, parseable JSON.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn jsonl_sink_concurrent_emits_write_atomic_json_lines() {
+        let root = unique_temp_dir("jsonl_sink_concurrent");
+        let path = root.join("hooks.jsonl");
+        let sink = Arc::new(JsonlHookSink::new(path.clone()));
+
+        const TASKS: usize = 32;
+        const EVENTS_PER_TASK: usize = 20;
+        let expected = TASKS * EVENTS_PER_TASK;
+
+        let mut handles = Vec::with_capacity(TASKS);
+        for task_id in 0..TASKS {
+            let sink = Arc::clone(&sink);
+            handles.push(tokio::spawn(async move {
+                for n in 0..EVENTS_PER_TASK {
+                    let event = HookEvent::ToolLifecycle {
+                        response_id: format!("resp-{task_id}"),
+                        tool_name: "shell".to_string(),
+                        phase: "end".to_string(),
+                        payload: json!({ "n": n, "task": task_id }),
+                    };
+                    sink.emit(&event).await.expect("concurrent emit");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("join concurrent writer");
+        }
+
+        let raw = std::fs::read_to_string(&path).expect("read concurrent jsonl");
+        // Trailing newline yields an empty final split; keep non-empty lines only.
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            expected,
+            "expected {expected} complete lines, got {}; sample: {:?}",
+            lines.len(),
+            lines
+                .first()
+                .map(|s| s.chars().take(80).collect::<String>())
+        );
+
+        for (idx, line) in lines.iter().enumerate() {
+            let parsed: Value = serde_json::from_str(line).unwrap_or_else(|err| {
+                panic!("line {idx} is not complete JSON ({err}): {line:?}");
+            });
+            assert!(
+                parsed.get("at").and_then(|v| v.as_str()).is_some(),
+                "line {idx} missing at: {parsed}"
+            );
+            assert_eq!(
+                parsed["event"]["type"], "tool_lifecycle",
+                "line {idx} unexpected event type"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }
