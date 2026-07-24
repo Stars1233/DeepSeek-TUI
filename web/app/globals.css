@@ -1055,23 +1055,130 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   position: relative;
   overflow: hidden;
   border-bottom: 1px solid rgba(106, 174, 242, 0.2);
-  background: var(--ocean-deep);
+  /* Ombre ocean treatment — TUI shell grammar, shallow light → abyssal deep */
+  background:
+    radial-gradient(ellipse 90% 70% at 78% 18%, rgba(79, 209, 197, 0.12), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 12% 88%, rgba(49, 95, 216, 0.22), transparent 60%),
+    linear-gradient(
+      168deg,
+      #0a1a33 0%,
+      #071322 28%,
+      var(--ocean-mid) 58%,
+      var(--ocean-deep) 100%
+    );
   color: var(--stage-soft);
 }
 
 .product-current {
   position: absolute;
   inset: 0;
-  opacity: 0.25;
+  opacity: 0.28;
   pointer-events: none;
-  background-image: repeating-radial-gradient(
-    ellipse 78% 38% at 68% 108%,
-    transparent 0,
-    transparent 2.2rem,
-    rgba(106, 174, 242, 0.18) 2.26rem,
-    transparent 2.32rem
-  );
-  mask-image: linear-gradient(to bottom, transparent 20%, black);
+  background-image:
+    repeating-radial-gradient(
+      ellipse 78% 38% at 68% 108%,
+      transparent 0,
+      transparent 2.2rem,
+      rgba(106, 174, 242, 0.16) 2.26rem,
+      transparent 2.32rem
+    ),
+    linear-gradient(
+      180deg,
+      rgba(209, 235, 244, 0.06) 0%,
+      transparent 42%,
+      rgba(3, 7, 13, 0.35) 100%
+    );
+  mask-image: linear-gradient(to bottom, transparent 8%, black 40%, black 100%);
+}
+
+/* Ambient wedge-school + jellyfish — chrome-quiet motion, stops competing with copy */
+.product-life {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  opacity: 0.55;
+}
+
+.product-life-fish {
+  position: absolute;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4px 0 4px 14px;
+  border-color: transparent transparent transparent rgba(106, 174, 242, 0.55);
+  filter: drop-shadow(0 0 6px rgba(106, 174, 242, 0.35));
+  animation: product-fish-drift 22s linear infinite;
+}
+
+.product-life-fish::after {
+  content: "";
+  position: absolute;
+  left: -18px;
+  top: -3px;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 3px 8px 3px 0;
+  border-color: transparent rgba(106, 174, 242, 0.4) transparent transparent;
+}
+
+.product-life-fish-a { top: 22%; left: -5%; animation-duration: 26s; animation-delay: -4s; }
+.product-life-fish-b { top: 38%; left: -8%; animation-duration: 31s; animation-delay: -12s; opacity: 0.7; transform: scale(0.85); }
+.product-life-fish-c { top: 58%; left: -3%; animation-duration: 28s; animation-delay: -18s; opacity: 0.55; transform: scale(0.7); }
+
+.product-life-jelly {
+  position: absolute;
+  width: 18px;
+  height: 14px;
+  border-radius: 50% 50% 40% 40%;
+  background: radial-gradient(ellipse at 50% 30%, rgba(209, 235, 244, 0.35), rgba(106, 174, 242, 0.08));
+  box-shadow: 0 0 18px rgba(106, 174, 242, 0.2);
+  animation: product-jelly-float 16s ease-in-out infinite;
+}
+
+.product-life-jelly::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 90%;
+  width: 1px;
+  height: 22px;
+  background: linear-gradient(to bottom, rgba(209, 235, 244, 0.35), transparent);
+  transform: translateX(-50%);
+}
+
+.product-life-jelly-a { top: 18%; right: 18%; animation-delay: -2s; }
+.product-life-jelly-b { top: 48%; right: 8%; width: 12px; height: 10px; animation-duration: 20s; animation-delay: -9s; opacity: 0.65; }
+
+@keyframes product-fish-drift {
+  0% { transform: translate3d(0, 0, 0); opacity: 0; }
+  8% { opacity: 0.85; }
+  50% { transform: translate3d(55vw, -12px, 0); opacity: 0.7; }
+  92% { opacity: 0.5; }
+  100% { transform: translate3d(110vw, 8px, 0); opacity: 0; }
+}
+
+@keyframes product-jelly-float {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.45; }
+  50% { transform: translate3d(-10px, 18px, 0) scale(1.08); opacity: 0.75; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .product-life-fish,
+  .product-life-jelly {
+    animation: none;
+  }
+}
+
+.product-kicker {
+  margin: 0 0 0.85rem;
+  color: var(--ocean-current);
+  font-family: var(--font-mono), "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
 .product-hero-grid {

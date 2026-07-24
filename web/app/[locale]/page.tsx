@@ -65,31 +65,37 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
     <div className="product-home">
       <section className="product-hero">
         <div className="product-current" aria-hidden="true" />
+        <div className="product-life" aria-hidden="true">
+          <span className="product-life-fish product-life-fish-a" />
+          <span className="product-life-fish product-life-fish-b" />
+          <span className="product-life-fish product-life-fish-c" />
+          <span className="product-life-jelly product-life-jelly-a" />
+          <span className="product-life-jelly product-life-jelly-b" />
+        </div>
         <div className="product-container product-hero-grid">
           <div className="product-hero-copy">
+            <p className="product-kicker">
+              {isZh ? "数据与代码如海" : "An ocean of data and code"}
+            </p>
             <h1>
               {isZh ? (
                 <>
-                  一个运行时。
+                  潜入深海，
                   <br />
-                  支持的托管与本地模型。
-                  <br />
-                  <span>你的机器。</span>
+                  <span>你不必亲自下潜。</span>
                 </>
               ) : (
                 <>
-                  One runtime.
+                  Dive into the deep
                   <br />
-                  Supported hosted and local models.
-                  <br />
-                  <span>Your machine.</span>
+                  <span>so you don&apos;t have to.</span>
                 </>
               )}
             </h1>
             <p>
               {isZh
-                ? "Codewhale 是运行在终端里的编程智能体。它会读取代码、修改文件、运行命令、检查结果，并在任务完成或需要你介入时停下。"
-                : "A coding agent for your terminal. It reads your code, edits files, runs commands, checks its work, and stops when the job is done or it needs you."}
+                ? "Codewhale 把大模型的杠杆交给普通人：在你的终端里读取仓库、修改文件、运行检查、留下收据。不必已经是程序员，也能把东西做出来——运行在你自己的机器上。"
+                : "Codewhale gives ordinary people the leverage of LLMs to build things. In your terminal it reads the repo, edits files, runs checks, and leaves a receipt — without assuming you already speak code. It runs on your machine."}
             </p>
             <div className="product-actions">
               <Link href={`/${locale}/install`} className="product-button product-button-primary">
@@ -152,15 +158,15 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         <div className="product-container product-proof-grid">
           <h2>
             {isZh ? (
-              <>终端原生。模型与提供商中立。本地优先。</>
+              <>终端原生的水下壳。模型与提供商中立。本地优先。</>
             ) : (
-              <>Terminal-native. Model and provider neutral. Local-first.</>
+              <>An underwater terminal shell. Model-neutral. Local-first.</>
             )}
           </h2>
           <p>
             {isZh
-              ? "连接你已有的托管、网关或本地模型。Codewhale 在你的机器上运行，并把模型当作可选择的组件，而不是产品本身。"
-              : "Bring the hosted, gateway, or local model you already use. Codewhale runs on your machine and treats the model as a selectable component—not the product."}
+              ? "连接你已有的托管、网关或本地模型。Codewhale 在你的机器上运行；模型是可选择的组件，不是产品本身。Plan / Act / Operate 与明确的审批边界，让深潜也保持可控。"
+              : "Bring the hosted, gateway, or local model you already use. Codewhale runs on your machine and treats the model as a selectable component—not the product. Plan / Act / Operate and explicit permission postures keep the deep dive under your control."}
           </p>
         </div>
       </section>
