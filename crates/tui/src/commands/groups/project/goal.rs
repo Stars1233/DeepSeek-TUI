@@ -566,8 +566,7 @@ mod tests {
         // into a trophy path error (and so we never touch the real home).
         let _lock = crate::test_support::lock_test_env();
         let temp = tempfile::tempdir().expect("isolated CODEWHALE_HOME");
-        let _codewhale_home =
-            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+        let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
 
         let mut app = create_test_app();
         let _ = hunt(&mut app, Some("Freeze the timer on close"));

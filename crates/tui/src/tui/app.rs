@@ -5394,7 +5394,11 @@ impl App {
             || has("aborted")
             || has("critical")
         {
-            return (StatusToastLevel::Error, Some(Self::STICKY_ERROR_TTL_MS), true);
+            return (
+                StatusToastLevel::Error,
+                Some(Self::STICKY_ERROR_TTL_MS),
+                true,
+            );
         }
         // A success keyword under a negation ("not saved", "no longer
         // found", "could not enable") is a failure the coarse keyword match

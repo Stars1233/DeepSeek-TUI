@@ -1302,11 +1302,8 @@ impl WorkflowPanel {
         let (done, total) = self.done_total();
         let (failed, cancelled) = self.failure_cancel_counts();
         let phases = self.phase_count();
-        let budget = format_budget_chrome(
-            self.budget_spent,
-            self.budget_remaining,
-            self.budget_total,
-        );
+        let budget =
+            format_budget_chrome(self.budget_spent, self.budget_remaining, self.budget_total);
         let cancel_hint = if self.lifecycle.is_running() {
             " · [c] cancel"
         } else {
@@ -1562,7 +1559,6 @@ fn opt_str(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-
 /// Honest workflow budget chrome: "used / budget" (or "X left of Y").
 /// Never renders confusing "spent/0 left" when remaining is zeroed while
 /// spent is large — that read as an inverted kill-budget signal.
@@ -1572,9 +1568,7 @@ pub(crate) fn format_budget_chrome(
     remaining: Option<u64>,
     total: Option<u64>,
 ) -> String {
-    let total = total.or_else(|| {
-        remaining.map(|left| spent.saturating_add(left))
-    });
+    let total = total.or_else(|| remaining.map(|left| spent.saturating_add(left)));
     match (spent, remaining, total) {
         (spent, _, Some(total)) if total > 0 => {
             let left = remaining.unwrap_or_else(|| total.saturating_sub(spent));

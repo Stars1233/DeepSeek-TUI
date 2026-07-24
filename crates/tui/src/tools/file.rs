@@ -972,7 +972,6 @@ impl ToolSpec for EditFileTool {
     }
 }
 
-
 /// Detect catastrophic argument corruption of brace-structured edits.
 ///
 /// Models (and some host XML/JSON bridges) occasionally deliver a `replace`
@@ -2243,8 +2242,14 @@ mod tests {
             .expect("brace-heavy replace must apply");
         let updated = fs::read_to_string(&path).expect("read");
         assert!(updated.contains("stay active"), "{updated}");
-        assert!(updated.contains("SendMessageOutcome::Finished"), "{updated}");
-        assert!(!updated.contains("pause_goal_after_interruption"), "{updated}");
+        assert!(
+            updated.contains("SendMessageOutcome::Finished"),
+            "{updated}"
+        );
+        assert!(
+            !updated.contains("pause_goal_after_interruption"),
+            "{updated}"
+        );
     }
 
     #[tokio::test]

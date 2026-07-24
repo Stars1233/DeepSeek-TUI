@@ -967,8 +967,7 @@ fn unix_pid_exists(pid: libc::pid_t) -> bool {
 
 #[cfg(unix)]
 fn is_permission_denied(err: &std::io::Error) -> bool {
-    err.kind() == std::io::ErrorKind::PermissionDenied
-        || err.raw_os_error() == Some(libc::EPERM)
+    err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(unix)]
@@ -1075,7 +1074,8 @@ fn unix_process_ids_uncached() -> FleetHostResult<Vec<libc::pid_t>> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let denied = stderr.contains("Operation not permitted")
             || stderr.contains("Permission denied")
-            || output.status.code() == Some(1) && stderr.to_ascii_lowercase().contains("not permitted");
+            || output.status.code() == Some(1)
+                && stderr.to_ascii_lowercase().contains("not permitted");
         if denied {
             return Err(FleetHostError::retryable(format!(
                 "listing Fleet session with ps: process-table inspection unavailable: {stderr}"
@@ -1354,9 +1354,7 @@ mod tests {
         if process_table_inspection_available() {
             return false;
         }
-        eprintln!(
-            "skipping: process-table inspection unavailable (ps/proc denied or missing)"
-        );
+        eprintln!("skipping: process-table inspection unavailable (ps/proc denied or missing)");
         true
     }
 

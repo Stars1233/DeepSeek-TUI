@@ -5839,7 +5839,10 @@ async fn immediate_submit_closed_mailbox_restores_composer_and_skill() {
         .as_ref()
         .expect("dispatch failure should stay visible");
     assert_eq!(sticky.level, StatusToastLevel::Error);
-    assert_eq!(sticky.ttl_ms, Some(crate::tui::app::App::STICKY_ERROR_TTL_MS));
+    assert_eq!(
+        sticky.ttl_ms,
+        Some(crate::tui::app::App::STICKY_ERROR_TTL_MS)
+    );
 }
 
 #[tokio::test]

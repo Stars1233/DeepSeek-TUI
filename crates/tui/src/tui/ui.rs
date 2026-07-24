@@ -11948,7 +11948,11 @@ fn restore_failed_immediate_submit(app: &mut App, message: QueuedMessage, error:
     let status = tr(app.ui_locale, MessageId::ComposerDispatchFailedRestored)
         .replace("{error}", &error.to_string());
     app.status_message = Some(status.clone());
-    app.set_sticky_status(status, StatusToastLevel::Error, Some(App::STICKY_ERROR_TTL_MS));
+    app.set_sticky_status(
+        status,
+        StatusToastLevel::Error,
+        Some(App::STICKY_ERROR_TTL_MS),
+    );
     app.needs_redraw = true;
 }
 
