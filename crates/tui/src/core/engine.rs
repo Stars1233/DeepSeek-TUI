@@ -2887,7 +2887,20 @@ impl Engine {
             SendMessageOutcome::Finished {
                 status: TurnOutcomeStatus::Interrupted,
                 ..
-            } => self.pause_goal_after_interruption().await,
+            } => {
+                // Goals are durable session objectives. An interrupted model
+                // turn (Esc, steer, compaction, cancel) must cancel only the
+                // auto-continuation timer — already done above — and leave the
+                // goal Active. pause_reason=User is reserved for explicit
+                // `/goal pause`. Requiring `/goal resume` after every interrupt
+                // was a dogfood lie (2026-07-24).
+                let _ = self
+                    .tx_event
+                    .send(Event::status(
+                        "Turn interrupted; session goal stays active.".to_string(),
+                    ))
+                    .await;
+            }
             SendMessageOutcome::Finished {
                 status: TurnOutcomeStatus::Completed,
                 ..
@@ -2956,18 +2969,6 @@ impl Engine {
         self.emit_session_updated().await;
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
         let _ = self.tx_event.send(Event::status(message)).await;
-    }
-
-    /// A user cancellation is neither success nor a provider failure. Pause a
-    /// still-active goal so the sidebar and stable prompt do not claim that an
-    /// autonomous run remains live, and require an explicit `/goal resume`.
-    async fn pause_goal_after_interruption(&mut self) {
-        self.pause_goal_continuation(
-            GoalPauseReason::User,
-            "Goal paused because its model turn was interrupted; use /goal resume to continue."
-                .to_string(),
-        )
-        .await;
     }
 
     /// Pause a still-active goal with an inspectable reason and publish every

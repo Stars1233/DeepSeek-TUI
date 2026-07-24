@@ -1236,8 +1236,8 @@ async fn initial_goal_failure_projects_blocked_state() {
 }
 
 #[tokio::test]
-async fn initial_goal_interruption_projects_paused_state() {
-    let objective = "pause the initial interrupted goal turn";
+async fn initial_goal_interruption_keeps_goal_active() {
+    let objective = "keep goal active after interrupted turn";
     let request_entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release_request = std::sync::Arc::new(tokio::sync::Notify::new());
     let model = std::sync::Arc::new(FirstRequestGatedGoalModelClient {
@@ -1281,10 +1281,13 @@ async fn initial_goal_interruption_projects_paused_state() {
     assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     let goal = goal_state.lock().expect("goal lock").snapshot();
     assert_eq!(goal.objective.as_deref(), Some(objective));
-    assert_eq!(goal.status, "paused");
+    assert_eq!(goal.status, "active");
     assert_eq!(goal.blocker, None);
-    let prompt = system_prompt_text(session.system_prompt.expect("paused system prompt"));
-    assert!(!prompt.contains("<session_goal>"), "{prompt}");
+    assert_eq!(goal.pause_reason, None);
+    let prompt = system_prompt_text(session.system_prompt.expect("active system prompt"));
+    // Durable goals stay in the prompt after interrupt so the next turn continues.
+    assert!(prompt.contains("<session_goal>"), "{prompt}");
+    assert!(prompt.contains(objective), "{prompt}");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
