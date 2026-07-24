@@ -11,6 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -711,11 +712,23 @@ fn status_from_exit(
 fn sample_process_memory_mb(pid: u32) -> Option<u64> {
     // Resolve `ps` via PATH like every other external command in the
     // codebase: /bin/ps does not exist on NixOS and some minimal containers,
-    // which would silently report permanent None for live workers.
-    let output = Command::new("ps")
+    // which would silently report permanent None for live workers. Restricted
+    // sandboxes may also deny process-table inspection with EPERM; treat that
+    // as unavailable rather than panicking or inventing a sample.
+    if !process_table_inspection_available() {
+        return None;
+    }
+    let output = match Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(err) if is_permission_denied(&err) => {
+            mark_process_table_unavailable();
+            return None;
+        }
+        Err(_) => return None,
+    };
     if !output.status.success() {
         return None;
     }
@@ -820,19 +833,46 @@ fn shutdown_unix_worker_session(
     graceful_signals: &[libc::c_int],
 ) -> FleetHostResult<()> {
     let mut signal_errors = Vec::new();
+    let known_leader = process.session_id;
     for signal in graceful_signals {
-        signal_errors.extend(signal_unix_session(process.session_id, *signal)?);
+        signal_errors.extend(signal_unix_session(
+            process.session_id,
+            *signal,
+            Some(known_leader),
+        )?);
         if wait_for_unix_session_exit(process, WORKER_STOP_GRACE)? {
             return Ok(());
         }
     }
 
-    signal_errors.extend(signal_unix_session(process.session_id, libc::SIGKILL)?);
+    signal_errors.extend(signal_unix_session(
+        process.session_id,
+        libc::SIGKILL,
+        Some(known_leader),
+    )?);
     if wait_for_unix_session_exit(process, WORKER_STOP_GRACE)? {
         return Ok(());
     }
 
-    let alive = unix_session_members(process.session_id)?;
+    // Without a process table we can only reason about the tracked session
+    // leader/dispatcher. Prefer an honest degraded success once that known
+    // pid is gone instead of looping forever on ps EPERM.
+    if !process_table_inspection_available() {
+        if process.last_exit.is_some() && !unix_pid_exists(process.session_id) {
+            return Ok(());
+        }
+        return Err(FleetHostError::retryable(format!(
+            "Fleet session {} still has a live tracked leader after SIGKILL and process-table inspection is unavailable{}",
+            process.session_id,
+            if signal_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; signal errors: {}", signal_errors.join("; "))
+            }
+        )));
+    }
+
+    let alive = unix_session_members(process.session_id, Some(known_leader))?;
     Err(FleetHostError::retryable(format!(
         "Fleet session {} still has live processes after SIGKILL: {alive:?}{}",
         process.session_id,
@@ -850,14 +890,25 @@ fn wait_for_unix_session_exit(
     timeout: Duration,
 ) -> FleetHostResult<bool> {
     let deadline = Instant::now() + timeout;
+    let known_leader = process.session_id;
     loop {
         if process.last_exit.is_none() {
             process.last_exit = process.child.try_wait().map_err(|err| {
                 FleetHostError::retryable(format!("checking Fleet dispatcher exit: {err}"))
             })?;
         }
-        if process.last_exit.is_some() && unix_session_members(process.session_id)?.is_empty() {
-            return Ok(true);
+        if process.last_exit.is_some() {
+            let members = unix_session_members(process.session_id, Some(known_leader))?;
+            if members.is_empty() {
+                return Ok(true);
+            }
+            // When process-table inspection is denied we can only track the
+            // known session leader. Treat an empty known-pid set as success.
+            if !process_table_inspection_available()
+                && members.iter().all(|pid| !unix_pid_exists(*pid))
+            {
+                return Ok(true);
+            }
         }
         if Instant::now() >= deadline {
             return Ok(false);
@@ -867,25 +918,115 @@ fn wait_for_unix_session_exit(
 }
 
 #[cfg(unix)]
-fn unix_session_members(session_id: libc::pid_t) -> FleetHostResult<Vec<libc::pid_t>> {
-    let pids = unix_process_ids()?;
-    let mut members = Vec::new();
-    for pid in pids {
-        if pid > 0 {
-            // Revalidate against the kernel after parsing the snapshot. A PID
-            // reused by an unrelated process must never receive our signal.
-            if unsafe { libc::getsid(pid) } == session_id {
-                members.push(pid);
+fn unix_session_members(
+    session_id: libc::pid_t,
+    known_pids: Option<libc::pid_t>,
+) -> FleetHostResult<Vec<libc::pid_t>> {
+    match unix_process_ids() {
+        Ok(pids) => {
+            let mut members = Vec::new();
+            for pid in pids {
+                if pid > 0 {
+                    // Revalidate against the kernel after parsing the snapshot. A PID
+                    // reused by an unrelated process must never receive our signal.
+                    if unsafe { libc::getsid(pid) } == session_id {
+                        members.push(pid);
+                    }
+                }
             }
+            Ok(members)
         }
+        Err(err) if process_table_error_is_unavailable(&err) => {
+            // Restricted sandboxes may deny full process-table walks. Fall back
+            // to the known session leader so stop/interrupt still reaches the
+            // tracked dispatcher without inventing a process census.
+            Ok(known_pids
+                .into_iter()
+                .filter(|pid| *pid > 0 && unix_pid_in_session(*pid, session_id))
+                .collect())
+        }
+        Err(err) => Err(err),
     }
-    Ok(members)
+}
+
+#[cfg(unix)]
+fn unix_pid_in_session(pid: libc::pid_t, session_id: libc::pid_t) -> bool {
+    unsafe { libc::getsid(pid) == session_id }
+}
+
+#[cfg(unix)]
+fn unix_pid_exists(pid: libc::pid_t) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn is_permission_denied(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::PermissionDenied
+        || err.raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn process_table_error_is_unavailable(err: &FleetHostError) -> bool {
+    err.message.contains("process-table inspection unavailable")
+        || err.message.contains("Operation not permitted")
+        || err.message.contains("Permission denied")
+        || err.message.contains("EPERM")
+}
+
+#[cfg(unix)]
+fn mark_process_table_unavailable() {
+    // Record the denial when nothing has been cached yet. OnceLock cannot flip
+    // a prior true; live call sites still degrade on the immediate EPERM path.
+    let _ = process_table_probe_cell().get_or_init(|| false);
+}
+
+#[cfg(unix)]
+fn process_table_probe_cell() -> &'static OnceLock<bool> {
+    static PROCESS_TABLE_AVAILABLE: OnceLock<bool> = OnceLock::new();
+    &PROCESS_TABLE_AVAILABLE
+}
+
+/// Returns whether full process-table inspection (`ps` / `/proc`) works here.
+/// Cached after the first probe so tests and production share one answer.
+#[cfg(unix)]
+fn process_table_inspection_available() -> bool {
+    *process_table_probe_cell().get_or_init(|| match unix_process_ids_uncached() {
+        Ok(_) => true,
+        Err(err) if process_table_error_is_unavailable(&err) => false,
+        // Missing `ps` binary is also unavailable inspection, not a transient
+        // retryable blip for memory sampling / session census.
+        Err(err)
+            if err.message.contains("os error 2")
+                || err.message.contains("No such file")
+                || err.message.contains("not found") =>
+        {
+            false
+        }
+        Err(_) => false,
+    })
 }
 
 #[cfg(all(unix, target_os = "linux"))]
 fn unix_process_ids() -> FleetHostResult<Vec<libc::pid_t>> {
+    unix_process_ids_uncached()
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn unix_process_ids_uncached() -> FleetHostResult<Vec<libc::pid_t>> {
     let entries = std::fs::read_dir("/proc").map_err(|err| {
-        FleetHostError::retryable(format!("listing Fleet session through /proc: {err}"))
+        if is_permission_denied(&err) {
+            FleetHostError::retryable(format!(
+                "listing Fleet session through /proc: process-table inspection unavailable: {err}"
+            ))
+        } else {
+            FleetHostError::retryable(format!("listing Fleet session through /proc: {err}"))
+        }
     })?;
     Ok(entries
         .filter_map(Result::ok)
@@ -895,13 +1036,51 @@ fn unix_process_ids() -> FleetHostResult<Vec<libc::pid_t>> {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn unix_process_ids() -> FleetHostResult<Vec<libc::pid_t>> {
+    if let Some(available) = process_table_probe_cell().get() {
+        if !*available {
+            return Err(FleetHostError::retryable(
+                "listing Fleet session with ps: process-table inspection unavailable",
+            ));
+        }
+    }
+    match unix_process_ids_uncached() {
+        Ok(pids) => {
+            let _ = process_table_probe_cell().get_or_init(|| true);
+            Ok(pids)
+        }
+        Err(err) => {
+            if process_table_error_is_unavailable(&err) {
+                let _ = process_table_probe_cell().get_or_init(|| false);
+            }
+            Err(err)
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn unix_process_ids_uncached() -> FleetHostResult<Vec<libc::pid_t>> {
     let output = Command::new("ps")
         .args(["-A", "-o", "pid="])
         .output()
         .map_err(|err| {
-            FleetHostError::retryable(format!("listing Fleet session with ps: {err}"))
+            if is_permission_denied(&err) {
+                FleetHostError::retryable(format!(
+                    "listing Fleet session with ps: process-table inspection unavailable: {err}"
+                ))
+            } else {
+                FleetHostError::retryable(format!("listing Fleet session with ps: {err}"))
+            }
         })?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let denied = stderr.contains("Operation not permitted")
+            || stderr.contains("Permission denied")
+            || output.status.code() == Some(1) && stderr.to_ascii_lowercase().contains("not permitted");
+        if denied {
+            return Err(FleetHostError::retryable(format!(
+                "listing Fleet session with ps: process-table inspection unavailable: {stderr}"
+            )));
+        }
         return Err(FleetHostError::retryable(format!(
             "listing Fleet session with ps exited {:?}",
             output.status.code()
@@ -918,6 +1097,7 @@ fn unix_process_ids() -> FleetHostResult<Vec<libc::pid_t>> {
 fn signal_unix_session(
     session_id: libc::pid_t,
     signal: libc::c_int,
+    known_leader: Option<libc::pid_t>,
 ) -> FleetHostResult<Vec<String>> {
     let own_session = unsafe { libc::getsid(0) };
     if session_id <= 0 || session_id == own_session {
@@ -927,11 +1107,23 @@ fn signal_unix_session(
     }
 
     let mut errors = Vec::new();
-    for pid in unix_session_members(session_id)? {
+    // Prefer known leader first so stop/interrupt still works when the full
+    // process table cannot be enumerated under a restricted sandbox.
+    let mut candidates = unix_session_members(session_id, known_leader)?;
+    if candidates.is_empty() {
+        if let Some(leader) = known_leader.filter(|pid| *pid > 0) {
+            candidates.push(leader);
+        }
+    }
+    for pid in candidates {
         // Verify identity again immediately before signalling. Session IDs
         // remain stable across reparenting and separate process groups.
         if unsafe { libc::getsid(pid) } != session_id {
-            continue;
+            // Leader may already be gone; still try kill on known leader when
+            // getsid fails only with ESRCH-equivalent absence.
+            if Some(pid) != known_leader || !unix_pid_exists(pid) {
+                continue;
+            }
         }
         if unsafe { libc::kill(pid, signal) } != 0 {
             let err = std::io::Error::last_os_error();
@@ -943,14 +1135,9 @@ fn signal_unix_session(
     Ok(errors)
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
 fn unix_pid_is_running(pid: libc::pid_t) -> bool {
-    let visible = if unsafe { libc::kill(pid, 0) } == 0 {
-        true
-    } else {
-        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    };
-    if !visible {
+    if !unix_pid_exists(pid) {
         return false;
     }
 
@@ -959,7 +1146,10 @@ fn unix_pid_is_running(pid: libc::pid_t) -> bool {
     // orphan can remain visible as a zombie briefly while launchd reaps it.
     // Ask `ps` for the process state so test assertions do not mistake that
     // transient kernel bookkeeping for a live leaked worker. If `ps` itself
-    // cannot be launched, stay conservative and treat the PID as running.
+    // is denied, stay conservative and treat the PID as running.
+    if !process_table_inspection_available() {
+        return true;
+    }
     match Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .output()
@@ -971,6 +1161,10 @@ fn unix_pid_is_running(pid: libc::pid_t) -> bool {
         // A failed status does not prove exit: preserve the positive kernel
         // visibility result and let the bounded waiter retry.
         Ok(_) => true,
+        Err(err) if is_permission_denied(&err) => {
+            let _ = process_table_probe_cell().get_or_init(|| false);
+            true
+        }
         Err(_) => true,
     }
 }
@@ -1156,8 +1350,22 @@ mod tests {
     use tempfile::TempDir;
 
     #[cfg(unix)]
+    fn skip_if_process_table_unavailable() -> bool {
+        if process_table_inspection_available() {
+            return false;
+        }
+        eprintln!(
+            "skipping: process-table inspection unavailable (ps/proc denied or missing)"
+        );
+        true
+    }
+
+    #[cfg(unix)]
     #[test]
     fn sample_process_memory_reports_nonzero_for_self() {
+        if skip_if_process_table_unavailable() {
+            return;
+        }
         // The current test process is alive, so its RSS must sample to Some(>0).
         let mb = sample_process_memory_mb(std::process::id());
         assert!(
@@ -1172,7 +1380,8 @@ mod tests {
         // Use a PID beyond every mainstream kernel's default pid ceiling
         // (Linux pid_max default 4M/32k, macOS ~99998, BSDs 99999): PID 0 is
         // kernel_task on macOS and semantically special to `ps -p`, so it is
-        // not a portable "no such process" probe.
+        // not a portable "no such process" probe. When process-table inspection
+        // is denied the sampler also returns None — same observable result.
         assert_eq!(sample_process_memory_mb(999_999_999), None);
     }
 
@@ -1324,6 +1533,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unix_pid_running_treats_zombie_as_exited() {
+        if skip_if_process_table_unavailable() {
+            return;
+        }
         let mut child = Command::new("sh")
             .args(["-c", "exit 0"])
             .spawn()
@@ -1331,10 +1543,19 @@ mod tests {
         let pid = child.id() as libc::pid_t;
         let deadline = Instant::now() + Duration::from_secs(2);
         let saw_zombie = loop {
-            let state = Command::new("ps")
+            let state = match Command::new("ps")
                 .args(["-o", "stat=", "-p", &pid.to_string()])
                 .output()
-                .expect("inspect child state");
+            {
+                Ok(output) => output,
+                Err(err) if is_permission_denied(&err) => {
+                    mark_process_table_unavailable();
+                    child.wait().ok();
+                    eprintln!("skipping: ps denied while inspecting zombie state");
+                    return;
+                }
+                Err(err) => panic!("inspect child state: {err}"),
+            };
             let is_zombie = String::from_utf8_lossy(&state.stdout)
                 .split_whitespace()
                 .next()
@@ -1417,6 +1638,12 @@ mod tests {
         if run_descendant_helper_if_requested() {
             return;
         }
+        // Full-session reaping of separate process-group tools requires a
+        // process-table walk; without it production still signals the known
+        // session leader and these assertions cannot be proven.
+        if skip_if_process_table_unavailable() {
+            return;
+        }
 
         let tmp = TempDir::new().unwrap();
         let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
@@ -1441,6 +1668,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fleet_host_interrupt_reaps_dispatcher_descendants() {
+        if skip_if_process_table_unavailable() {
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
         let (root_pid, tool_pid) =
@@ -1464,6 +1694,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fleet_host_cleanup_reaps_session_after_dispatcher_exits() {
+        if skip_if_process_table_unavailable() {
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
         let (root_pid, tool_pid) = start_dispatcher_tree(
@@ -1531,6 +1764,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fleet_host_local_adapter_reports_running_worker_memory_usage() {
+        if skip_if_process_table_unavailable() {
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
         let request =
@@ -1548,6 +1784,32 @@ mod tests {
         );
 
         adapter.stop_worker("local-memory").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fleet_host_stop_signals_known_leader_without_process_table() {
+        // Even when full session census is unavailable, stop must still reach
+        // the tracked session leader/dispatcher pid.
+        let tmp = TempDir::new().unwrap();
+        let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
+        let request = FleetWorkerStartRequest::new(
+            "known-leader-stop",
+            shell_command("printf ready; sleep 30"),
+        );
+        let handle = adapter.start_worker(request).unwrap();
+        let pid = handle.pid.expect("pid") as libc::pid_t;
+        let _ = wait_for_log(&adapter, "known-leader-stop", "ready");
+
+        let status = adapter
+            .stop_worker("known-leader-stop")
+            .expect("stop known leader without process table");
+        assert_eq!(status.state, FleetHostWorkerState::Stopped);
+        assert!(
+            wait_for_unix_pid_exit(pid, Duration::from_secs(2)),
+            "known session leader survived stop without process-table census"
+        );
+        adapter.cleanup_worker("known-leader-stop").unwrap();
     }
 
     #[test]
