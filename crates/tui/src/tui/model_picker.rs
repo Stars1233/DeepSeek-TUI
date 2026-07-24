@@ -1564,6 +1564,18 @@ fn render_picker_model_hint(
 
     let mut parts = Vec::new();
 
+    // `k3` and `kimi-k3` are the same underlying model on two different
+    // products, so bare ids read as a confusing duplicate. Name the route:
+    // bare `k3` is the Kimi Code membership route (validated pairing with
+    // the coding endpoint, #4687), `kimi-k3` is the direct open platform.
+    if provider == Some(ApiProvider::Moonshot) {
+        match id.trim().to_ascii_lowercase().as_str() {
+            "k3" => parts.push("Kimi Code plan route".to_string()),
+            "kimi-k3" | "moonshotai/kimi-k3" => parts.push("Moonshot direct route".to_string()),
+            _ => {}
+        }
+    }
+
     if let Some(context_window) = metadata.context_window {
         // The ChatGPT/Codex OAuth roster reports account-scoped windows (e.g.
         // 272K for gpt-5.x) that differ from the API route's limits by
@@ -1572,6 +1584,18 @@ fn render_picker_model_hint(
         if provider == Some(ApiProvider::OpenaiCodex) {
             parts.push(format!(
                 "{} ctx · ChatGPT route",
+                format_picker_context_window(context_window)
+            ));
+        } else if provider == Some(ApiProvider::Moonshot)
+            && id.trim().eq_ignore_ascii_case("k3")
+            && context_window == crate::models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS
+        {
+            // The membership route's real window is plan-tier dependent
+            // (256K on lower tiers, up to 1M on higher ones); this default
+            // is the safe floor, raisable via the provider's
+            // `context_window` setting when the plan includes 1M.
+            parts.push(format!(
+                "{} ctx (plan floor; raise via context_window)",
                 format_picker_context_window(context_window)
             ));
         } else {
@@ -2203,6 +2227,66 @@ mod tests {
             "{network}"
         );
         assert!(!network.contains("test-router-key"), "{network}");
+    }
+
+    #[test]
+    fn kimi_k3_rows_name_their_routes_and_plan_floor() {
+        let config = Config::default();
+
+        // Bare `k3` (Kimi Code membership): route-labeled, and the default
+        // 262K window is called out as the plan-tier floor with the raise
+        // path, so two K3 rows never read as an unexplained duplicate.
+        let membership = effective_picker_metadata(&config, Some(ApiProvider::Moonshot), "k3");
+        assert_eq!(
+            membership.context_window,
+            Some(crate::models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS)
+        );
+        let membership_hint =
+            render_picker_model_hint("k3", Some(ApiProvider::Moonshot), &membership, None);
+        assert!(
+            membership_hint.contains("Kimi Code plan route"),
+            "{membership_hint}"
+        );
+        assert!(
+            membership_hint.contains("262K ctx (plan floor; raise via context_window)"),
+            "{membership_hint}"
+        );
+
+        // `kimi-k3` (direct open platform): route-labeled with its 1M window.
+        let direct = effective_picker_metadata(&config, Some(ApiProvider::Moonshot), "kimi-k3");
+        assert_eq!(
+            direct.context_window,
+            Some(crate::models::KIMI_K3_CONTEXT_WINDOW_TOKENS)
+        );
+        let direct_hint =
+            render_picker_model_hint("kimi-k3", Some(ApiProvider::Moonshot), &direct, None);
+        assert!(
+            direct_hint.contains("Moonshot direct route"),
+            "{direct_hint}"
+        );
+        assert!(direct_hint.contains("1.05M ctx"), "{direct_hint}");
+        assert!(
+            !direct_hint.contains("plan floor"),
+            "the direct route window is not plan-dependent: {direct_hint}"
+        );
+
+        // An explicit plan-tier override drops the floor annotation.
+        let mut override_config = Config::default();
+        override_config
+            .providers
+            .get_or_insert_with(Default::default)
+            .moonshot
+            .context_window = Some(1_048_576);
+        let upgraded =
+            effective_picker_metadata(&override_config, Some(ApiProvider::Moonshot), "k3");
+        assert_eq!(upgraded.context_window, Some(1_048_576));
+        let upgraded_hint =
+            render_picker_model_hint("k3", Some(ApiProvider::Moonshot), &upgraded, None);
+        assert!(upgraded_hint.contains("1.05M ctx"), "{upgraded_hint}");
+        assert!(
+            !upgraded_hint.contains("plan floor"),
+            "configured entitlement must not still read as the floor: {upgraded_hint}"
+        );
     }
 
     #[test]

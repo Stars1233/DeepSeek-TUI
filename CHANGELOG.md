@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Disambiguate the two Kimi K3 model-picker rows, which read as an
+  unexplained duplicate: bare `k3` is now labeled "Kimi Code plan route"
+  with its default 262K window annotated as the plan-tier floor (raisable
+  via the provider `context_window` setting for plans that include 1M),
+  and `kimi-k3` is labeled "Moonshot direct route" with its 1M window.
+  Both remain distinct, valid routes for the same underlying model.
 - Close the model-facing `agent` tool role schema: the `type` property now
   publishes the canonical JSON Schema enum `["worker", "scout", "planner",
   "reviewer", "builder", "verifier", "custom"]` instead of describing the
