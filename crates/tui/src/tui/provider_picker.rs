@@ -3944,40 +3944,31 @@ impl ProviderPickerView {
                 ActionHint::new("Esc", self.tr(MessageId::PickerActionCancel)),
             ],
         );
+        // Each row carries its kind label and the detail pane below explains
+        // the selected row, so the list needs no introductory paragraph.
         let templates = provider_setup_templates();
-        let intro_height = if content.height >= 12 { 2 } else { 0 };
-        let remaining = content.height.saturating_sub(intro_height);
-        let detail_reserve = if remaining >= 6 {
+        let detail_reserve = if content.height >= 6 {
             3
-        } else if remaining >= 4 {
+        } else if content.height >= 4 {
             2
-        } else if remaining >= 3 {
+        } else if content.height >= 3 {
             1
         } else {
             0
         };
-        let list_budget = remaining.saturating_sub(detail_reserve).max(1);
+        let list_budget = content.height.saturating_sub(detail_reserve).max(1);
         let visible_count = templates
             .len()
             .min(usize::from(list_budget))
-            .max(usize::from(remaining > 0));
+            .max(usize::from(content.height > 0));
         let list_height = u16::try_from(visible_count).unwrap_or(u16::MAX).max(1);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(intro_height),
                 Constraint::Length(list_height),
                 Constraint::Min(detail_reserve),
             ])
             .split(content);
-        if intro_height > 0 {
-            Paragraph::new(Line::from(Span::styled(
-                self.tr(MessageId::ProviderTemplatesIntro),
-                Style::default().fg(palette::TEXT_MUTED),
-            )))
-            .wrap(Wrap { trim: true })
-            .render(chunks[0], buf);
-        }
         let selected = self
             .template_selected_idx
             .min(templates.len().saturating_sub(1));
@@ -3985,7 +3976,7 @@ impl ProviderPickerView {
         let start = selected
             .saturating_sub(visible_count.saturating_sub(1))
             .min(max_start);
-        let list_area = chunks[1];
+        let list_area = chunks[0];
         for (offset, (idx, template)) in templates
             .iter()
             .enumerate()
@@ -4070,7 +4061,7 @@ impl ProviderPickerView {
         }
         Paragraph::new(detail)
             .wrap(Wrap { trim: true })
-            .render(chunks[2], buf);
+            .render(chunks[1], buf);
     }
 
     fn render_custom_form_field(
