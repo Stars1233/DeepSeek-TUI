@@ -1226,10 +1226,12 @@ impl Engine {
             let mut control = controls.fresh();
             if !provenance.can_authorize_work() {
                 // Idle handoffs are continuations of the existing user
-                // request. Chain cancellation while holding the same
+                // request. Retain cancellation while holding the same
                 // activation lock used by cancel_with_reason, so a cancel
                 // during an earlier status send cannot be reset here.
-                control.cancel = self.cancel_token.child_token();
+                // Reuse the scope itself so cancelling the handoff also
+                // stops siblings launched before the ordinary parent reply.
+                control.cancel = self.cancel_token.clone();
                 control.reason = Arc::clone(&self.cancel_reason);
             }
             control

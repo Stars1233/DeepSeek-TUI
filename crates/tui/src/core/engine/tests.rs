@@ -4245,6 +4245,15 @@ async fn cancellation_during_blocked_idle_handoff_survives_turn_admission() {
         // A new explicit user action still receives a fresh turn control.
         let _turn = engine.begin_turn_control();
         assert!(!handle.is_cancelled());
+        let existing_child = engine.cancel_token.child_token();
+        drop(_turn);
+        let _automatic =
+            engine.begin_turn_control_for_provenance(UserInputProvenance::SubAgentHandoff);
+        handle.cancel();
+        assert!(
+            existing_child.is_cancelled(),
+            "stopping an automatic continuation must also stop earlier request siblings"
+        );
     }
 }
 
