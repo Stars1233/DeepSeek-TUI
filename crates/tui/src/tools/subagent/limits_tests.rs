@@ -97,15 +97,19 @@ fn old_relative_profile_depth_does_not_gain_authority_on_recovery() {
 fn operator_and_inherited_budgets_only_narrow_including_zero_sentinels() {
     assert_eq!(resolve_max_steps(FleetRole::Worker, Some(99), Some(7)), 7);
     assert_eq!(resolve_max_steps(FleetRole::Worker, Some(0), Some(7)), 7);
-    let mut parent = WorkerRuntimeProfile::default();
-    parent.max_steps = 8;
-    parent.token_budget = Some(100);
-    parent.wall_time_secs = Some(40);
-    parent.wall_deadline_ms = Some(123_000);
-    let mut requested = WorkerRuntimeProfile::default();
-    requested.token_budget = Some(1_000);
-    requested.wall_time_secs = Some(4_000);
-    requested.wall_deadline_ms = Some(456_000);
+    let parent = WorkerRuntimeProfile {
+        max_steps: 8,
+        token_budget: Some(100),
+        wall_time_secs: Some(40),
+        wall_deadline_ms: Some(123_000),
+        ..WorkerRuntimeProfile::default()
+    };
+    let requested = WorkerRuntimeProfile {
+        token_budget: Some(1_000),
+        wall_time_secs: Some(4_000),
+        wall_deadline_ms: Some(456_000),
+        ..WorkerRuntimeProfile::default()
+    };
     let child = parent.derive_child(&requested);
     assert_eq!(child.max_steps, 8);
     assert_eq!(child.token_budget, Some(100));
