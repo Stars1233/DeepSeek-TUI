@@ -486,6 +486,13 @@ reconnect.
 
 ### Added
 
+- `POST /v1/threads/{id}/file-revert` restores exactly one file from the
+  exact `tool:`/`pre-turn:` snapshot the client selected, checking the
+  reviewed file hash before and after the mandatory safety snapshot. Literal
+  file names, regular files only, thread trust and active-turn admission are
+  enforced, and `patch-undo` no longer forks a conversation whose file
+  rollback failed (#6111, thanks @gaord; engine half of
+  HengQuWorld/CodeWhale-VSCode#3).
 - Authenticated Runtime API workspace file suggestions reuse TUI `@file`
   matching and discovery, with bounded queries/results and workspace-contained
   relative paths only (`GET /v1/workspace/files/search`, #6095, #6120, thanks @wuisabel-gif; reported by @LmeSzinc). Shared discovery
@@ -611,7 +618,7 @@ reconnect.
 - @c020627 — Chinese documentation link repairs (#6080).
 - @h3c-hexin and @asto18089 — GLM-5.3 reasoning controls and tool-gating/documentation fixes (#6051, #6052).
 - @Hmbown — dependency updates (#6057) and the Gemini signature recovery report (#6048).
-- **[@gaord](https://github.com/gaord)** — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend ([#5944](https://github.com/Hmbown/Codewhale/pull/5944), [#5945](https://github.com/Hmbown/Codewhale/pull/5945), [#5946](https://github.com/Hmbown/Codewhale/pull/5946), [#5992](https://github.com/Hmbown/Codewhale/pull/5992)).
+- **[@gaord](https://github.com/gaord)** — contributed the file-scoped restore endpoint and the trust-gated whole-tree rollback ([#6111](https://github.com/Hmbown/Codewhale/pull/6111)), Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend ([#5944](https://github.com/Hmbown/Codewhale/pull/5944), [#5945](https://github.com/Hmbown/Codewhale/pull/5945), [#5946](https://github.com/Hmbown/Codewhale/pull/5946), [#5992](https://github.com/Hmbown/Codewhale/pull/5992)).
 - **[@goransh-walia](https://github.com/goransh-walia)** — contributed the propose-only commit-planning rework ([#5870](https://github.com/Hmbown/Codewhale/pull/5870)).
 - **[@7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing ([#5996](https://github.com/Hmbown/Codewhale/pull/5996), [#5952](https://github.com/Hmbown/Codewhale/issues/5952), [#5954](https://github.com/Hmbown/Codewhale/issues/5954), [#6003](https://github.com/Hmbown/Codewhale/issues/6003), [#6004](https://github.com/Hmbown/Codewhale/issues/6004), [#6006](https://github.com/Hmbown/Codewhale/issues/6006), [#6007](https://github.com/Hmbown/Codewhale/issues/6007)).
 - **[@SparkofSpike](https://github.com/SparkofSpike)** — contributed two-stage consent for opting out of model-bound credential redaction ([#5982](https://github.com/Hmbown/Codewhale/pull/5982)).

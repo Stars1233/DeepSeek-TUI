@@ -83,6 +83,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
+          "POST /v1/threads/{id}/file-revert restores exactly one file from the exact tool:/pre-turn: snapshot the client selected, checking the reviewed file hash before and after the mandatory safety snapshot. Literal file names, regular files only, thread trust and active-turn admission are enforced, and patch-undo no longer forks a conversation whose file rollback failed (#6111, thanks @gaord; engine half of HengQuWorld/CodeWhale-VSCode#3).",
           "Authenticated Runtime API workspace file suggestions reuse TUI @file matching and discovery, with bounded queries/results and workspace-contained relative paths only (GET /v1/workspace/files/search, #6095, #6120, thanks @wuisabel-gif; reported by @LmeSzinc). Shared discovery now honors disabled symlink following for AI-tool directory scan roots too.",
           "Serply is available as an opt-in [search] provider for the Web tool (provider = \"serply\", key from [search] api_key or SERPLY_API_KEY). Preflight fails closed without a key; Firecrawl remains the default and existing configurations are unchanged (#6100, thanks @googio).",
           "Linux terminals: finishing a transcript or composer mouse selection copies the text to the PRIMARY selection without touching the regular clipboard, and middle-click inside the composer pastes PRIMARY at the pointer without submitting. Native X11 and Wayland data control are used through one bounded background worker; SSH sessions without a forwarded display keep their terminal's own selection behavior (#6116, thanks @dmt4).",
@@ -93,10 +94,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Signed cloud model facts can refresh provider capabilities and prices while preserving verified cached data when a refresh fails. A dispatched request keeps its selected price snapshot so later catalog updates cannot change its recorded cost (#5752).",
           "Saved sessions preserve exact provider routes. Auxiliary model calls settle their usage once against the route and price snapshot that executed them, including recovery, rather than resolving a new price at completion (#5726, #5848).",
           "[tui].posture_bar and [tui].metrics_line accept full, compact, or hidden, also available through /config. Compact preserves the existing rows' essential fields; hidden returns their space to the transcript (#5973).",
-          "Optional model-bound tool-output redaction opt-out, with two explicit startup confirmations and a receipt bound to the readable config contents and modification time. Unconfirmed requests keep masking enabled; routing and stored goal summaries remain redacted (#5982, thanks @SparkofSpike).",
-          "The rusty-alloc cargo feature on codewhale-tui and codewhale-cli opts the binaries into the rusty_alloc global allocator (the mimalloc v2.4.5 architecture remade in pure Rust — no C compiler or build script on that path) instead of the default mimalloc. It is off by default and the default build is unchanged; build with cargo build -p codewhale-tui --features rusty-alloc (#5872)."
+          "Optional model-bound tool-output redaction opt-out, with two explicit startup confirmations and a receipt bound to the readable config contents and modification time. Unconfirmed requests keep masking enabled; routing and stored goal summaries remain redacted (#5982, thanks @SparkofSpike)."
         ],
-        "itemCount": 21
+        "itemCount": 22
       },
       {
         "heading": "Contributors",
@@ -109,7 +109,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "@c020627 — Chinese documentation link repairs (#6080).",
           "@h3c-hexin and @asto18089 — GLM-5.3 reasoning controls and tool-gating/documentation fixes (#6051, #6052).",
           "@Hmbown — dependency updates (#6057) and the Gemini signature recovery report (#6048).",
-          "@gaord — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend (#5944, #5945, #5946, #5992).",
+          "@gaord — contributed the file-scoped restore endpoint and the trust-gated whole-tree rollback (#6111), Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend (#5944, #5945, #5946, #5992).",
           "@goransh-walia — contributed the propose-only commit-planning rework (#5870).",
           "@7jrxt42BxFZo4iAnN4CX — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing (#5996, #5952, #5954, #6003, #6004, #6006, #6007).",
           "@SparkofSpike — contributed two-stage consent for opting out of model-bound credential redaction (#5982)."
