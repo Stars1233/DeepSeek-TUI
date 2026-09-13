@@ -88,6 +88,7 @@ use coord::{
 pub mod advisor;
 pub mod coord;
 mod delivery;
+mod lifecycle;
 pub mod mailbox;
 mod naming;
 mod worktree;
@@ -1819,7 +1820,7 @@ struct SpawnRequest {
     /// workspace, and reachable by the spawning agent.
     resume_from: Option<String>,
     /// Detached children deliberately outlive the active parent turn. The
-    /// default is foreground ownership: normal turn end parks and joins the
+    /// default is foreground ownership: explicit cancellation stops the
     /// child's entire non-detached subtree before the turn becomes terminal.
     detached: bool,
 }
@@ -1910,7 +1911,7 @@ pub struct SubAgentCheckpoint {
     /// child that asked a question keeps its write claim, because a user can
     /// still answer it and the child will write again. A parked child is
     /// waiting for nothing — it is resumed as a *new* agent through
-    /// `resume_from`, which registers a claim of its own — so its claim must
+    /// `followup`, which registers a claim of its own — so its claim must
     /// stop gating peers the moment it parks. Carried on the checkpoint rather
     /// than sniffed out of the reason string, which would be a guess.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1975,6 +1976,8 @@ struct PersistedSubAgentState {
     workers: Vec<AgentWorkerRecord>,
     #[serde(default)]
     coordination: CoordinationLedger,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    resume_targets: HashMap<String, String>,
 }
 
 impl Default for PersistedSubAgentState {
@@ -1985,6 +1988,7 @@ impl Default for PersistedSubAgentState {
             agents: Vec::new(),
             workers: Vec::new(),
             coordination: CoordinationLedger::default(),
+            resume_targets: HashMap::new(),
         }
     }
 }
@@ -2323,6 +2327,7 @@ impl ForegroundChildRegistry {
     /// tasks. The flag is stored before token cancellation, so every child
     /// projects the race as Interrupted with a checkpoint rather than a
     /// terminal Cancelled receipt.
+    #[cfg(test)] // retained to verify recovery of legacy parked checkpoints
     pub(crate) async fn park_and_wait(&self) {
         self.settle_and_wait(ForegroundSettlement::Park).await;
     }
@@ -4264,6 +4269,7 @@ impl SubAgentManager {
             agents,
             workers: self.sorted_worker_records(),
             coordination: self.coordination.clone(),
+            resume_targets: self.resume_targets.clone(),
         };
         Ok(Some((path, payload)))
     }
@@ -4423,6 +4429,7 @@ impl SubAgentManager {
             std::sync::atomic::Ordering::Relaxed,
         );
         self.coordination = coordination;
+        self.resume_targets = state.resume_targets;
         for persisted in state.agents {
             let nickname = persisted
                 .nickname
@@ -5626,6 +5633,24 @@ impl SubAgentManager {
         // Resolution and mutation share this manager write borrow, so an alias
         // cannot be rebound between the owner check and the exact-id action.
         let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        let descendants = self
+            .agents
+            .values()
+            .filter(|agent| {
+                self.agent_is_owned_by_session(agent, active_session_id)
+                    && self
+                        .ensure_caller_controls_descendant(
+                            &agent.id,
+                            Some(&agent_id),
+                            "agent/cancel",
+                        )
+                        .is_ok()
+            })
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>();
+        for descendant in descendants {
+            self.cancel_agent(&descendant)?;
+        }
         self.cancel_agent(&agent_id)
     }
 
@@ -5848,6 +5873,63 @@ impl SubAgentManager {
         self.followup_child(&agent_id, text)
     }
 
+    /// Follow the persisted continuation chain without treating deliberate
+    /// `start + resume_from` forks as continuation targets. Every hop retains
+    /// the original root conversation; malformed or cyclic state fails closed.
+    fn continuation_target(&self, agent_id: &str) -> Result<String> {
+        let source = self
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| anyhow!("Agent not found"))?;
+        let owner = &source.owner_session_id;
+        let mut target = agent_id.to_string();
+        let mut seen = HashSet::new();
+        while let Some(next) = self.resume_targets.get(&target) {
+            if !seen.insert(target.clone()) {
+                return Err(anyhow!("Invalid agent continuation lineage: cycle"));
+            }
+            let successor = self
+                .agents
+                .get(next)
+                .ok_or_else(|| anyhow!("Agent continuation target is no longer retained"))?;
+            if owner.is_empty() || successor.owner_session_id != *owner {
+                return Err(anyhow!(
+                    "Agent continuation target is outside the active session"
+                ));
+            }
+            target.clone_from(next);
+        }
+        Ok(target)
+    }
+
+    fn continuation_source(&self, agent_id: &str) -> Option<String> {
+        self.resume_targets.iter().find_map(|(source, target)| {
+            (target == agent_id && self.continuation_target(source).is_ok()).then(|| source.clone())
+        })
+    }
+
+    pub(super) fn followup_target_for_session(
+        &self,
+        active_session_id: &str,
+        agent_ref: &str,
+        caller: Option<&str>,
+    ) -> Result<(String, String)> {
+        let source = self.ensure_caller_controls_descendant_for_session(
+            active_session_id,
+            agent_ref,
+            caller,
+            "agents/followup",
+        )?;
+        let target = self.continuation_target(&source)?;
+        self.ensure_caller_controls_descendant_for_session(
+            active_session_id,
+            &target,
+            caller,
+            "agents/followup",
+        )?;
+        Ok((source, target))
+    }
+
     /// Resume an `interrupted_continuable` child by re-dispatching a fresh
     /// agent loop seeded with the checkpoint message tail and the follow-up
     /// text (checkpoint-based continuation).
@@ -5971,16 +6053,43 @@ impl SubAgentManager {
         policy: ResumePolicy,
     ) -> Result<SubAgentResult> {
         let agent_id = self.resolve_agent_ref(agent_ref)?;
-        // Idempotency: a second resume on the same interrupted id returns the
-        // already-resumed target instead of spawning a duplicate agent loop
-        // that would concurrently write the same workspace.
-        if let Some(existing) = self.resume_targets.get(&agent_id).cloned() {
-            // Forward the follow-up to the already-resumed target (best
-            // effort; a terminal target simply cannot receive it) so a
-            // retried followup is never silently dropped.
-            let _ = self.followup_child(&existing, followup_text.to_string());
-            return self.get_result(&existing);
+        let target = self.continuation_target(&agent_id)?;
+        if target != agent_id {
+            match self.agents.get(&target).map(|agent| &agent.status) {
+                Some(SubAgentStatus::Running) => {
+                    self.followup_child(&target, followup_text.to_string())?;
+                    return self.get_result(&target);
+                }
+                Some(SubAgentStatus::Interrupted(_)) => {
+                    return self.resume_from_checkpoint_with_policy(
+                        manager_handle,
+                        runtime,
+                        &target,
+                        followup_text,
+                        policy,
+                    );
+                }
+                Some(SubAgentStatus::Completed)
+                    if policy == ResumePolicy::InterruptedOrCompleted =>
+                {
+                    return self.resume_from_checkpoint_with_policy(
+                        manager_handle,
+                        runtime,
+                        &target,
+                        followup_text,
+                        policy,
+                    );
+                }
+                _ => return self.get_result(&target),
+            }
         }
+        let saved_identity = self.worker_records.get(&agent_id).map(|record| {
+            (
+                record.spec.parent_run_id.clone(),
+                record.spec.spawn_depth,
+                record.spec.max_spawn_depth,
+            )
+        });
         let (
             agent_type,
             resume_prompt,
@@ -6063,21 +6172,19 @@ impl SubAgentManager {
                 child_route,
             )
         };
-        // Resume runs at child depth with a detached cancellation token, the
-        // same seam a fresh spawn uses; fail closed on the depth ceiling.
-        // Checked on the parent runtime before derivation, matching the
-        // fresh-spawn order (would_exceed_depth at the spawn seam).
-        if runtime.would_exceed_depth() {
+        let mut runtime = runtime.background_runtime();
+        if let Some((parent, depth, max_depth)) = saved_identity {
+            runtime.parent_agent_id = parent;
+            runtime.spawn_depth = depth;
+            runtime.max_spawn_depth = runtime.max_spawn_depth.min(max_depth);
+        }
+        if runtime.spawn_depth > runtime.max_spawn_depth {
             return Err(anyhow!(
                 "Cannot resume agent {agent_id}: sub-agent depth limit reached (current {}, max {})",
                 runtime.spawn_depth,
                 runtime.max_spawn_depth
             ));
         }
-        let runtime = runtime.background_runtime();
-        // Resume in the interrupted child's workspace, not the caller's
-        // (worktree/cwd children must not resume in the parent directory).
-        let mut runtime = runtime;
         runtime.context.workspace = workspace;
         // Rebind the child's saved provider pin (#6046). The resumed runtime
         // is derived from the caller, whose active provider can differ from
@@ -6095,6 +6202,10 @@ impl SubAgentManager {
                 )
             })?;
         }
+        let saved_manifest = self
+            .worker_records
+            .get(&agent_id)
+            .and_then(|record| record.spec.launch_manifest.as_ref());
         let options = SubAgentSpawnOptions {
             name: None, // the old session name stays owned by the terminal record
             model: Some(model),
@@ -6109,6 +6220,11 @@ impl SubAgentManager {
                 .unwrap_or(false),
             claim_pre_namespaced: claim.is_some(),
             preserve_runtime_profile: preserved_profile,
+            expected_artifact: saved_manifest
+                .and_then(|manifest| manifest.expected_artifact.clone()),
+            deliverables: saved_manifest
+                .map(|manifest| manifest.deliverables.clone())
+                .unwrap_or_default(),
             resume_from_agent_id: Some(agent_id.clone()),
             ..Default::default()
         };
@@ -6123,6 +6239,7 @@ impl SubAgentManager {
         )?;
         self.resume_targets
             .insert(agent_id, resumed.agent_id.clone());
+        self.persist_state_best_effort();
         Ok(resumed)
     }
 
@@ -7674,6 +7791,10 @@ pub struct SubAgentSessionProjection {
     pub agent_id: String,
     #[serde(default)]
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_as: Option<String>,
     pub status: String,
     pub terminal: bool,
     pub context_mode: String,
@@ -7844,6 +7965,8 @@ async fn subagent_session_projection(
         name: snapshot.name.clone(),
         agent_id: snapshot.agent_id.clone(),
         run_id,
+        resumed_from: None,
+        resumed_as: None,
         status,
         terminal: snapshot.status != SubAgentStatus::Running,
         context_mode: snapshot.context_mode.clone(),
@@ -9050,6 +9173,25 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
         return;
     };
     object.remove("snapshot");
+    if let Some(profile) = object
+        .get("worker_record")
+        .and_then(|worker| worker.pointer("/spec/runtime_profile"))
+    {
+        let mut limits = serde_json::Map::new();
+        for key in [
+            "spawn_depth",
+            "max_spawn_depth",
+            "max_steps",
+            "token_budget",
+            "wall_time_secs",
+            "wall_deadline_ms",
+        ] {
+            if let Some(value) = profile.get(key) {
+                limits.insert(key.to_string(), value.clone());
+            }
+        }
+        object.insert("effective_limits".to_string(), Value::Object(limits));
+    }
     object.remove("worker_record");
     object.remove("checkpoint");
     object.remove("artifacts");
@@ -9070,16 +9212,6 @@ const PEEK_UNCHANGED_THROTTLE_WINDOW: Duration = Duration::from_secs(30);
 /// Stable change fingerprint for a running child's model-visible state.
 /// Volatile fields (durations, timestamps) are deliberately excluded so an
 /// idle child fingerprints identically across back-to-back peeks.
-fn inspect_fingerprint(snapshot: &SubAgentResult) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    subagent_status_name(&snapshot.status).hash(&mut hasher);
-    snapshot.steps_taken.hash(&mut hasher);
-    snapshot.result.is_some().hash(&mut hasher);
-    snapshot.needs_input.is_some().hash(&mut hasher);
-    snapshot.checkpoint.is_some().hash(&mut hasher);
-    hasher.finish()
-}
 
 async fn inspect_agent_from_input(
     input: &Value,
@@ -9091,8 +9223,87 @@ async fn inspect_agent_from_input(
     let include_archived =
         parse_optional_bool(input, &["include_archived", "includeArchived"])?.unwrap_or(false);
 
+    let agent_ref = parse_agent_ref(input)?;
+    let detail = parse_optional_bool(input, &["detail", "verbose"])?.unwrap_or(false);
+    let (offset, limit) = lifecycle::page(input)?;
+    if agent_ref.is_none() || !detail {
+        touch_running_shell_owners(
+            &manager,
+            &context.execution.shell_manager,
+            &context.state_namespace,
+        )
+        .await;
+        let mut manager = manager.write().await;
+        manager.cleanup_for_session(&context.state_namespace, COMPLETED_AGENT_RETENTION);
+        let payload = if let Some(agent_ref) = agent_ref.as_ref() {
+            let source = manager
+                .resolve_agent_ref_for_session(&context.state_namespace, agent_ref)
+                .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+            let target = manager
+                .continuation_target(&source)
+                .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+            let agent = manager.agents.get(&target).expect("resolved agent");
+            let mut row = lifecycle::compact_row(&manager, agent);
+            row["addressed_agent_id"] = json!(source);
+            row["action"] = json!(if peek { "peek" } else { "status" });
+            if agent.status == SubAgentStatus::Running
+                && let Some(memo_map) = inspect_memo
+            {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                agent.steps_taken.hash(&mut hasher);
+                agent.result.is_some().hash(&mut hasher);
+                agent.needs_input.is_some().hash(&mut hasher);
+                agent.checkpoint.is_some().hash(&mut hasher);
+                manager.activity_fingerprint(&target).hash(&mut hasher);
+                let fingerprint = hasher.finish();
+                let now = Instant::now();
+                let mut memo_map = memo_map
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let unchanged = memo_map.get(&target).is_some_and(|memo| {
+                    memo.fingerprint == fingerprint
+                        && now.duration_since(memo.at) < PEEK_UNCHANGED_THROTTLE_WINDOW
+                });
+                memo_map.insert(
+                    target.clone(),
+                    PeekMemo {
+                        fingerprint,
+                        at: now,
+                    },
+                );
+                if unchanged {
+                    row["unchanged"] = json!(true);
+                    row["hint"] = json!(
+                        "No change. Use one bounded wait, continue other work, or answer the user; children keep running and report when done."
+                    );
+                }
+            }
+            row["detail_hint"] =
+                json!("Use detail=true with agent_id for a bounded diagnostic page.");
+            row
+        } else {
+            lifecycle::compact_roster(
+                &manager,
+                input,
+                &context.state_namespace,
+                include_archived,
+                peek,
+            )?
+        };
+        let evicted = manager.drain_pending_handle_evictions_for_session(&context.state_namespace);
+        drop(manager);
+        if !evicted.is_empty() {
+            let mut store = context.runtime.handle_store.lock().await;
+            for id in evicted {
+                store.evict_session(&format!("agent:{id}"));
+            }
+        }
+        return ToolResult::json(&payload)
+            .map_err(|error| ToolError::execution_failed(error.to_string()));
+    }
+
     if let Some(agent_ref) = parse_agent_ref(input)? {
-        let (snapshot, worker_record, evicted_ids) = {
+        let (snapshot, worker_record, evicted_ids, compact) = {
             touch_running_shell_owners(
                 &manager,
                 &context.execution.shell_manager,
@@ -9103,12 +9314,23 @@ async fn inspect_agent_from_input(
             manager.cleanup_for_session(&context.state_namespace, COMPLETED_AGENT_RETENTION);
             let evicted_ids =
                 manager.drain_pending_handle_evictions_for_session(&context.state_namespace);
+            let source = manager
+                .resolve_agent_ref_for_session(&context.state_namespace, &agent_ref)
+                .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+            let target = manager
+                .continuation_target(&source)
+                .map_err(|error| ToolError::invalid_input(error.to_string()))?;
             let snapshot = manager
-                .get_result_by_ref_for_session(&context.state_namespace, &agent_ref)
-                .map_err(|err| ToolError::invalid_input(err.to_string()))?;
+                .get_result_by_ref_for_session(&context.state_namespace, &target)
+                .map_err(|error| ToolError::invalid_input(error.to_string()))?;
             let worker_record =
                 manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id);
-            (snapshot, worker_record, evicted_ids)
+            let mut compact = lifecycle::compact_row(
+                &manager,
+                manager.agents.get(&target).expect("resolved agent"),
+            );
+            compact["addressed_agent_id"] = json!(source);
+            (snapshot, worker_record, evicted_ids, compact)
         };
         // Evict retired handles outside the manager lock (#3885).
         if !evicted_ids.is_empty() {
@@ -9118,149 +9340,24 @@ async fn inspect_agent_from_input(
             }
         }
 
-        // #4097: a running child whose model-visible state hasn't changed
-        // since the last peek gets a compact nudge, not another full
-        // projection. Terminal/parked children always return in full — the
-        // model may legitimately be fetching results.
-        if snapshot.status == SubAgentStatus::Running
-            && let Some(memo_map) = inspect_memo
-        {
-            let fingerprint = inspect_fingerprint(&snapshot);
-            let now = Instant::now();
-            let unchanged = {
-                let mut memo_map = memo_map.lock().expect("inspect memo lock");
-                let unchanged = memo_map.get(&snapshot.agent_id).is_some_and(|memo| {
-                    memo.fingerprint == fingerprint
-                        && now.duration_since(memo.at) < PEEK_UNCHANGED_THROTTLE_WINDOW
-                });
-                memo_map.insert(
-                    snapshot.agent_id.clone(),
-                    PeekMemo {
-                        fingerprint,
-                        at: now,
-                    },
-                );
-                unchanged
-            };
-            if unchanged {
-                let child_route = worker_record
-                    .as_ref()
-                    .and_then(|record| record.spec.child_route.clone());
-                let payload = json!({
-                    "action": if peek { "peek" } else { "status" },
-                    "agent_id": snapshot.agent_id,
-                    "name": snapshot.name,
-                    "status": "running",
-                    "unchanged": true,
-                    "child_route": child_route,
-                    "hint": "No change since your last check. Checking again in a loop is the anti-pattern; one blocking wait is not. Make one agent(action=\"wait\") call — until=\"all\" to join every running child in a single block — or continue independent work, or end your turn. Results arrive automatically as <codewhale:subagent.done> sentinels.",
-                });
-                let mut tool_result = ToolResult::json(&payload)
-                    .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-                tool_result.metadata = Some(json!({
-                    "action": if peek { "peek" } else { "status" },
-                    "status": "running",
-                    "terminal": false,
-                    "agent_id": payload["agent_id"],
-                    "unchanged": true,
-                    "child_route": child_route,
-                }));
-                return Ok(tool_result);
-            }
-        }
-
-        let projection =
-            subagent_session_projection(snapshot, include_archived, context, worker_record).await;
-        let mut tool_result = ToolResult::json(&projection)
-            .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-        tool_result.metadata = Some(json!({
-            "action": if peek { "peek" } else { "status" },
-            "status": projection.status,
-            "terminal": projection.terminal,
-            "agent_id": projection.agent_id,
-            "child_route": projection.child_route,
-        }));
-        return Ok(tool_result);
+        let mut projection =
+            subagent_session_projection(snapshot, false, context, worker_record).await;
+        projection.resumed_from = compact
+            .get("resumed_from")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        projection.resumed_as = compact
+            .get("resumed_as")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let value = serde_json::to_value(&projection)
+            .map_err(|error| ToolError::execution_failed(error.to_string()))?;
+        let payload = lifecycle::bounded_detail(value, compact, offset, limit);
+        return ToolResult::json(&payload)
+            .map_err(|error| ToolError::execution_failed(error.to_string()));
     }
 
-    let (snapshots, evicted_ids) = {
-        touch_running_shell_owners(
-            &manager,
-            &context.execution.shell_manager,
-            &context.state_namespace,
-        )
-        .await;
-        let mut manager = manager.write().await;
-        manager.cleanup_for_session(&context.state_namespace, COMPLETED_AGENT_RETENTION);
-        let evicted_ids =
-            manager.drain_pending_handle_evictions_for_session(&context.state_namespace);
-        let snapshots = manager
-            .list_filtered_for_session(&context.state_namespace, include_archived)
-            .into_iter()
-            .map(|snapshot| {
-                let worker_record = manager
-                    .get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id);
-                (snapshot, worker_record)
-            })
-            .collect::<Vec<_>>();
-        (snapshots, evicted_ids)
-    };
-    // Evict retired handles outside the manager lock (#3885).
-    if !evicted_ids.is_empty() {
-        let mut store = context.runtime.handle_store.lock().await;
-        for agent_id in &evicted_ids {
-            store.evict_session(&format!("agent:{agent_id}"));
-        }
-    }
-
-    // Unscoped status is a supervision poll, and it used to return the full
-    // projection for every agent — launch manifest, event ring, and any
-    // checkpointed message history included (one observed poll: 203KB).
-    // Running children now compact to their top-level supervision facts
-    // (status, usage, follow-up, verification stay; the heavy snapshot and
-    // worker_record drop). Terminal agents keep the full projection —
-    // fetching results is the point of a terminal row — and `verbose: true`
-    // restores the old shape everywhere.
-    let verbose = input
-        .get("verbose")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let mut projections = Vec::with_capacity(snapshots.len());
-    for (snapshot, worker_record) in snapshots {
-        let running = snapshot.status == SubAgentStatus::Running;
-        let projection =
-            subagent_session_projection(snapshot, include_archived, context, worker_record).await;
-        let mut value = serde_json::to_value(&projection)
-            .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-        if running
-            && !verbose
-            && let Some(object) = value.as_object_mut()
-        {
-            object.remove("snapshot");
-            object.remove("worker_record");
-            object.remove("checkpoint");
-            object.insert("compact".to_string(), json!(true));
-            object.insert(
-                "compact_note".to_string(),
-                json!(
-                    "Running child compacted; pass agent_id (or verbose: true) for the full projection."
-                ),
-            );
-        }
-        projections.push(value);
-    }
-    let payload = json!({
-        "action": if peek { "peek" } else { "status" },
-        "count": projections.len(),
-        "agents": projections,
-    });
-    let mut tool_result =
-        ToolResult::json(&payload).map_err(|err| ToolError::execution_failed(err.to_string()))?;
-    tool_result.metadata = Some(json!({
-        "action": if peek { "peek" } else { "status" },
-        "count": payload["count"],
-    }));
-    Ok(tool_result)
+    unreachable!("unaddressed status returned through the compact roster")
 }
 
 /// Keep a running child alive while one of its tracked background shell jobs
@@ -11477,6 +11574,12 @@ then re-plan dependent work before claiming completion.\n",
     }
 }
 
+pub(crate) fn subagent_followup_recovery(agent_id: &str) -> String {
+    format!(
+        "Continue this child with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the assignment.\"). The response identifies its current continuation; the original receipt remains intact."
+    )
+}
+
 fn subagent_cancellation_projection(
     agent_id: &str,
     messages: &[Message],
@@ -11494,18 +11597,13 @@ fn subagent_cancellation_projection(
     let parking_requested =
         turn_end_parking.is_some_and(|signal| signal.load(std::sync::atomic::Ordering::Acquire));
     if parking_requested {
-        let reason = format!(
-            "Parent turn ended before this turn-owned child settled. Work was parked instead of discarded; continue with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the parked assignment.\"). Use the returned agent_id for subsequent waits and messages."
-        );
+        let recovery = subagent_followup_recovery(agent_id);
+        let reason = format!("Work was parked with a continuable checkpoint. {recovery}");
         let mut checkpoint = build_subagent_checkpoint(agent_id, &reason, messages, steps, true);
         // Parked, not asking: nothing will answer this child, and its write
         // claim must stop gating peers immediately (#5906).
         checkpoint.parked_at_turn_end = true;
-        let needs_input = SubAgentNeedsInput {
-            question: format!(
-                "Continue this parked child with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the parked assignment.\"). This returns a successor agent_id; the original parked receipt remains intact."
-            ),
-        };
+        let needs_input = SubAgentNeedsInput { question: recovery };
         return (
             SubAgentStatus::Interrupted(reason.clone()),
             Some(reason),
@@ -17104,6 +17202,8 @@ const VERIFIER_AGENT_INTRO: &str = concat!(
 
 // === Tests ===
 
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod tests;
 

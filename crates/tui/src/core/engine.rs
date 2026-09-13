@@ -3276,6 +3276,12 @@ impl Engine {
         // coalesced away, so a graceful shutdown keeps the latest progress.
         {
             let mut manager = self.subagent_manager.write().await;
+            let children = manager.list_for_session(&self.session.id);
+            for child in children {
+                if child.status == SubAgentStatus::Running {
+                    let _ = manager.cancel_agent_for_session(&self.session.id, &child.agent_id);
+                }
+            }
             manager.flush_pending_persist();
         }
 
@@ -5296,7 +5302,7 @@ impl Engine {
         // performs its own final check, but an Esc/interrupt can arrive while
         // its clean-exit receipts are being appended. Recheck at this seam so
         // that pre-settlement cancellation remains terminal Cancelled child
-        // work rather than being relabelled as a normal resumable park.
+        // work rather than continuing after a normal answer.
         let status_at_settlement =
             terminal_turn_status_at_settlement(status, self.cancel_token.is_cancelled());
         if status_at_settlement != status {
@@ -5315,8 +5321,8 @@ impl Engine {
         // the following turn (or lost by a runtime monitor that already
         // settled the record).
         if let Some(barrier) = mailbox_for_runtime.take() {
-            if status == TurnOutcomeStatus::Completed {
-                barrier.park_and_flush().await;
+            if status == TurnOutcomeStatus::Completed && !turn.budget_exhausted_final_report {
+                barrier.continue_and_flush().await;
             } else {
                 barrier.cancel_and_flush().await;
             }
@@ -7433,11 +7439,11 @@ impl TurnMailboxBarrier {
         self.flush().await;
     }
 
-    /// A normally completed parent turn parks any still-running owned work as
-    /// resumable before closing the mailbox. Failed or interrupted turns use
-    /// [`Self::cancel_and_flush`] and retain explicit cancellation semantics.
-    pub(crate) async fn park_and_flush(self) {
-        self.foreground_children.park_and_wait().await;
+    /// A normal answer closes this turn's UI mailbox without cancelling
+    /// healthy children. Their manager registration, transcript, immutable
+    /// usage owner and completion inbox survive this turn. Explicit stop,
+    /// failed turns and budget stops still use `cancel_and_flush`.
+    pub(crate) async fn continue_and_flush(self) {
         self.flush().await;
     }
 

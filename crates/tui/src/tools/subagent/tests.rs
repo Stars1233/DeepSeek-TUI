@@ -2107,7 +2107,7 @@ fn message_text(message: &Message) -> &str {
     }
 }
 
-async fn delayed_chat_client(
+pub(super) async fn delayed_chat_client(
     first_delay: Duration,
     response_text: &str,
 ) -> (
@@ -9796,9 +9796,9 @@ async fn status_projection_reconciles_stale_running_agent() {
     assert_eq!(agent["agent_id"], "test_agent_status_stale");
     assert_eq!(agent["status"], "cancelled");
     assert_eq!(agent["terminal"], true);
-    assert_eq!(agent["snapshot"]["status"], "Cancelled");
+    assert!(agent.get("snapshot").is_none());
     assert!(
-        agent["snapshot"]["result"]
+        agent["summary"]
             .as_str()
             .unwrap_or_default()
             .contains("Auto-cancelled")
@@ -20320,7 +20320,7 @@ async fn spawn_receipt_route_survives_compaction_for_a_type_only_spawn() {
 }
 
 #[tokio::test]
-async fn unscoped_status_compacts_running_children_and_keeps_terminal_full() {
+async fn unscoped_status_compacts_every_state_even_with_verbose() {
     // Morning-report issue #4: one unscoped status poll returned 203KB
     // because every RUNNING child carried its full projection (launch
     // manifest, event ring, checkpoint payloads). Supervision needs the
@@ -20371,7 +20371,7 @@ async fn unscoped_status_compacts_running_children_and_keeps_terminal_full() {
     assert!(agent_row.get("worker_record").is_none(), "{agent_row}");
     assert!(agent_row["usage"].is_object(), "supervision keeps usage");
 
-    // verbose: true restores the full projection for the same running child.
+    // Unscoped verbose cannot restore every worker archive.
     let verbose = inspect_agent_from_input(
         &json!({"action": "status", "verbose": true}),
         manager,
@@ -20387,8 +20387,8 @@ async fn unscoped_status_compacts_running_children_and_keeps_terminal_full() {
         .as_array()
         .and_then(|agents| agents.first())
         .expect("verbose agent row");
-    assert!(verbose_row.get("snapshot").is_some(), "{verbose_row}");
-    assert!(verbose_row.get("compact").is_none(), "{verbose_row}");
+    assert!(verbose_row.get("snapshot").is_none(), "{verbose_row}");
+    assert_eq!(verbose_row["compact"], true, "{verbose_row}");
 }
 
 #[test]

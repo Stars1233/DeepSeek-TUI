@@ -205,66 +205,76 @@ fn cancellation_wins_at_the_terminal_child_settlement_seam() {
 }
 
 #[tokio::test]
-async fn terminal_barrier_parks_foreground_child_before_flushing_mailbox() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
+async fn terminal_barrier_keeps_healthy_child_and_late_completion_alive() {
+    use std::sync::atomic::Ordering;
     let turn_token = CancellationToken::new();
     let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
-    let foreground_children = Arc::new(ForegroundChildRegistry::new());
+    let children = Arc::new(ForegroundChildRegistry::new());
     let child_token = turn_token.child_token();
-    let registration = foreground_children
-        .register("agent_terminal_barrier", child_token.clone())
-        .expect("foreground child registers before settlement");
-    let parking_signal = registration.parking_signal();
-    let child_settled = Arc::new(AtomicBool::new(false));
-    let child_settled_for_task = Arc::clone(&child_settled);
+    let registration = children
+        .register("agent_survives", child_token.clone())
+        .unwrap();
+    let parking = registration.parking_signal();
+    let (complete_tx, mut complete_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let child = tokio::spawn(async move {
-        child_token.cancelled().await;
-        child_settled_for_task.store(true, Ordering::SeqCst);
+        release_rx.await.unwrap();
+        assert!(!child_token.is_cancelled());
+        complete_tx.send("existing completion inbox").unwrap();
         drop(registration);
     });
-
-    // Detached work is deliberately not registered in the turn barrier.
-    let detached_token = CancellationToken::new();
-    let flush_after_child_settled = Arc::new(AtomicBool::new(false));
-    let flush_observer = Arc::clone(&flush_after_child_settled);
-    let child_settled_for_flush = Arc::clone(&child_settled);
     let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
-    let drain_handle = tokio::spawn(async move {
+    let drain_handle = tokio::spawn(async {
         let _ = flush_rx.await;
-        flush_observer.store(
-            child_settled_for_flush.load(Ordering::SeqCst),
-            Ordering::SeqCst,
-        );
     });
-
     let barrier = TurnMailboxBarrier {
         mailbox,
-        cancel_token: turn_token,
-        foreground_children,
+        cancel_token: turn_token.clone(),
+        foreground_children: Arc::clone(&children),
         flush_tx,
         drain_handle,
     };
-    tokio::time::timeout(Duration::from_secs(1), barrier.park_and_flush())
+    tokio::time::timeout(Duration::from_secs(1), barrier.continue_and_flush())
         .await
-        .expect("the terminal barrier parks and joins its owned child");
-    child
-        .await
-        .expect("foreground child task exits after cancellation");
+        .unwrap();
+    assert_eq!(children.active_count(), 1);
+    assert!(!turn_token.is_cancelled());
+    assert!(!parking.load(Ordering::Acquire));
+    release_tx.send(()).unwrap();
+    assert_eq!(complete_rx.recv().await, Some("existing completion inbox"));
+    child.await.unwrap();
+    assert_eq!(children.active_count(), 0);
+}
 
-    assert!(child_settled.load(Ordering::SeqCst));
-    assert!(
-        parking_signal.load(Ordering::Acquire),
-        "normal turn completion must request a resumable park before cancellation"
-    );
-    assert!(
-        flush_after_child_settled.load(Ordering::SeqCst),
-        "mailbox flushing, and therefore TurnComplete, waits for the owned child"
-    );
-    assert!(
-        !detached_token.is_cancelled(),
-        "explicitly detached work is not owned by the terminal barrier"
-    );
+#[tokio::test]
+async fn terminal_barrier_explicit_cancel_still_joins_owned_child() {
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let children = Arc::new(ForegroundChildRegistry::new());
+    let child_token = turn_token.child_token();
+    let registration = children
+        .register("agent_cancelled", child_token.clone())
+        .unwrap();
+    let child = tokio::spawn(async move {
+        child_token.cancelled().await;
+        drop(registration);
+    });
+    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+    let drain_handle = tokio::spawn(async {
+        let _ = flush_rx.await;
+    });
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token,
+        foreground_children: Arc::clone(&children),
+        flush_tx,
+        drain_handle,
+    };
+    tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
+        .await
+        .unwrap();
+    child.await.unwrap();
+    assert_eq!(children.active_count(), 0);
 }
 
 mod compaction;
@@ -4941,7 +4951,9 @@ async fn turn_owned_children_receive_exactly_one_coordination_pass_even_at_step_
             "{coordination_text}"
         );
         assert!(coordination_text.contains("detached=true"));
-        assert!(coordination_text.contains("resume_from=\"<agent_id>\""));
+        assert!(coordination_text.contains("action=\"followup\""));
+        assert!(coordination_text.contains("keeps healthy children running"));
+        assert!(!coordination_text.contains("resume_from="));
         assert_eq!(
             turn.step, 1,
             "the ceiling grace must reuse the already-advanced provider slot"
