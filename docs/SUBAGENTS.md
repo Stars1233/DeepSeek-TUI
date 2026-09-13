@@ -1,6 +1,11 @@
-# Fleet workers and sub-agent compatibility
+# Fleet and sub-agents
 
 > 阅读简体中文版：[zh_hans/SUBAGENTS.md](zh_hans/SUBAGENTS.md)
+
+Fleet manages saved models and role assignments for these same sub-agents.
+Use `agent` for an individual assignment and `workflow` for phases with
+dependencies and completion checks. See [Workflow authoring](WORKFLOW_AUTHORING.md)
+for plans that use the Fleet model shortlist.
 
 Fleet roles are the user-facing vocabulary for delegated work: a parent
 launches a focused `general`, `explore`, `planner`, `reviewer`, `implement`,
@@ -44,8 +49,8 @@ normal turn. Explicit interruption or cancellation remains authoritative.
 `detached: true` additionally opts a subtree out of parent-turn cancellation;
 it does not remove child budgets or the headless host's deadline.
 
-This doc covers the role taxonomy and current compatibility controls. The active
-orchestration surface is `agent`; see the sub-agent guidance in
+This doc covers roles and individual worker controls. Use `workflow` to coordinate
+multiple assignments through the same worker runtime; see the sub-agent guidance in
 `crates/tui/src/prompts/text.rs` (`AGENT_MODE`) and the in-line
 tool description.
 
@@ -833,11 +838,14 @@ continuing parked work with `followup`.
 Unscoped `agent(action="status")` returns a session-scoped page bounded to
 8 KiB. `offset` and `limit` page the roster; the default and maximum limit is
 20. Follow `next_offset`, since the byte bound can return fewer rows than
-requested. Rows include worker and parent IDs, current/maximum depth, effective
-limits, own usage, recent activity, continuation lineage (`resumed_from` /
-`resumed_as`), and bounded verification. Non-present deliverables are shown
-first, with totals and omitted counts when needed. Aggregate usage counts
-each worker's own reported tokens once and reports its coverage.
+requested. Rows include worker and parent IDs, current/maximum depth, state,
+elapsed time, own token total, recent activity, pending input, and continuation
+lineage (`resumed_from` / `resumed_as`). Verification includes the verdict,
+nonempty deliverable counts and a short warning when needed. Routes, effective
+limits and token breakdowns remain available when addressing one `agent_id`.
+Aggregate usage counts each worker's own reported tokens once and reports its
+coverage. Completion receipts additionally report measured descendant usage,
+deduplicate continuation lineage, and distinguish unknown usage from zero.
 
 Request one worker's detail when investigating a failure:
 

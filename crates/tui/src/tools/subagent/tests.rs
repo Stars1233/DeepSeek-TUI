@@ -7699,6 +7699,7 @@ fn small_surface_starts_with_core_tools_and_read_only_goal_control() {
             "read",
             "todo_write",
             "tool_search",
+            "workflow",
             "write",
         ]
         .into_iter()
@@ -7966,6 +7967,7 @@ fn small_surface_depth_cap_removes_only_agent() {
             "read",
             "todo_write",
             "tool_search",
+            "workflow",
             "write"
         ]
         .into_iter()
@@ -9986,7 +9988,7 @@ async fn status_projection_reconciles_stale_running_agent() {
     assert_eq!(payload["count"], 1);
     assert_eq!(agent["agent_id"], "test_agent_status_stale");
     assert_eq!(agent["status"], "cancelled");
-    assert_eq!(agent["terminal"], true);
+    assert_eq!(payload["status_counts"]["cancelled"], 1);
     assert!(agent.get("snapshot").is_none());
     assert!(
         agent["summary"]
@@ -11188,6 +11190,28 @@ fn budget_exhaustion_is_a_high_priority_failure_event() {
 }
 
 #[test]
+fn completion_priority_uses_the_terminal_receipt_not_quoted_report_text() {
+    let mut result = make_snapshot(SubAgentStatus::Completed);
+    result.result = Some(
+        "The regression quotes {\"event\":\"subagent.failed\"} and {\"event\":\"workflow.failed\"}."
+            .to_string(),
+    );
+    assert!(!subagent_completion_from_result(&result).is_high_priority_failure());
+
+    for (event, expected) in [("workflow.completed", false), ("workflow.failed", true)] {
+        let completion = SubAgentCompletion {
+            owner_session_id: "owner".to_string(),
+            agent_id: "workflow_1".to_string(),
+            payload: format!(
+                "Workflow result\n<codewhale:subagent.done>{}</codewhale:subagent.done>",
+                serde_json::json!({"event": event, "agent_id": "workflow_1"})
+            ),
+        };
+        assert_eq!(completion.is_high_priority_failure(), expected);
+    }
+}
+
+#[test]
 fn stamp_subagent_summary_appends_note_when_short() {
     // issue #2652: a short (complete) summary gets the soft self-report note
     // and is NOT marked truncated.
@@ -11510,6 +11534,7 @@ async fn rate_limit_pause_blocks_subagent_spawn() {
         Arc::clone(&manager),
         runtime,
         false,
+        None,
     )
     .await
     .expect_err("active provider rate-limit pause must refuse new sub-agent work");
@@ -20057,8 +20082,9 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
 /// superseded by these tests.
 /// Measured 80,856B on 2026-08-02 (commit body has the receipt); +10%.
 const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
-/// Measured 72,679B on 2026-08-02 (commit body has the receipt); +10%.
-const PARENT_SURFACE_BYTE_CEILING: usize = 80_000;
+/// Measured 84,804B on 2026-09-13 with the native Workflow plan schema.
+/// Keep the next increase visible instead of adding another broad margin.
+const PARENT_SURFACE_BYTE_CEILING: usize = 85_000;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
@@ -20572,7 +20598,7 @@ async fn unscoped_status_compacts_every_state_even_with_verbose() {
         .and_then(|agents| agents.first())
         .expect("running agent row");
     assert_eq!(agent_row["status"], "running", "{agent_row}");
-    assert_eq!(agent_row["compact"], true, "{agent_row}");
+    assert_eq!(payload["compact"], true, "{payload}");
     assert!(agent_row.get("snapshot").is_none(), "{agent_row}");
     assert!(agent_row.get("worker_record").is_none(), "{agent_row}");
     assert!(agent_row["usage"].is_object(), "supervision keeps usage");
@@ -20594,7 +20620,7 @@ async fn unscoped_status_compacts_every_state_even_with_verbose() {
         .and_then(|agents| agents.first())
         .expect("verbose agent row");
     assert!(verbose_row.get("snapshot").is_none(), "{verbose_row}");
-    assert_eq!(verbose_row["compact"], true, "{verbose_row}");
+    assert_eq!(verbose_payload["compact"], true, "{verbose_payload}");
 }
 
 #[test]

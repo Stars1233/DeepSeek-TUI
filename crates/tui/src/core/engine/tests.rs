@@ -10633,12 +10633,13 @@ fn core_primitives_and_todo_write_default_to_eager() {
 
 #[test]
 fn default_active_contract_keeps_discovery_and_core_tools_eager() {
-    const EXPECTED_NATIVE: [&str; 9] = [
+    const EXPECTED_NATIVE: [&str; 10] = [
         "read",
         "write",
         "edit",
         "bash",
         "agent",
+        "workflow",
         "todo_write",
         "create_goal",
         "get_goal",
@@ -11171,6 +11172,7 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
         "read",
         "todo_write",
         "tool_search",
+        "workflow",
         "write",
     ]);
 
@@ -11182,6 +11184,7 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
             "edit",
             "bash",
             "agent",
+            "workflow",
             "tool_search",
             "create_goal",
             "get_goal",

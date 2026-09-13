@@ -3334,6 +3334,13 @@ impl Engine {
         let manager = self.subagent_manager.read().await;
         crate::core::ops::SubAgentSettlement {
             running_children: manager.live_count_for_session(&self.session.id),
+            // Workflow terminal delivery queues its receipt before removing
+            // the controller. Observe controllers before the inbox so a gap
+            // between phases cannot look like a settled parent.
+            running_workflows: crate::tools::workflow::live_workflow_count(
+                &self.session.workspace,
+                &self.session.id,
+            ),
             pending_completions: self.rx_subagent_completion.len(),
         }
     }
@@ -5210,7 +5217,7 @@ impl Engine {
                 .session
                 .messages
                 .iter()
-                .any(crate::runtime_handoff::is_operate_contract_message)
+                .any(crate::runtime_handoff::is_current_operate_contract_message)
         {
             self.session
                 .add_message(crate::runtime_handoff::operate_contract_runtime_message());

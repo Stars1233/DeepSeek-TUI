@@ -47,13 +47,15 @@ pub struct ProviderRuntimeStatus {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SubAgentSettlement {
     pub running_children: usize,
+    /// A Workflow can still be coordinating between child phases.
+    pub running_workflows: usize,
     pub pending_completions: usize,
 }
 
 impl SubAgentSettlement {
     #[must_use]
     pub fn is_settled(self) -> bool {
-        self.running_children == 0 && self.pending_completions == 0
+        self.running_children == 0 && self.running_workflows == 0 && self.pending_completions == 0
     }
 }
 

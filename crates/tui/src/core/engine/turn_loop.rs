@@ -496,8 +496,11 @@ impl Engine {
         for result in synthesized {
             let report_ref =
                 crate::tools::subagent::spill_subagent_final_report(&self.session.id, &result);
-            let completion =
-                crate::tools::subagent::subagent_completion_from_result_with_ref_for_session(
+            let completion = self
+                .subagent_manager
+                .read()
+                .await
+                .completion_from_result_with_ref_for_session(
                     &self.session.id,
                     &result,
                     report_ref.as_deref(),

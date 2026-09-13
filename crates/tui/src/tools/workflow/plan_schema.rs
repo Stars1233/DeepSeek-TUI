@@ -25,7 +25,7 @@ pub(super) fn structured_plan_schema() -> Value {
             },
             "type": {
                 "type": "string",
-                "enum": ["worker", "scout", "planner", "reviewer", "builder", "verifier"],
+                "enum": ["general", "explore", "planner", "reviewer", "implement", "test"],
                 "description": "Optional worker type. Prefer role/profile for Fleet steps; do not combine them with a conflicting type. Legacy type aliases remain accepted by the runtime."
             },
             "role": {
@@ -35,6 +35,10 @@ pub(super) fn structured_plan_schema() -> Value {
             "profile": {
                 "type": "string",
                 "description": "Worker profile name, resolved with the selected Fleet and caller policy."
+            },
+            "model": {
+                "type": "string",
+                "description": "Optional model selector from agent(action=roster)'s saved shortlist. Omit to use the selected role/profile route. Exact Fleets fix each member's model, so select the member instead of overriding it."
             },
             "mode": {
                 "type": "string",
@@ -85,7 +89,7 @@ pub(super) fn structured_plan_schema() -> Value {
             },
             "on": {
                 "type": "string",
-                "enum": ["role_complete", "role_start"]
+                "enum": ["role_complete"]
             },
             "gate": {
                 "type": "string",
@@ -247,6 +251,7 @@ mod tests {
                 "id",
                 "label",
                 "mode",
+                "model",
                 "profile",
                 "prompt",
                 "role",
@@ -294,7 +299,7 @@ mod tests {
             (phase, &["id", "title", "parallel"][..]),
             (
                 child,
-                &["id", "label", "type", "role", "profile", "mode"][..],
+                &["id", "label", "type", "role", "profile", "model", "mode"][..],
             ),
             (gate, &["blocks_role", "artifact_kind"][..]),
         ] {
@@ -325,6 +330,7 @@ mod tests {
                     "type": null,
                     "role": null,
                     "profile": null,
+                    "model": null,
                     "mode": null,
                     "file_scope": []
                 }]
@@ -359,7 +365,7 @@ mod tests {
         let gate: codewhale_workflow::GateSpec = serde_json::from_value(json!({
             "id": "verify",
             "role": "verifier",
-            "on": "role_start",
+            "on": "role_complete",
             "gate": "verify",
             "on_fail": "retry",
             "blocks_role": "builder",

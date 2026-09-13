@@ -4169,7 +4169,18 @@ exit 0
         {
             let mut guard = coordination.try_write().unwrap();
             let mut corrupt = guard.get_worker_record(&worker_id).unwrap().spec;
-            corrupt.max_spawn_depth = corrupt.max_spawn_depth.saturating_add(1);
+            assert_eq!(corrupt.max_spawn_depth, 0, "Fleet workers are leaves");
+            // Reload intersects the outer cap with the runtime profile. Widen
+            // every persisted ceiling so the actual corruption survives that
+            // safety clamp and reaches the exact task-lease validation.
+            corrupt.max_spawn_depth = 1;
+            corrupt.runtime_profile.max_spawn_depth = 1;
+            corrupt
+                .launch_manifest
+                .as_mut()
+                .unwrap()
+                .profile
+                .max_spawn_depth = 1;
             guard
                 .replace_registered_worker_spec_for_test(corrupt)
                 .unwrap();
@@ -4179,6 +4190,24 @@ exit 0
 
         let reloaded_coordination =
             crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let corrupt = reloaded_coordination
+            .try_read()
+            .unwrap()
+            .get_worker_record(&worker_id)
+            .unwrap()
+            .spec;
+        assert_eq!(corrupt.max_spawn_depth, 1);
+        assert_eq!(corrupt.runtime_profile.max_spawn_depth, 1);
+        assert_eq!(
+            corrupt
+                .launch_manifest
+                .as_ref()
+                .unwrap()
+                .profile
+                .max_spawn_depth,
+            1
+        );
+        assert!(corrupt.runtime_profile.can_spawn_child());
         let reloaded = test_manager(tmp.path())
             .unwrap()
             .with_sub_agent_manager(reloaded_coordination);
@@ -4198,6 +4227,75 @@ exit 0
             1
         );
         assert!(state.restarted_events.is_empty());
+    }
+
+    #[test]
+    fn prepared_restart_clamps_outer_only_depth_inflation_after_reload() {
+        let tmp = TempDir::new().unwrap();
+        let coordination =
+            crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let manager = test_manager(tmp.path())
+            .unwrap()
+            .with_sub_agent_manager(coordination.clone());
+        let path = task_spec_file(&tmp, vec![task("task-a")]);
+        let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
+        let worker_id = report.worker_ids[0].clone();
+        manager.ledger.fail_next_restart_append_after_callback();
+        manager
+            .restart_worker(&worker_id)
+            .expect_err("failpoint leaves generation two prepared");
+        {
+            let mut guard = coordination.try_write().unwrap();
+            let mut inflated = guard.get_worker_record(&worker_id).unwrap().spec;
+            assert_eq!(inflated.max_spawn_depth, 0);
+            assert_eq!(inflated.runtime_profile.max_spawn_depth, 0);
+            inflated.max_spawn_depth = 1;
+            guard
+                .replace_registered_worker_spec_for_test(inflated)
+                .unwrap();
+        }
+        drop(manager);
+        drop(coordination);
+
+        let reloaded_coordination =
+            crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let narrowed = reloaded_coordination
+            .try_read()
+            .unwrap()
+            .get_worker_record(&worker_id)
+            .unwrap()
+            .spec;
+        assert_eq!(narrowed.max_spawn_depth, 0);
+        assert_eq!(narrowed.runtime_profile.max_spawn_depth, 0);
+        let manifest = narrowed.launch_manifest.as_ref().unwrap();
+        assert_eq!(manifest.profile.max_spawn_depth, 0);
+        assert_eq!(manifest.generation, 2);
+        assert!(!narrowed.runtime_profile.can_spawn_child());
+        assert!(!manifest.profile.can_spawn_child());
+
+        let reloaded = test_manager(tmp.path())
+            .unwrap()
+            .with_sub_agent_manager(reloaded_coordination.clone());
+        reloaded
+            .restart_worker(&worker_id)
+            .expect("a reload-narrowed leaf still matches the exact prepared lease");
+        let committed = reloaded_coordination
+            .try_read()
+            .unwrap()
+            .get_worker_record(&worker_id)
+            .unwrap()
+            .spec;
+        assert_eq!(
+            committed, narrowed,
+            "restart must not restore the inflated cap"
+        );
+        let state = reloaded.rebuild_state().unwrap();
+        assert_eq!(
+            state.tasks[&task_key(&report.run_id.0, "task-a")]
+                .entry
+                .attempts,
+            2
+        );
     }
 
     #[cfg(unix)]

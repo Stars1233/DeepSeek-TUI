@@ -166,10 +166,15 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
                 "help hint",
                 crate::tui::shell_key_routing::info_help_hint(app.ui_locale),
             ),
-            ("output rate", "40 avg tok/s".to_string()),
             ("ttft", "ttft 400ms".to_string()),
         ];
         facts.push(("context reading", format!("ctx {pct}%")));
+        if width >= 120 {
+            facts.push(("output rate", "40 avg tok/s".to_string()));
+        } else {
+            // The billing tier takes priority over rate at narrow widths.
+            assert_eq!(count_rows_containing(&rows, "40 avg tok/s"), 0);
+        }
         for (name, needle) in facts {
             if needle.is_empty() {
                 continue;
@@ -189,7 +194,7 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
             .expect("posture bar");
         let metrics = rows
             .iter()
-            .position(|row| row.contains("tok/s"))
+            .position(|row| row.contains("ctx "))
             .expect("metrics line");
         let composer = app
             .viewport

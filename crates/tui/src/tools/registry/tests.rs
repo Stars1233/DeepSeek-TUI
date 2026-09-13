@@ -1656,10 +1656,16 @@ fn agent_tools_with_shell_policy_readonly_exposes_only_run_only_bash() {
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        ["command", "justification", "sandbox_permissions", "timeout"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        [
+            "command",
+            "justification",
+            "read_only",
+            "sandbox_permissions",
+            "timeout"
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     );
     for hidden in ["action", "background", "tty", "stdin", "task_id", "wait"] {
         assert!(bash.input_schema["properties"].get(hidden).is_none());

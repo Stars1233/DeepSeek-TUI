@@ -580,7 +580,7 @@ async fn selected_models_reach_exact_provider_and_off_list_refuses_before_admiss
         .await
         .unwrap_err();
     assert!(
-        error.to_string().contains("outside the selected Pod"),
+        error.to_string().contains("outside the selected Fleet"),
         "{error}"
     );
     assert!(

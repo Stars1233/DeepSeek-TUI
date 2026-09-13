@@ -275,7 +275,43 @@ pub(super) fn compact_roster(
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|agent| compact_row(manager, agent))
+        .map(|agent| {
+            let mut row = compact_row(manager, agent);
+            let total_tokens = row
+                .pointer("/usage/total_tokens")
+                .cloned()
+                .unwrap_or(Value::Null);
+            row["usage"] = json!({"total_tokens": total_tokens});
+            if let Some(record) = manager.worker_records.get(&agent.id) {
+                let mut verification =
+                    json!({"status": text_preview(&record.verification.status, 64)});
+                if !matches!(
+                    record.verification.status.as_str(),
+                    "self_report_only" | "deliverables_present"
+                ) && !record.verification.summary.is_empty()
+                {
+                    verification["summary"] =
+                        json!(text_preview(&record.verification.summary, 160));
+                }
+                if let Some(counts) = row
+                    .pointer("/verification/deliverable_counts")
+                    .filter(|value| value.as_object().is_some_and(|counts| !counts.is_empty()))
+                {
+                    verification["deliverable_counts"] = counts.clone();
+                }
+                row["verification"] = verification;
+            }
+            // The envelope identifies this compact roster. Route and limit
+            // detail remain available on the unchanged addressed projection.
+            let object = row.as_object_mut().expect("row object");
+            for key in ["compact", "terminal", "child_route", "effective_limits"] {
+                object.remove(key);
+            }
+            if object.get("needs_continuation").and_then(Value::as_bool) == Some(false) {
+                object.remove("needs_continuation");
+            }
+            row
+        })
         .collect::<Vec<_>>();
     loop {
         let shown = rows.len();

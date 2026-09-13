@@ -1439,7 +1439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_success_waits_for_children_and_queued_parent_fan_in() {
+    async fn headless_success_waits_for_children_workflow_phases_and_parent_fan_in() {
         let mut engine = mock_engine_handle();
         let mut events = ExecAgentEvents::new(
             engine.handle.clone(),
@@ -1451,6 +1451,7 @@ mod tests {
                 &mut engine.rx_op,
                 SubAgentSettlement {
                     running_children: 1,
+                    running_workflows: 1,
                     pending_completions: 0,
                 },
             )
@@ -1459,6 +1460,16 @@ mod tests {
                 &mut engine.rx_op,
                 SubAgentSettlement {
                     running_children: 0,
+                    running_workflows: 1,
+                    pending_completions: 0,
+                },
+            )
+            .await;
+            reply_to_probe(
+                &mut engine.rx_op,
+                SubAgentSettlement {
+                    running_children: 0,
+                    running_workflows: 0,
                     pending_completions: 1,
                 },
             )
@@ -1591,6 +1602,7 @@ mod tests {
                 &mut engine.rx_op,
                 SubAgentSettlement {
                     running_children: 1,
+                    running_workflows: 0,
                     pending_completions: 0,
                 },
             )

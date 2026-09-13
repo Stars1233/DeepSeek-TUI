@@ -164,8 +164,13 @@ fn missing_declared_deliverable_is_visible_in_terminal_sentinel() {
     assert_eq!(verification.deliverables[0].status, "missing");
     let mut result = manager.get_result(&id).unwrap();
     result.status = SubAgentStatus::Completed;
-    let completion =
-        subagent_completion_with_verification("workspace", &result, None, Some(&verification));
+    let completion = subagent_completion_with_verification(
+        "workspace",
+        &result,
+        None,
+        Some(&verification),
+        None,
+    );
     assert!(completion.payload.contains("deliverable_missing"));
     assert!(completion.payload.contains("report.md"));
 }

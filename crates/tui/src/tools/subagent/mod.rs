@@ -1565,6 +1565,9 @@ pub(crate) struct SubAgentSpawnOptions {
     pub nickname: Option<String>,
     pub fork_context: bool,
     pub token_budget: Option<u64>,
+    /// Host-derived Workflow run id and shared limit. Installed in the worker
+    /// registration transaction, before the child can begin a model request.
+    pub workflow_budget_scope: Option<(String, u64)>,
     /// Optional per-child model-turn override, clamped to the runtime ceiling.
     pub max_steps: Option<u32>,
     /// Optional per-child wall-clock override, clamped to the runtime ceiling.
@@ -1598,6 +1601,8 @@ pub(crate) struct WorkflowTaskSpawnResult {
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowTaskSpawnIdentity {
     pub workflow_run_id: String,
+    /// The host's shared run ceiling; never accepted from task/agent JSON.
+    pub shared_token_budget: Option<u64>,
     pub workflow_phase_id: Option<String>,
     pub workflow_task_label: Option<String>,
     pub workflow_child_index: u32,
@@ -1610,6 +1615,9 @@ pub(crate) struct WorkflowTaskSpawnIdentity {
     /// what makes the Fleet's clamped authority a property of the child that
     /// runs rather than a value recorded next to it.
     pub fleet_authority_fingerprint: Option<String>,
+    /// Host-only member captured from the exact Fleet snapshot. This value is
+    /// never deserialized from tool input or looked up in the selected Fleet.
+    pub exact_fleet_binding: Option<crate::fleet::exact::ExactMemberBinding>,
 }
 
 #[derive(Debug, Clone)]
@@ -2060,7 +2068,24 @@ impl SubAgentCompletion {
     /// same fact survives channel fan-in, transcript persistence, and replay.
     #[must_use]
     pub fn is_high_priority_failure(&self) -> bool {
-        self.payload.contains(r#""event":"subagent.failed""#)
+        // Only the runtime's final receipt classifies the outcome. A child
+        // can quote failure events in an otherwise successful report.
+        let Some(receipt) = self
+            .payload
+            .trim_end()
+            .lines()
+            .next_back()
+            .and_then(|line| line.strip_prefix("<codewhale:subagent.done>"))
+            .and_then(|line| line.strip_suffix("</codewhale:subagent.done>"))
+        else {
+            return false;
+        };
+        serde_json::from_str::<Value>(receipt).is_ok_and(|receipt| {
+            matches!(
+                receipt.get("event").and_then(Value::as_str),
+                Some("subagent.failed" | "workflow.failed")
+            )
+        })
     }
 }
 
@@ -2098,13 +2123,12 @@ impl SubAgentTerminalDeliveryContext {
     /// Publish to every live sink without blocking or awaiting while the
     /// manager owns the terminal claim. The public agent/worker states remain
     /// Running until all three sends have been attempted.
-    fn deliver(&self, result: &SubAgentResult, verification: Option<&AgentRunVerificationSummary>) {
+    fn deliver(&self, manager: &SubAgentManager, result: &SubAgentResult) {
         let report_ref = spill_subagent_final_report(&self.session_id, result);
-        let completion = subagent_completion_with_verification(
+        let completion = manager.completion_from_result_with_ref_for_session(
             &self.session_id,
             result,
             report_ref.as_deref(),
-            verification,
         );
 
         if self.spawn_depth > 0
@@ -5222,6 +5246,13 @@ impl SubAgentManager {
         let Some((scope_id, limit)) = scope else {
             return Ok(None);
         };
+        self.resolve_budget_scope(scope_id, limit).map(Some)
+    }
+
+    fn resolve_budget_scope(&self, scope_id: String, limit: u64) -> Result<AgentUsageBudgetScope> {
+        if scope_id.trim().is_empty() {
+            return Err(anyhow!("Sub-agent token budget scope must not be empty"));
+        }
         let spent = self.aggregate_budget_spent(&scope_id);
         let remaining = limit.saturating_sub(spent);
         if remaining < MIN_SUBAGENT_SPAWN_TOKEN_RESERVE {
@@ -5229,12 +5260,12 @@ impl SubAgentManager {
                 "Sub-agent token budget exhausted for scope {scope_id}: {spent}/{limit} tokens spent, {remaining} remaining. Wait for the parent/Workflow to summarize results or start a fresh agent run."
             ));
         }
-        Ok(Some(AgentUsageBudgetScope {
+        Ok(AgentUsageBudgetScope {
             scope_id,
             limit,
             spent,
             remaining,
-        }))
+        })
     }
 
     /// Follow both delegation and continuation edges. A set makes malformed
@@ -5379,6 +5410,7 @@ impl SubAgentManager {
     }
 
     /// Attach a workflow child to the run-level shared budget pool.
+    #[cfg(test)]
     pub(crate) fn attach_shared_budget_scope(
         &mut self,
         worker_id: &str,
@@ -7004,6 +7036,14 @@ impl SubAgentManager {
         let foreground_child_registration = runtime.foreground_child_registration(&agent_id)?;
         let budget_scope =
             self.resolve_spawn_budget_scope(&agent_id, budget_parent, effective_token_budget)?;
+        // Check the host's run pool while the same manager lock still covers
+        // admission. Per-call and ancestor limits remain independently checked
+        // above and by remaining_worker_tokens throughout the child's lifetime.
+        let workflow_budget_scope = options
+            .workflow_budget_scope
+            .as_ref()
+            .map(|(scope_id, limit)| self.resolve_budget_scope(scope_id.clone(), *limit))
+            .transpose()?;
         let active_names: std::collections::HashSet<String> = self
             .agents
             .values()
@@ -7282,7 +7322,7 @@ impl SubAgentManager {
         agent.owner_session_id = runtime.context.state_namespace.clone();
         agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
         self.register_worker_for_session(worker_spec, &runtime.context.state_namespace);
-        if let Some(scope) = budget_scope {
+        if let Some(scope) = workflow_budget_scope.or(budget_scope) {
             self.attach_budget_scope(&agent_id, scope);
         }
 
@@ -8020,14 +8060,107 @@ impl SubAgentManager {
             .get(agent_id)
             .and_then(|agent| agent.terminal_delivery.clone());
         if let Some(delivery) = delivery {
-            let verification = self
-                .worker_records
-                .get(agent_id)
-                .map(|record| &record.verification);
-            delivery.deliver(&result, verification);
+            delivery.deliver(self, &result);
         }
 
         self.update_from_result_with_persist(agent_id, result, persist_after_commit)
+    }
+
+    /// Project the same measured receipt for live fan-in and channel recovery.
+    /// The existing worker ledger already persists usage and lineage; no cached
+    /// aggregate is stored or folded back into a worker's own usage.
+    pub(crate) fn completion_from_result_with_ref_for_session(
+        &self,
+        owner_session_id: &str,
+        result: &SubAgentResult,
+        report_ref: Option<&str>,
+    ) -> SubAgentCompletion {
+        let verification = self
+            .worker_records
+            .get(&result.agent_id)
+            .filter(|record| record.owner_session_id == owner_session_id)
+            .map(|record| &record.verification);
+        let usage = self
+            .completion_usage(owner_session_id, result)
+            .unwrap_or_else(|| {
+                json!({
+                    "scope": "unavailable", "own": completion_own_tokens(None),
+                    "descendants": null, "subtree": null,
+                })
+            });
+        subagent_completion_with_verification(
+            owner_session_id,
+            result,
+            report_ref,
+            verification,
+            Some(&usage),
+        )
+    }
+
+    fn completion_usage(&self, owner_session_id: &str, result: &SubAgentResult) -> Option<Value> {
+        if owner_session_id.is_empty() {
+            return None;
+        }
+        let owned = self
+            .worker_records
+            .iter()
+            .filter(|(id, record)| {
+                record.owner_session_id == owner_session_id
+                    && id.as_str() == record.spec.worker_id.as_str()
+            })
+            .map(|(id, record)| (id.as_str(), record))
+            .collect::<HashMap<_, _>>();
+        let own = owned.get(result.agent_id.as_str())?;
+        let mut children = HashMap::<&str, Vec<&str>>::new();
+        for (id, record) in &owned {
+            let source = record.spec.launch_manifest.as_ref().filter(|manifest| {
+                // This manifest field identifies the immediate launch owner,
+                // unlike the record's root-conversation owner_session_id.
+                manifest.owner_session == record.spec.parent_run_id.as_deref().unwrap_or("root")
+                    && manifest.child_id.as_str() == *id
+            });
+            for parent in record
+                .spec
+                .parent_run_id
+                .as_deref()
+                .into_iter()
+                .chain(source.and_then(|manifest| manifest.resume_from_agent_id.as_deref()))
+            {
+                if owned.contains_key(parent) {
+                    children.entry(parent).or_default().push(*id);
+                }
+            }
+        }
+        // Older persisted continuations may have only the durable successor
+        // map. Never follow a missing/foreign record as a bridge into a tree.
+        for (source, target) in &self.resume_targets {
+            if owned.contains_key(source.as_str()) && owned.contains_key(target.as_str()) {
+                children.entry(source).or_default().push(target);
+            }
+        }
+        let mut visited = HashSet::new();
+        let mut pending = vec![result.agent_id.as_str()];
+        let mut descendants = Vec::new();
+        let mut active_descendants = 0;
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let record = owned[id];
+            if id != result.agent_id {
+                descendants.push(&record.usage);
+                active_descendants += usize::from(!record.status.is_terminal());
+            }
+            pending.extend(children.get(id).into_iter().flatten().copied());
+        }
+        let descendant_totals = completion_token_totals(&descendants, active_descendants);
+        descendants.push(&own.usage);
+        Some(json!({
+            "scope": "retained_subtree",
+            "own": completion_own_tokens(Some(&own.usage)),
+            "descendants": descendant_totals,
+            "subtree": completion_token_totals(&descendants, active_descendants),
+        }))
     }
 
     /// Commit a claimed natural task result.
@@ -9172,7 +9305,7 @@ impl ToolSpec for AgentTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "For an unpinned role, choose an exact model or provider/model from roster models, plus the session model. A selected Pod constrains task choices to those routes; saved profile and manual role pins remain exact. With no selected models, current-provider overrides remain available."
+                    "description": "For an unpinned role, choose an exact model or provider/model from roster models, plus the session model. A selected Fleet constrains task choices to those routes; saved profile and manual role pins remain exact. With no selected models, current-provider overrides remain available."
                 },
                 "model_strength": {
                     "type": "string",
@@ -9523,9 +9656,14 @@ impl ToolSpec for AgentTool {
             .get("verbose")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let (snapshot, _spawn_metadata) =
-            spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone(), false)
-                .await?;
+        let (snapshot, _spawn_metadata) = spawn_subagent_from_input(
+            input,
+            self.manager.clone(),
+            self.runtime.clone(),
+            false,
+            None,
+        )
+        .await?;
         let worker_record = {
             let manager = self.manager.read().await;
             manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id)
@@ -10030,9 +10168,14 @@ async fn spawn_subagent_from_input(
     manager: SharedSubAgentManager,
     mut runtime: SubAgentRuntime,
     verified_posture_denials: bool,
+    workflow_identity: Option<&WorkflowTaskSpawnIdentity>,
 ) -> Result<(SubAgentResult, WorkflowTaskSpawnMetadata), ToolError> {
+    let exact_fleet_binding =
+        workflow_identity.and_then(|identity| identity.exact_fleet_binding.as_ref());
     apply_session_spawn_defaults(&mut runtime);
-    refresh_spawn_route_sources(&mut runtime);
+    if exact_fleet_binding.is_none() {
+        refresh_spawn_route_sources(&mut runtime);
+    }
     let mut spawn_request = parse_spawn_request(&input)?;
     if !verified_posture_denials {
         // Keep caller restrictions in the inherited context before adding
@@ -10045,8 +10188,14 @@ async fn spawn_subagent_from_input(
         requested_profile: spawn_request.profile.clone(),
         requested_reasoning: subagent_thinking_label(spawn_request.thinking).to_string(),
     };
-    let profile_member =
-        resolve_spawn_route_profile(&runtime, &mut spawn_request, &spawn_roster(&runtime))?;
+    let profile_member = match exact_fleet_binding {
+        Some(binding) => {
+            let member = binding.spawn_profile();
+            apply_spawn_profile(&mut spawn_request, &member)?;
+            Some(member)
+        }
+        None => resolve_spawn_route_profile(&runtime, &mut spawn_request, &spawn_roster(&runtime))?,
+    };
     // Role resolution runs before classification so the bounded-write contract
     // sees the effective role: read-only roles stay ergonomic while a
     // manager/builder role can never acquire an implicit repository-wide
@@ -10088,6 +10237,21 @@ async fn spawn_subagent_from_input(
         true,
     )
     .await?;
+    if let Some(binding) = exact_fleet_binding {
+        let provider = child_runtime.api_config.as_ref().map_or_else(
+            || child_runtime.client.api_provider().as_str().to_string(),
+            |config| config.provider_identity_for(child_runtime.client.api_provider()),
+        );
+        if provider != binding.route.provider_id
+            || child_runtime.model != binding.route.wire_model
+            || codewhale_workflow::EndpointIdentity::from_base_url(child_runtime.client.base_url())
+                != binding.route.endpoint
+        {
+            return Err(ToolError::permission_denied(
+                "The exact Fleet route changed between preflight and spawn; restart the workflow with the current provider configuration.",
+            ));
+        }
+    }
     let effective_model = child_runtime.model.clone();
     let child_route = mint_child_route_receipt(
         &requested_route,
@@ -10279,6 +10443,11 @@ async fn spawn_subagent_from_input(
             nickname: None,
             fork_context,
             token_budget: spawn_request.token_budget,
+            workflow_budget_scope: workflow_identity.and_then(|identity| {
+                identity
+                    .shared_token_budget
+                    .map(|limit| (identity.workflow_run_id.clone(), limit))
+            }),
             max_steps: spawn_request.max_steps,
             wall_time: spawn_request.wall_time,
             write_claim,
@@ -10459,6 +10628,21 @@ pub(crate) async fn spawn_workflow_task(
     mut runtime: SubAgentRuntime,
     identity: WorkflowTaskSpawnIdentity,
 ) -> Result<WorkflowTaskSpawnResult, ToolError> {
+    match (
+        identity.exact_fleet_binding.as_ref(),
+        identity.fleet_authority_fingerprint.as_deref(),
+    ) {
+        (Some(binding), Some(fingerprint))
+            if request.profile.as_deref() == Some(binding.member_id.as_str())
+                && request.role.as_deref() == Some(binding.member_role.as_str())
+                && binding.authority.fingerprint() == fingerprint => {}
+        (None, None) => {}
+        _ => {
+            return Err(ToolError::permission_denied(
+                "The exact Fleet member and its authority receipt do not match at spawn.",
+            ));
+        }
+    }
     // Capture identity fallbacks before consuming `request` fields into the
     // agent-tool input JSON.
     let request_label = request
@@ -10558,6 +10742,7 @@ pub(crate) async fn spawn_workflow_task(
         manager,
         runtime,
         identity.fleet_authority_fingerprint.is_some(),
+        Some(&identity),
     )
     .await?;
     // Prefer the identity values the driver stamped; fall back to task options.
@@ -11235,15 +11420,65 @@ pub(crate) fn subagent_completion_from_result_with_ref(
     subagent_completion_from_result_with_ref_for_session("", result, report_ref)
 }
 
-/// Session-owned completion builder used by live delivery and turn synthesis.
-/// An empty owner is reserved for legacy test helpers and is rejected by the
-/// session-aware engine claim path.
+/// Result-only fixture builder. Production delivery and recovery use the
+/// manager's builder so the persisted ledger supplies descendant coverage.
+#[cfg(test)]
 pub(crate) fn subagent_completion_from_result_with_ref_for_session(
     owner_session_id: &str,
     result: &SubAgentResult,
     report_ref: Option<&str>,
 ) -> SubAgentCompletion {
-    subagent_completion_with_verification(owner_session_id, result, report_ref, None)
+    subagent_completion_with_verification(owner_session_id, result, report_ref, None, None)
+}
+
+fn completion_own_tokens(usage: Option<&AgentRunUsage>) -> Value {
+    json!({
+        "input_tokens": usage.and_then(|usage| usage.input_tokens),
+        "output_tokens": usage.and_then(|usage| usage.output_tokens),
+        "total_tokens": usage.and_then(|usage| usage.total_tokens),
+    })
+}
+
+/// Fixed-size coverage, not a sum of each worker's shared-budget expenditure.
+/// Unknown usage stays null when nothing was reported; an empty subtree is an
+/// actual zero. A partial sum is explicitly labelled known, with its coverage.
+fn completion_token_totals(usages: &[&AgentRunUsage], active_workers: usize) -> Value {
+    let mut totals = json!({"workers": usages.len(), "active_workers": active_workers});
+    for (field, values) in [
+        (
+            "input_tokens",
+            usages
+                .iter()
+                .map(|usage| usage.input_tokens)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "output_tokens",
+            usages
+                .iter()
+                .map(|usage| usage.output_tokens)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "total_tokens",
+            usages
+                .iter()
+                .map(|usage| usage.total_tokens)
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        let reported_workers = values.iter().flatten().count();
+        let sum = values
+            .into_iter()
+            .flatten()
+            .try_fold(0_u64, u64::checked_add);
+        totals[field] = json!({
+            "known": sum.filter(|_| reported_workers > 0 || usages.is_empty()),
+            "reported_workers": reported_workers,
+            "overflow": sum.is_none(),
+        });
+    }
+    totals
 }
 
 fn subagent_completion_with_verification(
@@ -11251,6 +11486,7 @@ fn subagent_completion_with_verification(
     result: &SubAgentResult,
     report_ref: Option<&str>,
     verification: Option<&AgentRunVerificationSummary>,
+    usage: Option<&Value>,
 ) -> SubAgentCompletion {
     let raw = summarize_subagent_result(result);
     let mut evidence_truncated = false;
@@ -11288,16 +11524,24 @@ fn subagent_completion_with_verification(
         ),
         _ => subagent_done_sentinel(&result.agent_id, result, summary_truncated),
     };
-    let sentinel = if let Some(verification) = verification {
+    let sentinel = {
         // Both existing terminal sentinel forms carry the same delivery receipt.
         let opening = sentinel.find('>').expect("terminal sentinel opening");
         let closing = sentinel.rfind("</").expect("terminal sentinel closing");
         let mut payload: Value =
             serde_json::from_str(&sentinel[opening + 1..closing]).expect("terminal sentinel JSON");
-        payload["verification"] = json!(verification);
+        if let Some(verification) = verification {
+            payload["verification"] = json!(verification);
+        }
+        payload["usage"] = usage.cloned().unwrap_or_else(|| {
+            json!({
+                "scope": "worker_only",
+                "own": completion_own_tokens(result.usage.as_ref()),
+                "descendants": null,
+                "subtree": null,
+            })
+        });
         format!("{}{payload}{}", &sentinel[..=opening], &sentinel[closing..])
-    } else {
-        sentinel
     };
     let payload = match evidence_block {
         Some(evidence) => format!("{summary}\n{evidence}\n{sentinel}"),
@@ -13957,6 +14201,17 @@ fn resolve_spawn_profile(
         resolve_spawn_role(request)?;
         return Ok(None);
     }
+    apply_spawn_profile(request, member)?;
+    Ok(Some(member.clone()))
+}
+
+/// Apply an already resolved member through the common posture, pin and
+/// instruction checks. Exact Workflows supply their frozen member here;
+/// ordinary Agent calls still resolve through the selected roster above.
+fn apply_spawn_profile(
+    request: &mut SpawnRequest,
+    member: &crate::fleet::profile::AgentProfile,
+) -> Result<(), ToolError> {
     if let Some(authority) = member.plugin_authority.as_ref() {
         crate::plugins::registry::verify_plugin_component_authority(
             authority, crate::plugins::activation::PluginActivationCapability::Agents,
@@ -14003,7 +14258,7 @@ fn resolve_spawn_profile(
         })?;
     }
     crate::fleet::worker_runtime::append_agent_profile_prompt(&mut request.prompt, member);
-    Ok(Some(member.clone()))
+    Ok(())
 }
 
 fn bind_profile_provider(
@@ -14264,7 +14519,7 @@ fn resolve_spawn_model_selection(
     })
 }
 
-/// Resolve an explicit task choice against the existing selected Pod's routes.
+/// Resolve an explicit task choice against the existing selected Fleet's routes.
 /// No selection preserves current-provider overrides; a broken selection is an
 /// error, never an empty shortlist. Provider identity is matched before model
 /// validation, so a deliberately saved cross-provider route cannot be guessed.
@@ -14364,7 +14619,7 @@ fn bind_shortlisted_task_model(
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(ToolError::invalid_input(format!(
-                "Requested model is outside the selected Pod. Available routes: {choices}. Use action=roster; saved profile pins remain authoritative."
+                "Requested model is outside the selected Fleet. Available routes: {choices}. Use action=roster; saved profile pins remain authoritative."
             )));
         }
         _ => {
@@ -17680,6 +17935,8 @@ const VERIFIER_AGENT_INTRO: &str = concat!(
 // === Tests ===
 
 #[cfg(test)]
+mod completion_usage_tests;
+#[cfg(test)]
 mod delivery_tests;
 #[cfg(test)]
 mod lifecycle_tests;
@@ -17967,7 +18224,7 @@ mod declared_shortlist_tests {
         second.cost.as_mut().unwrap().output = Some(2.0);
         config.custom_models.as_mut().unwrap().push(second);
 
-        // Build the selected Pod through the same mutation API the picker uses.
+        // Build the selected Fleet through the same mutation API the picker uses.
         for model in [upper, lower, "deepseek-v4-flash", "DeepSeek-V4-Flash"] {
             assert!(matches!(
                 add_fleet_model(root.path(), "deepseek", model, &[]).unwrap(),
@@ -18082,7 +18339,7 @@ mod declared_shortlist_tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("outside the selected Pod")
+                .contains("outside the selected Fleet")
         );
         assert!(
             !declared_spawn_model_for_provider(&runtime, "openrouter", lower),

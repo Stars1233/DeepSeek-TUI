@@ -48,7 +48,7 @@ request orchestration explicitly.
 | `auto_start_read_only` | `true` | Read-only plans may start without a write-approval card |
 | `require_approval_for_writes` | `true` | Gates the plan-approval card for writes / elevated starts |
 | `auto_start_child_limit` | `16` | Soft cap on automatic child count |
-| `max_children` / `max_concurrent` / `max_depth` | `1000` / `16` / `2` | Hard ceilings |
+| `max_children` / `max_concurrent` / `max_depth` | `1000` / `16` / `5` | Task count, concurrent children, and plan structure ceilings |
 | `default_token_budget` | `120000` | Shared admission hint; not an exact mid-stream cutoff |
 | `persist_completed_activity` | `true` | Keep completed panel/history activity |
 

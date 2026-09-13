@@ -482,6 +482,178 @@ async fn measured_budget_caps_actual_wire_output_and_accounts_overshoot_without_
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn workflow_scope_precedes_child_admission_and_caps_the_first_request_after_a_yield() {
+    use axum::{Json, Router, routing::post};
+    let _retry = crate::retry_status::test_guard();
+    crate::retry_status::clear();
+    crate::retry_status::clear_rate_limit();
+    let _env = crate::test_support::lock_test_env();
+    let tmp = tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path().join("state"));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let observed = Arc::clone(&requests);
+    let app = Router::new().route("/{*path}", post(move |Json(request): Json<Value>| {
+        let observed = Arc::clone(&observed);
+        async move {
+            observed.lock().unwrap().push(request);
+            Json(json!({
+                "id": "workflow-budget-probe", "model": "deepseek-v4-flash",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "partial evidence"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+            }))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = crate::config::Config {
+        api_key: Some("fixture-key".to_string()),
+        base_url: Some(format!("http://{address}/v1")),
+        ..Default::default()
+    };
+    let manager = Arc::new(RwLock::new(
+        SubAgentManager::new(tmp.path().to_path_buf(), 4).with_launch_concurrency(1),
+    ));
+    let mut runtime = stub_runtime().with_api_config(config.clone());
+    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.manager = Arc::clone(&manager);
+    let gate = manager.read().await.launch_gate.clone();
+    let permit = gate.acquire_owned().await.unwrap();
+    let request: codewhale_workflow_js::TaskRequest = serde_json::from_value(json!({
+        "description": "report", "subagent_type": "scout", "allowed_tools": [],
+        "worktree": false, "token_budget": 100,
+    }))
+    .unwrap();
+    let identity = WorkflowTaskSpawnIdentity {
+        workflow_run_id: "run-first-request-budget".to_string(),
+        shared_token_budget: Some(12),
+        workflow_phase_id: None,
+        workflow_task_label: None,
+        workflow_child_index: 0,
+        fleet_authority_fingerprint: None,
+        exact_fleet_binding: None,
+    };
+    let spawned = spawn_workflow_task(
+        request.clone(),
+        Arc::clone(&manager),
+        runtime.clone(),
+        identity.clone(),
+    )
+    .await
+    .unwrap();
+    // Force the already-scheduled child to poll while admission is held. No
+    // caller-side attachment is performed, even after this scheduling boundary.
+    tokio::task::yield_now().await;
+    let handle = {
+        let mut guard = manager.write().await;
+        assert_eq!(
+            guard.budget_scope_state(&spawned.result.agent_id),
+            Some((0, 12))
+        );
+        assert_eq!(
+            guard.remaining_worker_tokens(&spawned.result.agent_id),
+            Some(12)
+        );
+        assert!(requests.lock().unwrap().is_empty());
+        guard
+            .agents
+            .get_mut(&spawned.result.agent_id)
+            .unwrap()
+            .task_handle
+            .take()
+            .unwrap()
+    };
+    drop(permit);
+    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("budgeted child settles")
+        .expect("child task succeeds");
+    let count = manager.read().await.worker_records.len();
+    let error = spawn_workflow_task(request, Arc::clone(&manager), runtime, identity)
+        .await
+        .expect_err("an exhausted host pool cannot admit another child");
+    assert!(error.to_string().contains("15/12 tokens spent"), "{error}");
+    let guard = manager.read().await;
+    assert_eq!(
+        guard.worker_records.len(),
+        count,
+        "refusal must precede registration"
+    );
+    assert_eq!(guard.budget_spent_for_scope("run-first-request-budget"), 15);
+    assert_eq!(
+        guard.get_result(&spawned.result.agent_id).unwrap().status,
+        SubAgentStatus::BudgetExhausted
+    );
+    server.abort();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "no request after shared exhaustion");
+    assert_eq!(
+        requests[0]
+            .get("max_tokens")
+            .or_else(|| requests[0].get("max_completion_tokens"))
+            .and_then(Value::as_u64),
+        Some(12)
+    );
+}
+
+#[tokio::test]
+async fn workflow_scope_preserves_parent_source_and_per_call_lower_ceilings() {
+    for (parent_cap, source_cap, call_cap, expected) in
+        [(17, 80, 90, 10), (80, 16, 90, 11), (80, 80, 9, 9)]
+    {
+        let tmp = tempdir().unwrap();
+        let manager = Arc::new(RwLock::new(SubAgentManager::new(
+            tmp.path().to_path_buf(),
+            4,
+        )));
+        let mut runtime = stub_runtime().child_runtime();
+        runtime.context = ToolContext::new(tmp.path().to_path_buf());
+        runtime.manager = Arc::clone(&manager);
+        runtime.parent_agent_id = Some("parent".to_string());
+        runtime.cancel_token.cancel(); // inspect admission without a provider request
+        let mut guard = manager.write().await;
+        record(&mut guard, "parent", None, Some(parent_cap), 7);
+        guard.attach_shared_budget_scope("parent", "parent-pool", parent_cap);
+        record(&mut guard, "source", None, Some(source_cap), 5);
+        guard.attach_shared_budget_scope("source", "source-pool", source_cap);
+        let child = guard
+            .spawn_background_with_assignment_options(
+                Arc::clone(&manager),
+                runtime,
+                FleetRole::Scout,
+                "continue".to_string(),
+                SubAgentAssignment::new("continue".to_string(), None),
+                Some(vec![]),
+                SubAgentSpawnOptions {
+                    token_budget: Some(call_cap),
+                    workflow_budget_scope: Some(("workflow-pool".to_string(), 100)),
+                    resume_from_agent_id: Some("source".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(guard.budget_scope_state(&child.agent_id), Some((0, 100)));
+        assert_eq!(
+            guard.remaining_worker_tokens(&child.agent_id),
+            Some(expected)
+        );
+        guard
+            .worker_records
+            .get_mut(&child.agent_id)
+            .unwrap()
+            .usage
+            .total_tokens = Some(expected);
+        assert_eq!(guard.remaining_worker_tokens(&child.agent_id), Some(0));
+        assert_eq!(guard.budget_spent_for_scope("parent-pool"), 7 + expected);
+        assert_eq!(guard.budget_spent_for_scope("source-pool"), 5 + expected);
+        assert_eq!(guard.budget_spent_for_scope("workflow-pool"), expected);
+    }
+}
+
+#[tokio::test]
 async fn root_fork_of_depth_two_leaf_cannot_regain_a_generation() {
     let tmp = tempdir().unwrap();
     let manager = Arc::new(RwLock::new(SubAgentManager::new(
