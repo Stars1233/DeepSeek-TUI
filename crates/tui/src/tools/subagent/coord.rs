@@ -316,10 +316,11 @@ impl AgentsFollowupTool {
     ) -> Result<Value, ToolError> {
         let mut manager = self.manager.write().await;
         let (source, target) = manager
-            .followup_target_for_session(
+            .continuation_target_for_caller(
                 &context.state_namespace,
                 agent_ref,
                 self.caller_agent_id.as_deref(),
+                "agents/followup",
             )
             .map_err(|error| ToolError::invalid_input(error.to_string()))?;
         let snapshot = manager

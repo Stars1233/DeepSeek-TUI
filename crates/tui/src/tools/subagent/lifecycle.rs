@@ -296,6 +296,9 @@ pub(super) fn bounded_detail(
     offset: usize,
     limit: usize,
 ) -> Value {
+    // The typed handle is the retrieval authority, not diagnostic prose.
+    // Large earlier fields must never consume its lookup coordinates.
+    let transcript_handle = value.get("transcript_handle").cloned();
     let mut verification = value.get("verification").cloned().unwrap_or(Value::Null);
     if let Some(verdicts) = verification
         .get_mut("deliverables")
@@ -342,6 +345,12 @@ pub(super) fn bounded_detail(
         );
     }
     object.insert("verification".into(), verification);
+    if let Some(mut handle) = transcript_handle {
+        if let Some(preview) = handle.get("repr_preview").and_then(Value::as_str) {
+            handle["repr_preview"] = json!(text_preview(preview, 160));
+        }
+        object.insert("transcript_handle".into(), handle);
+    }
     object.insert("compact".into(), json!(false));
     object.insert("detail_bounded".into(), json!(true));
     object.insert("detail_offset".into(), json!(offset));

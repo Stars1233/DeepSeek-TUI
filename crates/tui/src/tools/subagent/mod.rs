@@ -5765,7 +5765,8 @@ impl SubAgentManager {
     ) -> Result<SubAgentResult> {
         // Resolution and mutation share this manager write borrow, so an alias
         // cannot be rebound between the owner check and the exact-id action.
-        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        let source = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        let agent_id = self.continuation_target(&source)?;
         let descendants = self
             .agents
             .values()
@@ -6041,24 +6042,25 @@ impl SubAgentManager {
         })
     }
 
-    pub(super) fn followup_target_for_session(
+    pub(super) fn continuation_target_for_caller(
         &self,
         active_session_id: &str,
         agent_ref: &str,
         caller: Option<&str>,
+        action: &str,
     ) -> Result<(String, String)> {
         let source = self.ensure_caller_controls_descendant_for_session(
             active_session_id,
             agent_ref,
             caller,
-            "agents/followup",
+            action,
         )?;
         let target = self.continuation_target(&source)?;
         self.ensure_caller_controls_descendant_for_session(
             active_session_id,
             &target,
             caller,
-            "agents/followup",
+            action,
         )?;
         Ok((source, target))
     }
@@ -6070,8 +6072,8 @@ impl SubAgentManager {
     /// The interrupted terminal record stays immutable — receipts are never
     /// rewritten — so the resumed session runs under a new agent id, matching
     /// the existing "re-dispatch using checkpoint {handle}" guidance. Step and
-    /// token budgets are not stored in the checkpoint and are not restored;
-    /// the resumed loop starts with the runtime's defaults.
+    /// token allowances come from the saved worker and its lineage; a new
+    /// runtime cannot reset the original child's remaining limits.
     ///
     /// Callers must hold the manager write lock (same contract as
     /// `spawn_background_with_assignment_options`); `manager_handle` is passed
@@ -6431,7 +6433,12 @@ impl SubAgentManager {
         caller_agent_id: Option<&str>,
         reason: String,
     ) -> Result<(SubAgentResult, SubAgentResult)> {
-        let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
+        let (_, agent_id) = self.continuation_target_for_caller(
+            active_session_id,
+            agent_ref,
+            caller_agent_id,
+            "agents/interrupt",
+        )?;
         self.interrupt_child(&agent_id, caller_agent_id, reason)
     }
 
@@ -7550,7 +7557,8 @@ impl SubAgentManager {
         else {
             return Ok(agent_id);
         };
-        if caller == agent_id {
+        let caller_identity = self.continuation_target(caller)?;
+        if caller_identity == self.continuation_target(&agent_id)? {
             return Err(anyhow!(
                 "Refusing {action} on self (agent_id '{agent_id}'); child coordination authority is limited to strict descendants."
             ));
@@ -7569,11 +7577,19 @@ impl SubAgentManager {
             else {
                 break;
             };
-            if parent_ref == caller {
-                return Ok(agent_id);
-            }
             if parent_ref == "root" {
                 break;
+            }
+            // The original parent edge is immutable. A resumed parent owns
+            // the same descendants through the explicit continuation map;
+            // deliberate start+resume_from forks grant no such authority.
+            let parent_identity = if self.agents.contains_key(parent_ref) {
+                self.continuation_target(parent_ref)?
+            } else {
+                parent_ref.to_string()
+            };
+            if parent_identity == caller_identity {
+                return Ok(agent_id);
             }
             let Some((parent_id, _)) = self.worker_record_by_ref(parent_ref) else {
                 break;
@@ -9719,7 +9735,7 @@ async fn cancel_agent_from_input(
     let (snapshot, worker_record) = {
         let mut manager = manager.write().await;
         manager
-            .ensure_caller_controls_descendant_for_session(
+            .continuation_target_for_caller(
                 &context.state_namespace,
                 &agent_ref,
                 caller_agent_id,

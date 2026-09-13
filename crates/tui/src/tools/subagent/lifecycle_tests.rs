@@ -499,3 +499,136 @@ async fn lifecycle_continuation_persist_failure_rolls_back_worker_and_link() {
         SubAgentStatus::Interrupted(_)
     ));
 }
+
+#[tokio::test]
+async fn lifecycle_cancel_original_stops_its_continuation_and_existing_descendants() {
+    let dir = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 5);
+    let (source, _) =
+        manager.insert_test_interrupted_continuable_agent("original", dir.path(), prior_messages());
+    let current = manager.insert_test_running_agent("current", dir.path());
+    let child = manager.insert_test_running_agent("existing-child", dir.path());
+    let sibling = manager.insert_test_running_agent("separate-fork", dir.path());
+    manager
+        .resume_targets
+        .insert(source.clone(), current.clone());
+    let record = manager.worker_records.get_mut(&child).unwrap();
+    record.parent_run_id = Some(source.clone());
+    record.spec.parent_run_id = Some(source.clone());
+
+    let cancelled = manager
+        .cancel_agent_for_session("workspace", &source)
+        .unwrap();
+    assert_eq!(cancelled.agent_id, current);
+    assert_eq!(cancelled.status, SubAgentStatus::Cancelled);
+    assert_eq!(
+        manager.get_result(&child).unwrap().status,
+        SubAgentStatus::Cancelled
+    );
+    assert_eq!(
+        manager.get_result(&sibling).unwrap().status,
+        SubAgentStatus::Running
+    );
+    assert!(matches!(
+        manager.get_result(&source).unwrap().status,
+        SubAgentStatus::Interrupted(_)
+    ));
+}
+
+#[tokio::test]
+async fn lifecycle_resumed_parent_controls_existing_descendants_but_never_itself_or_siblings() {
+    let dir = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 5);
+    let (source, _) =
+        manager.insert_test_interrupted_continuable_agent("original", dir.path(), prior_messages());
+    let current = manager.insert_test_running_agent("current", dir.path());
+    let child = manager.insert_test_running_agent("existing-child", dir.path());
+    let sibling = manager.insert_test_running_agent("sibling", dir.path());
+    manager
+        .resume_targets
+        .insert(source.clone(), current.clone());
+    let record = manager.worker_records.get_mut(&child).unwrap();
+    record.parent_run_id = Some(source.clone());
+    record.spec.parent_run_id = Some(source.clone());
+    assert!(
+        manager
+            .continuation_target_for_caller("workspace", &child, Some(&current), "test")
+            .is_ok()
+    );
+    for forbidden in [&source, &current, &sibling] {
+        assert!(
+            manager
+                .continuation_target_for_caller("workspace", forbidden, Some(&current), "test")
+                .is_err()
+        );
+    }
+
+    // A corrupt source→sibling link must not turn source authority into
+    // permission to cancel the unrelated actual successor.
+    manager
+        .resume_targets
+        .insert(child.clone(), sibling.clone());
+    let manager = Arc::new(RwLock::new(manager));
+    assert!(
+        cancel_agent_from_input(
+            &json!({"agent_id": child}),
+            Arc::clone(&manager),
+            &ToolContext::new(dir.path()),
+            Some(&current),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        manager.read().await.get_result(&sibling).unwrap().status,
+        SubAgentStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_detail_budget_keeps_the_transcript_handle_retrievable() {
+    let dir = tempdir().unwrap();
+    let context = ToolContext::new(dir.path());
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 2);
+    let id = manager.insert_test_running_agent("large-checkpoint", dir.path());
+    let messages = (0..20)
+        .map(|_| Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "🐋".repeat(1024),
+                cache_control: None,
+            }],
+        })
+        .collect::<Vec<_>>();
+    manager.agents.get_mut(&id).unwrap().checkpoint = Some(build_subagent_checkpoint(
+        &id, "retained", &messages, 1, true,
+    ));
+    let projection = subagent_session_projection(
+        manager.get_result(&id).unwrap(),
+        false,
+        &context,
+        manager.get_worker_record_for_session("workspace", &id),
+    )
+    .await;
+    let expected = projection.transcript_handle.clone();
+    let detail = lifecycle::bounded_detail(
+        serde_json::to_value(projection).unwrap(),
+        lifecycle::compact_row(&manager, &manager.agents[&id]),
+        0,
+        20,
+    );
+    assert!(serde_json::to_vec(&detail).unwrap().len() <= 32 * 1024);
+    let handle: VarHandle = serde_json::from_value(detail["transcript_handle"].clone()).unwrap();
+    assert_eq!(handle.session_id, expected.session_id);
+    assert_eq!(handle.name, expected.name);
+    assert_eq!(handle.sha256, expected.sha256);
+    assert!(
+        context
+            .runtime
+            .handle_store
+            .lock()
+            .await
+            .get(&handle)
+            .is_some()
+    );
+}
