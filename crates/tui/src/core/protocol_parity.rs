@@ -1059,6 +1059,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             },
         },
         Op::ListSubAgents => wire_op::Op::ListSubAgents,
+        Op::GetSubAgentSettlement { tx: _ } => wire_op::Op::GetSubAgentSettlement,
         Op::CancelSubAgent { agent_id } => wire_op::Op::CancelSubAgent {
             agent_id: agent_id.clone(),
         },
@@ -1521,6 +1522,8 @@ mod tests {
 
     #[test]
     fn protocol_covers_engine_ops() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let settlement_reply = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
         let ops = vec![
             Op::SetGoalStatus {
                 goal_id: None,
@@ -1572,6 +1575,9 @@ mod tests {
                 new_message: "again".into(),
             },
             Op::SetAdvisorEnabled { enabled: true },
+            Op::GetSubAgentSettlement {
+                tx: std::sync::Arc::clone(&settlement_reply),
+            },
             Op::Shutdown,
         ];
 
@@ -1596,6 +1602,19 @@ mod tests {
             serde_json::to_value(ops[8].to_protocol()).unwrap(),
             json!({"kind": "get_session_snapshot"}),
             "reply channels must not leak onto the wire"
+        );
+        let settlement = ops
+            .iter()
+            .find(|op| matches!(op, Op::GetSubAgentSettlement { .. }))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(settlement.to_protocol()).unwrap(),
+            json!({"kind": "get_sub_agent_settlement"}),
+            "the settlement operation must retain its own channel-free protocol twin"
+        );
+        assert!(
+            settlement_reply.lock().unwrap().is_some(),
+            "projection must not consume the host's live response sender"
         );
     }
 
