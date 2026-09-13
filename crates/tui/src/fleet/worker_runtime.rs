@@ -467,6 +467,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         writable_files: Vec::new(),
         coordination_contracts,
         expected_artifact: None,
+        deliverables: Vec::new(),
         token_budget: task_spec
             .budget
             .as_ref()

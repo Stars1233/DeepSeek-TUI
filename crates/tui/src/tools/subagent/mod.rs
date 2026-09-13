@@ -87,9 +87,12 @@ use coord::{
 
 pub mod advisor;
 pub mod coord;
+mod delivery;
 pub mod mailbox;
 mod naming;
 mod worktree;
+
+pub use delivery::{DeliverableVerdict, DeliveryEvidence};
 
 use worktree::{SubAgentWorktreeRequest, prepare_child_workspace};
 #[cfg(test)]
@@ -762,6 +765,8 @@ pub struct AgentRunUsage {
 pub struct AgentRunVerificationSummary {
     pub status: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliverables: Vec<DeliverableVerdict>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -813,6 +818,8 @@ pub struct AgentWorkerRecord {
     /// retried delivery idempotent in both projections after reload.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub usage_source_fingerprints: BTreeSet<String>,
+    #[serde(default)]
+    pub delivery_evidence: DeliveryEvidence,
     #[serde(default = "default_agent_run_verification")]
     pub verification: AgentRunVerificationSummary,
     #[serde(default = "default_agent_run_recommended_action")]
@@ -862,6 +869,19 @@ impl AgentWorkerRecord {
         let artifacts = default_subagent_artifacts(&run_id);
         let follow_up = follow_up_target_for_spec(&spec);
         let takeover = takeover_target_for_spec(&spec);
+        let delivery_evidence = DeliveryEvidence::capture(&spec);
+        let mut verification = default_agent_run_verification();
+        if let Some(manifest) = spec.launch_manifest.as_ref() {
+            verification.deliverables = manifest
+                .deliverables
+                .iter()
+                .map(|path| DeliverableVerdict {
+                    path: path.clone(),
+                    status: "pending".to_string(),
+                    bytes: None,
+                })
+                .collect();
+        }
         let recommended_action =
             recommended_action_for_worker_status(AgentWorkerStatus::Starting, &spec);
         Self {
@@ -874,7 +894,8 @@ impl AgentWorkerRecord {
             artifacts,
             usage: default_agent_run_usage(),
             usage_source_fingerprints: BTreeSet::new(),
-            verification: default_agent_run_verification(),
+            delivery_evidence,
+            verification,
             recommended_action,
             status: AgentWorkerStatus::Starting,
             created_at_ms: now_ms,
@@ -1171,123 +1192,8 @@ fn default_agent_run_verification() -> AgentRunVerificationSummary {
         summary:
             "No verified command or test receipt is attached; treat the result summary as a child self-report."
                 .to_string(),
+        deliverables: Vec::new(),
     }
-}
-
-/// Compare a completed child's claimed changed-files against `git status`
-/// in its workspace (R7, finish-operator 2026-08-02). The morning report
-/// caught a child claiming edits git had never seen — by hand. Extraction
-/// is deliberately conservative to keep taint high-signal: only path-like
-/// tokens on a line that also carries a change verb count as claims, and a
-/// claim is a mismatch only when git shows the path untouched. Returns
-/// `None` when there is nothing to dispute (no git, no claims, all claims
-/// visible in the status).
-fn claimed_diff_taint(
-    summary: &str,
-    workspace: &Path,
-    worker_started_at_ms: Option<u64>,
-) -> Option<AgentRunVerificationSummary> {
-    const CHANGE_VERBS: [&str; 14] = [
-        "changed",
-        "modified",
-        "updated",
-        "edited",
-        "wrote",
-        "rewrote",
-        "created",
-        "added",
-        "deleted",
-        "removed",
-        "renamed",
-        "fixed",
-        "patched",
-        "implemented",
-    ];
-
-    let status_output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .args(["status", "--porcelain"])
-        // Read-only probe: never take the index lock in the user's repo
-        // (#5617).
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .ok()?;
-    if !status_output.status.success() {
-        return None;
-    }
-    let mut dirty: std::collections::HashSet<String> =
-        String::from_utf8_lossy(&status_output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let entry = line.get(3..)?.trim();
-                // Renames report "old -> new"; the new path is the claimable one.
-                let path = entry.rsplit(" -> ").next().unwrap_or(entry);
-                Some(path.trim_matches('"').to_string())
-            })
-            .collect();
-    // A child that committed its work leaves git status clean; files changed
-    // by commits made after the worker started are visible claims too.
-    if let Some(started_ms) = worker_started_at_ms
-        && let Some(since) =
-            chrono::DateTime::from_timestamp_millis(i64::try_from(started_ms).unwrap_or(i64::MAX))
-        && let Ok(log_output) = std::process::Command::new("git")
-            .arg("-C")
-            .arg(workspace)
-            .args([
-                "log",
-                "--name-only",
-                "--pretty=format:",
-                &format!("--since={}", since.to_rfc3339()),
-            ])
-            .output()
-        && log_output.status.success()
-    {
-        dirty.extend(
-            String::from_utf8_lossy(&log_output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string),
-        );
-    }
-
-    let mut mismatched: Vec<String> = Vec::new();
-    for line in summary.lines() {
-        let words: std::collections::HashSet<String> = line
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .map(str::to_ascii_lowercase)
-            .collect();
-        if !CHANGE_VERBS.iter().any(|verb| words.contains(*verb)) {
-            continue;
-        }
-        for token in line.split_whitespace() {
-            let token = token.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '/'));
-            // Path-shaped: has a directory separator and an extension-ish dot.
-            if !token.contains('/') || !token.contains('.') || token.len() < 4 {
-                continue;
-            }
-            let claimed = token.trim_start_matches("./").to_string();
-            if dirty.contains(&claimed) {
-                continue;
-            }
-            // A tracked-and-clean or nonexistent path claimed as changed is
-            // the mismatch; a dirty or renamed path is a visible claim.
-            if !mismatched.contains(&claimed) {
-                mismatched.push(claimed);
-            }
-        }
-    }
-    if mismatched.is_empty() {
-        return None;
-    }
-    Some(AgentRunVerificationSummary {
-        status: "claim_mismatch".to_string(),
-        summary: format!(
-            "Result claims changed file(s) that git status does not show at delivery: {}. Treat the self-report as unverified and inspect the transcript.",
-            mismatched.join(", ")
-        ),
-    })
 }
 
 fn default_agent_run_recommended_action() -> AgentRunRecommendedAction {
@@ -1653,6 +1559,7 @@ pub(crate) struct SubAgentSpawnOptions {
     pub write_claim: Option<WriteScopeClaim>,
     pub isolated_worktree: bool,
     pub expected_artifact: Option<String>,
+    pub deliverables: Vec<String>,
     /// Source agent id this child continues, stamped into the ChildLaunchManifest
     /// for receipt traceability.
     pub resume_from_agent_id: Option<String>,
@@ -1897,6 +1804,7 @@ struct SpawnRequest {
     /// Declared expected artifact. Surfaced to the child in its prompt so the
     /// contract the spawner declared is visible to the agent doing the work.
     expected_artifact: Option<String>,
+    deliverables: Vec<String>,
     /// Expected mutation boundary. Write-capable launches without an explicit
     /// root, exact file, or named contract default to the parent workspace
     /// root (`"."`). Escalation outside the parent workspace is refused.
@@ -2171,12 +2079,13 @@ impl SubAgentTerminalDeliveryContext {
     /// Publish to every live sink without blocking or awaiting while the
     /// manager owns the terminal claim. The public agent/worker states remain
     /// Running until all three sends have been attempted.
-    fn deliver(&self, result: &SubAgentResult) {
+    fn deliver(&self, result: &SubAgentResult, verification: Option<&AgentRunVerificationSummary>) {
         let report_ref = spill_subagent_final_report(&self.session_id, result);
-        let completion = subagent_completion_from_result_with_ref_for_session(
+        let completion = subagent_completion_with_verification(
             &self.session_id,
             result,
             report_ref.as_deref(),
+            verification,
         );
 
         if self.spawn_depth > 0
@@ -5525,14 +5434,100 @@ impl SubAgentManager {
         }
     }
 
+    fn verify_worker_delivery(&mut self, worker_id: &str, result: &SubAgentResult) {
+        let Some(record) = self.worker_records.get(worker_id) else {
+            return;
+        };
+        if record.delivery_evidence.checked || result.status == SubAgentStatus::Running {
+            return;
+        }
+        let workspace = &record.spec.workspace;
+        let changed = record.delivery_evidence.changed_paths(workspace);
+        let owned_changes = changed
+            .as_ref()
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter(|path| {
+                        self.validate_write_scope(worker_id, std::slice::from_ref(path))
+                            .is_ok()
+                    })
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let mut verification = delivery::verify_changes(
+            result.result.as_deref().unwrap_or_default(),
+            record.spec.runtime_profile.permissions.write,
+            &record.delivery_evidence,
+            changed.as_ref(),
+            &owned_changes,
+            &record
+                .spec
+                .launch_manifest
+                .as_ref()
+                .map(|manifest| manifest.deliverables.iter().cloned().collect())
+                .unwrap_or_default(),
+        )
+        .unwrap_or_else(default_agent_run_verification);
+        let paths = record
+            .spec
+            .launch_manifest
+            .as_ref()
+            .map(|manifest| manifest.deliverables.as_slice())
+            .unwrap_or_default();
+        verification.deliverables = paths
+            .iter()
+            .map(|path| {
+                let allowed = record.spec.runtime_profile.permissions.write
+                    && self
+                        .validate_write_scope(worker_id, std::slice::from_ref(path))
+                        .is_ok();
+                delivery::check_deliverable(workspace, path, allowed)
+            })
+            .collect();
+        let missing = verification
+            .deliverables
+            .iter()
+            .filter(|verdict| verdict.status != "present")
+            .map(|verdict| format!("{} ({})", verdict.path, verdict.status))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let prior = if verification.status == "claim_mismatch" {
+                format!(" {}", verification.summary)
+            } else {
+                String::new()
+            };
+            verification.status = "deliverable_missing".to_string();
+            verification.summary = format!(
+                "Declared deliverables not produced as non-empty files in the worker write scope: {}.{prior}",
+                missing.join(", ")
+            );
+        } else if !paths.is_empty() && verification.status == "self_report_only" {
+            verification.status = "deliverables_present".to_string();
+            verification.summary = "Declared files exist and are non-empty inside the worker write scope; their contents remain a worker self-report.".to_string();
+        }
+        if let Some(record) = self.worker_records.get_mut(worker_id) {
+            record.verification = verification;
+            record.delivery_evidence.checked = true;
+        }
+    }
+
     fn complete_worker_from_result(&mut self, worker_id: &str, result: &SubAgentResult) {
+        self.verify_worker_delivery(worker_id, result);
         let status = worker_status_from_subagent_result(result);
         let message = match &result.status {
             SubAgentStatus::Completed => Some("completed".to_string()),
             SubAgentStatus::Failed(err) => Some(err.clone()),
             SubAgentStatus::Interrupted(reason) => Some(reason.clone()),
             SubAgentStatus::Cancelled => Some("cancelled".to_string()),
-            SubAgentStatus::BudgetExhausted => Some("token budget exhausted".to_string()),
+            SubAgentStatus::BudgetExhausted => Some(
+                result
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.reason.clone())
+                    .unwrap_or_else(|| "token budget exhausted".to_string()),
+            ),
             SubAgentStatus::Running => Some("running".to_string()),
         };
         if let Some(record) = self.worker_records.get_mut(worker_id) {
@@ -5544,21 +5539,10 @@ impl SubAgentManager {
                 .checkpoint
                 .as_ref()
                 .is_some_and(|checkpoint| checkpoint.parked_at_turn_end);
-            if let SubAgentStatus::Failed(err) = &result.status {
-                record.error = Some(err.clone());
-            }
-            // R7 (finish-operator 2026-08-02): a completed child's claimed
-            // changed-files are checked against `git status` in its own
-            // workspace at terminal delivery. A claim git cannot see taints
-            // the verification summary the worker record already carries —
-            // the parent keeps the result, but labeled, not trusted.
-            if matches!(result.status, SubAgentStatus::Completed)
-                && let Some(summary_text) = result.result.as_deref()
-                && let Some(workspace) = result.workspace.as_deref()
-                && let Some(taint) =
-                    claimed_diff_taint(summary_text, workspace, Some(record.created_at_ms))
-            {
-                record.verification = taint;
+            match &result.status {
+                SubAgentStatus::Failed(err) => record.error = Some(err.clone()),
+                SubAgentStatus::BudgetExhausted => record.error = message.clone(),
+                _ => {}
             }
         }
         self.record_worker_event(worker_id, status, message, Some(result.steps_taken), None);
@@ -6725,6 +6709,29 @@ impl SubAgentManager {
             }
         };
         let write_capable = runtime_profile.permissions.write;
+        let delivery_paths =
+            delivery::declared_paths(&options.deliverables, options.expected_artifact.as_deref())
+                .map_err(anyhow::Error::msg)?;
+        for path in &delivery_paths {
+            delivery::safe_deliverable_path(&agent.workspace, path).map_err(anyhow::Error::msg)?;
+            let claimed_path = if options.claim_pre_namespaced && !options.isolated_worktree {
+                let prefix = coordination_workspace_prefix(&self.workspace, &agent.workspace)
+                    .map_err(anyhow::Error::msg)?;
+                namespace_coordination_path(&prefix, path).map_err(anyhow::Error::msg)?
+            } else {
+                path.clone()
+            };
+            if !write_capable
+                || !options
+                    .write_claim
+                    .as_ref()
+                    .is_some_and(|claim| claim.contains_path(&claimed_path))
+            {
+                return Err(anyhow!(
+                    "deliverable {path:?} is outside the worker write scope; declare an exact_files entry or a containing write_roots path"
+                ));
+            }
+        }
         if write_capable {
             // Isolated-worktree children mutate their own checkout, so they
             // do not contend for the shared-workspace process lock (#5036).
@@ -6859,6 +6866,7 @@ impl SubAgentManager {
                     .map(|record| record.claim.contracts.clone())
                     .unwrap_or_default(),
                 expected_artifact: options.expected_artifact.clone(),
+                deliverables: delivery_paths.clone(),
                 token_budget: options.token_budget,
                 resume_identity: Some(agent.session_name.clone()),
                 generation: 1,
@@ -7567,12 +7575,17 @@ impl SubAgentManager {
             handle.abort();
         }
 
+        self.verify_worker_delivery(agent_id, &result);
         let delivery = self
             .agents
             .get(agent_id)
             .and_then(|agent| agent.terminal_delivery.clone());
         if let Some(delivery) = delivery {
-            delivery.deliver(&result);
+            let verification = self
+                .worker_records
+                .get(agent_id)
+                .map(|record| &record.verification);
+            delivery.deliver(&result, verification);
         }
 
         self.update_from_result_with_persist(agent_id, result, persist_after_commit)
@@ -9743,6 +9756,7 @@ async fn spawn_subagent_from_input(
             write_claim,
             isolated_worktree: spawn_request.worktree.is_some(),
             expected_artifact: spawn_request.expected_artifact.clone(),
+            deliverables: spawn_request.deliverables.clone(),
             resume_from_agent_id: resume_from_agent_id.clone(),
             claim_pre_namespaced: false,
             preserve_runtime_profile: None,
@@ -9781,6 +9795,14 @@ fn assemble_spawn_prompt(request: &SpawnRequest, resident: Option<&ResidentConte
             format!("{prompt}\n\nExpected artifact (declared by the spawner): {artifact}")
         }
         None => prompt,
+    };
+    let prompt = if request.deliverables.is_empty() {
+        prompt
+    } else {
+        format!(
+            "{prompt}\n\nRequired file deliverables (checked at completion): {}",
+            request.deliverables.join(", ")
+        )
     };
     if request.dependencies.is_empty() && request.acceptance.is_empty() {
         return prompt;
@@ -10630,6 +10652,15 @@ pub(crate) fn subagent_completion_from_result_with_ref_for_session(
     result: &SubAgentResult,
     report_ref: Option<&str>,
 ) -> SubAgentCompletion {
+    subagent_completion_with_verification(owner_session_id, result, report_ref, None)
+}
+
+fn subagent_completion_with_verification(
+    owner_session_id: &str,
+    result: &SubAgentResult,
+    report_ref: Option<&str>,
+    verification: Option<&AgentRunVerificationSummary>,
+) -> SubAgentCompletion {
     let raw = summarize_subagent_result(result);
     let mut evidence_truncated = false;
     let evidence_block = match &result.status {
@@ -10656,10 +10687,26 @@ pub(crate) fn subagent_completion_from_result_with_ref_for_session(
     let summary_truncated = truncated || evidence_truncated;
     let sentinel = match &result.status {
         SubAgentStatus::Failed(error) => subagent_failed_sentinel(result, error),
-        SubAgentStatus::BudgetExhausted => {
-            subagent_failed_sentinel(result, "child token budget exhausted")
-        }
+        SubAgentStatus::BudgetExhausted => subagent_failed_sentinel(
+            result,
+            result
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.reason.as_str())
+                .unwrap_or("child token budget exhausted"),
+        ),
         _ => subagent_done_sentinel(&result.agent_id, result, summary_truncated),
+    };
+    let sentinel = if let Some(verification) = verification {
+        // Both existing terminal sentinel forms carry the same delivery receipt.
+        let opening = sentinel.find('>').expect("terminal sentinel opening");
+        let closing = sentinel.rfind("</").expect("terminal sentinel closing");
+        let mut payload: Value =
+            serde_json::from_str(&sentinel[opening + 1..closing]).expect("terminal sentinel JSON");
+        payload["verification"] = json!(verification);
+        format!("{}{payload}{}", &sentinel[..=opening], &sentinel[closing..])
+    } else {
+        sentinel
     };
     let payload = match evidence_block {
         Some(evidence) => format!("{summary}\n{evidence}\n{sentinel}"),
@@ -12842,6 +12889,24 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .map(str::trim)
         .filter(|artifact| !artifact.is_empty())
         .map(str::to_string);
+    if input
+        .get("deliverables")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str().is_some_and(|path| path.trim().is_empty()))
+        })
+    {
+        return Err(ToolError::invalid_input(
+            "deliverables paths must be non-empty",
+        ));
+    }
+    let deliverables = delivery::declared_paths(
+        &parse_bounded_strings(input, "deliverables", delivery::MAX_DELIVERABLES)?,
+        expected_artifact.as_deref(),
+    )
+    .map_err(ToolError::invalid_input)?;
     let write_authority_str = optional_input_str(input, &["write_authority", "writeAuthority"])?;
     if deliberate {
         let has_type = agent_type_explicit || profile.is_some();
@@ -12852,7 +12917,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         if workspace_policy_str.is_none() && worktree.is_none() {
             missing.push("workspace_policy (or worktree=true)");
         }
-        if expected_artifact.is_none() {
+        if expected_artifact.is_none() && deliverables.is_empty() {
             missing.push("expected_artifact");
         }
         if write_authority_str.is_none() {
@@ -12956,6 +13021,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         inherit_disallowed_tools,
         write_authority,
         expected_artifact,
+        deliverables,
         write_roots,
         exact_files,
         coordination_contracts,
@@ -13053,7 +13119,9 @@ fn validate_spawn_write_contract(
         && request.exact_files.is_empty()
         && request.coordination_contracts.is_empty()
     {
-        if request.write_authority.is_some() || !allow_prompt_only_general {
+        if !request.deliverables.is_empty() {
+            request.exact_files = request.deliverables.clone();
+        } else if request.write_authority.is_some() || !allow_prompt_only_general {
             // Default write scope to the parent workspace root. Escalation
             // outside the workspace is still refused by path normalization
             // when an explicit scope is declared.
@@ -16304,6 +16372,8 @@ impl SubAgentToolRegistry {
                 .validate_write_scope(&self.owner_agent_id, &paths)
                 .map_err(anyhow::Error::msg)?;
         } else if self.enforce_write_claim
+            // The typed read-only boundary above already rejected mutation.
+            && !self.write_is_denied()
             && !is_internal_coordination_state_tool(name)
             // A shell run the read-only classifier proves mutation-free cannot
             // collide with the peer's writes no matter how contended the
@@ -16342,7 +16412,7 @@ impl SubAgentToolRegistry {
                     manager.live_peer_shared_write_claim_owners(&self.owner_agent_id);
                 if !blocking_peers.is_empty() {
                     return Err(anyhow!(
-                        "Tool {name} cannot prove a bounded file target, and another child is writing in this shared checkout (blocking peers: {}). Wait for the peer to finish, ask the parent to cancel it with agent(action=\"cancel\", agent_id=\"<peer>\"), run agent(action=\"release\") to clear a stale claim, or relaunch the children with worktree isolation.",
+                        "Tool {name} cannot prove a bounded file target or read-only execution while peers are writing in this shared checkout (blocking peers: {}). Use a bounded write tool or a proven read-only command, or run executable work in worktree isolation. Disjoint write_roots alone do not constrain arbitrary code.",
                         blocking_peers.join(", ")
                     ));
                 }
@@ -16353,10 +16423,28 @@ impl SubAgentToolRegistry {
             .context()
             .clone()
             .with_owner_agent(self.owner_agent_id.clone(), self.owner_agent_name.clone());
-        self.registry
+        let observed_paths = if scope_aware_write {
+            mutation_paths(name, &input)?
+        } else {
+            Vec::new()
+        };
+        let outcome = self
+            .registry
             .execute_rich_full_with_context(name, input, Some(&context))
             .await
-            .map_err(|e| anyhow!(e))
+            .map_err(|e| anyhow!(e));
+        if outcome.as_ref().is_ok_and(|outcome| outcome.result.success)
+            && !observed_paths.is_empty()
+        {
+            let mut manager = self.coordination_manager.write().await;
+            if let Some(record) = manager.worker_records.get_mut(&self.owner_agent_id) {
+                record
+                    .delivery_evidence
+                    .observed_writes
+                    .extend(observed_paths);
+            }
+        }
+        outcome
     }
 
     #[cfg(test)]

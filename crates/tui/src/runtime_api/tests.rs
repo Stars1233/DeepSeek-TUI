@@ -2682,9 +2682,11 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             note: "not reported".to_string(),
         },
         usage_source_fingerprints: Default::default(),
+        delivery_evidence: Default::default(),
         verification: AgentRunVerificationSummary {
             status: "self_report_only".to_string(),
             summary: "no verified receipt attached".to_string(),
+            deliverables: Vec::new(),
         },
         recommended_action: AgentRunRecommendedAction {
             action: "verify_self_report".to_string(),

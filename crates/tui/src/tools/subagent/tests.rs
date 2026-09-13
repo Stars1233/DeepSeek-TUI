@@ -235,6 +235,7 @@ fn make_write_worker_spec(worker_id: &str, workspace: PathBuf, root: &str) -> Ag
         writable_files: Vec::new(),
         coordination_contracts: Vec::new(),
         expected_artifact: Some("tested patch".to_string()),
+        deliverables: Vec::new(),
         token_budget: None,
         resume_identity: Some(worker_id.to_string()),
         generation: 1,
@@ -1142,6 +1143,7 @@ fn headless_worker_registration_enforces_live_claims_and_projects_context() {
             writable_files: Vec::new(),
             coordination_contracts: Vec::new(),
             expected_artifact: None,
+            deliverables: Vec::new(),
             token_budget: None,
             resume_identity: Some(format!("fleet-{id}")),
             generation: 1,
@@ -9345,6 +9347,7 @@ async fn shared_write_claim_is_registered_before_parallel_launch_and_manifested(
             contracts: vec!["public-api".into()],
         }),
         expected_artifact: Some("tested patch".into()),
+        deliverables: Vec::new(),
         ..Default::default()
     };
     let (first_id, contention) = {
@@ -12175,24 +12178,9 @@ async fn contended_shared_writer_refusal_names_blocking_peer_and_remediation() {
         err.contains("agent_b"),
         "refusal must name the blocking peer: {err}"
     );
-    // #5906: the remediation must name a surface that exists from here.
-    // `agents/coordinate` left the catalog, so the refusal pointed at a tool
-    // the refused child could not reach.
     assert!(
-        err.contains(r#"agent(action="release")"#) && err.contains("worktree isolation"),
-        "refusal must state concrete remediation: {err}"
-    );
-    assert!(
-        AgentTool::new(
-            new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
-            stub_runtime(),
-        )
-        .input_schema()["properties"]["action"]["enum"]
-            .as_array()
-            .expect("action enum")
-            .iter()
-            .any(|action| action == "release"),
-        "the remediation the refusal names must be a real action on this tool"
+        err.contains("bounded write tool") && err.contains("worktree isolation"),
+        "refusal must state concrete remediation without telling a writer to remove a live peer: {err}"
     );
     assert!(
         !tmp.path().join("src/a2.txt").exists(),
@@ -19970,13 +19958,15 @@ fn completed_claim_of_untouched_file_taints_verification() {
     let tmp = tempdir().expect("tempdir");
     init_claim_repo(tmp.path());
     let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
-    manager.register_worker(make_worker_spec("agent_claims", tmp.path().to_path_buf()));
+    let mut spec = make_worker_spec("agent_claims", tmp.path().to_path_buf());
+    spec.runtime_profile.permissions.write = true;
+    manager.register_worker(spec);
 
     let mut snapshot = make_snapshot(SubAgentStatus::Completed);
     snapshot.agent_id = "agent_claims".to_string();
     snapshot.name = "agent_claims".to_string();
     snapshot.workspace = Some(tmp.path().to_path_buf());
-    snapshot.result = Some("Fixed the bug: updated src/lib.rs and verified the fix.".to_string());
+    snapshot.result = Some("CHANGES: src/lib.rs".to_string());
     manager.complete_worker_from_result("agent_claims", &snapshot);
 
     let record = manager

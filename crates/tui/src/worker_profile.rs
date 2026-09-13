@@ -356,6 +356,8 @@ pub struct ChildLaunchManifest {
     pub coordination_contracts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliverables: Vec<String>,
     pub token_budget: Option<u64>,
     pub resume_identity: Option<String>,
     #[serde(default)]

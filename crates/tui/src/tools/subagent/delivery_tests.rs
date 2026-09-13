@@ -1,0 +1,302 @@
+use super::*;
+use tempfile::tempdir;
+
+fn git(root: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn repository(root: &Path) {
+    git(root, &["init", "--quiet"]);
+    git(root, &["config", "user.name", "Delivery test"]);
+    git(root, &["config", "user.email", "delivery@example.invalid"]);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), "baseline\n").unwrap();
+    git(root, &["add", "--", "src/lib.rs"]);
+    git(root, &["commit", "--quiet", "-m", "baseline"]);
+}
+
+fn worker(root: &Path, write: bool, paths: &[&str], scope: &[&str]) -> (SubAgentManager, String) {
+    let mut manager = SubAgentManager::new(root.to_path_buf(), 2);
+    let id = manager.insert_test_running_agent("delivery", root);
+    let record = manager.worker_records.get_mut(&id).unwrap();
+    record.spec.runtime_profile.permissions.write = write;
+    record.spec.launch_manifest = Some(ChildLaunchManifest {
+        owner_session: "workspace".into(),
+        child_id: id.clone(),
+        profile: record.spec.runtime_profile.clone(),
+        prompt: "produce report".into(),
+        cwd: Some(root.display().to_string()),
+        worktree: false,
+        writable_roots: scope.iter().map(|path| (*path).into()).collect(),
+        writable_files: Vec::new(),
+        coordination_contracts: Vec::new(),
+        expected_artifact: None,
+        deliverables: paths.iter().map(|path| (*path).into()).collect(),
+        token_budget: None,
+        resume_identity: None,
+        generation: 1,
+        resume_from_agent_id: None,
+    });
+    record.delivery_evidence = DeliveryEvidence::capture(&record.spec);
+    if write && !scope.is_empty() {
+        manager
+            .coordination
+            .register_claim(
+                WriteScopeClaim {
+                    owner: id.clone(),
+                    roots: scope.iter().map(|path| (*path).into()).collect(),
+                    exact_files: Vec::new(),
+                    contracts: Vec::new(),
+                },
+                false,
+                |_| false,
+            )
+            .unwrap();
+    }
+    (manager, id)
+}
+
+fn complete(manager: &mut SubAgentManager, id: &str, report: &str) -> AgentRunVerificationSummary {
+    let mut result = manager.get_result(id).unwrap();
+    result.status = SubAgentStatus::Completed;
+    result.result = Some(report.into());
+    manager.complete_worker_from_result(id, &result);
+    manager.worker_records[id].verification.clone()
+}
+
+#[test]
+fn declared_deliverables_narrow_default_scope_and_reject_invalid_input() {
+    let request = parse_spawn_request(&json!({
+        "type": "implement", "prompt": "write outputs", "deliverables": ["tmp/a/report.md", "tmp/b/report.md"]
+    })).unwrap();
+    assert!(request.write_roots.is_empty());
+    assert_eq!(request.exact_files, ["tmp/a/report.md", "tmp/b/report.md"]);
+    for paths in [
+        json!([""]),
+        json!(["../report.md"]),
+        json!(["/tmp/report.md"]),
+        json!([".git/config"]),
+        json!(["."]),
+        json!([1]),
+        json!("report.md"),
+    ] {
+        assert!(
+            parse_spawn_request(
+                &json!({"type":"implement", "prompt":"report", "deliverables": paths})
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        parse_spawn_request(
+            &json!({"type":"implement", "prompt":"report", "deliverables": vec!["x.md"; 17]})
+        )
+        .is_err()
+    );
+    assert!(
+        delivery::declared_paths(&[], Some("review findings"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        delivery::declared_paths(&[], Some("report.md")).unwrap(),
+        ["report.md"]
+    );
+}
+
+#[test]
+fn deliverable_verdict_distinguishes_present_missing_empty_directory_and_scope() {
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join("present.md"), "report").unwrap();
+    fs::write(tmp.path().join("empty.md"), "").unwrap();
+    fs::create_dir(tmp.path().join("directory")).unwrap();
+    for (path, status) in [
+        ("present.md", "present"),
+        ("missing.md", "missing"),
+        ("empty.md", "empty"),
+        ("directory", "not_file"),
+    ] {
+        assert_eq!(
+            delivery::check_deliverable(tmp.path(), path, true).status,
+            status
+        );
+    }
+    assert_eq!(
+        delivery::check_deliverable(tmp.path(), "present.md", false).status,
+        "out_of_scope"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn deliverables_refuse_leaf_and_parent_symlink_escape() {
+    let tmp = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    fs::write(outside.path().join("secret.md"), "outside").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("secret.md"), tmp.path().join("leaf.md"))
+        .unwrap();
+    std::os::unix::fs::symlink(outside.path(), tmp.path().join("linked")).unwrap();
+    for path in ["leaf.md", "linked/secret.md"] {
+        assert_eq!(
+            delivery::check_deliverable(tmp.path(), path, true).status,
+            "invalid_path"
+        );
+        assert!(delivery::safe_deliverable_path(tmp.path(), path).is_err());
+    }
+}
+
+#[test]
+fn missing_declared_deliverable_is_visible_in_terminal_sentinel() {
+    let tmp = tempdir().unwrap();
+    let (mut manager, id) = worker(tmp.path(), true, &["report.md"], &["."]);
+    let verification = complete(&mut manager, &id, "Finished the research.");
+    assert_eq!(verification.status, "deliverable_missing");
+    assert_eq!(verification.deliverables[0].status, "missing");
+    let mut result = manager.get_result(&id).unwrap();
+    result.status = SubAgentStatus::Completed;
+    let completion =
+        subagent_completion_with_verification("workspace", &result, None, Some(&verification));
+    assert!(completion.payload.contains("deliverable_missing"));
+    assert!(completion.payload.contains("report.md"));
+}
+
+#[test]
+fn declared_output_is_not_an_undeclared_edit_and_undeclared_worker_stays_self_reported() {
+    let tmp = tempdir().unwrap();
+    repository(tmp.path());
+    let (mut manager, id) = worker(tmp.path(), true, &["report.md"], &["."]);
+    fs::write(tmp.path().join("report.md"), "findings").unwrap();
+    let verification = complete(&mut manager, &id, "Report ready.");
+    assert_eq!(verification.status, "deliverables_present");
+    assert_eq!(verification.deliverables[0].bytes, Some(8));
+    let (mut manager, id) = worker(tmp.path(), false, &[], &[]);
+    assert_eq!(
+        complete(&mut manager, &id, "No changes.").status,
+        "self_report_only"
+    );
+}
+
+#[test]
+fn change_like_prose_and_line_citations_are_never_edit_claims() {
+    for report in [
+        "Fixed behavior is documented in src/lib.rs:12-19.",
+        "CHANGES: None\nThe added guard is at src/lib.rs:12-19",
+        "CHANGES: src/lib.rs:12-19",
+    ] {
+        assert!(
+            delivery::explicit_change_paths(report).is_empty(),
+            "{report}"
+        );
+    }
+    assert_eq!(
+        delivery::explicit_change_paths("CHANGES:\n- src/lib.rs\n- report.md"),
+        BTreeSet::from(["src/lib.rs".into(), "report.md".into()])
+    );
+    let tmp = tempdir().unwrap();
+    repository(tmp.path());
+    let (mut manager, id) = worker(tmp.path(), false, &[], &[]);
+    assert_eq!(
+        complete(&mut manager, &id, "CHANGES: src/lib.rs").status,
+        "self_report_only"
+    );
+}
+
+#[test]
+fn unchanged_dirty_file_does_not_satisfy_a_new_edit_claim() {
+    let tmp = tempdir().unwrap();
+    repository(tmp.path());
+    fs::write(tmp.path().join("src/lib.rs"), "existing dirty work\n").unwrap();
+    let (mut manager, id) = worker(tmp.path(), true, &[], &["src"]);
+    let verification = complete(&mut manager, &id, "CHANGES: src/lib.rs");
+    assert_eq!(verification.status, "claim_mismatch");
+    assert!(verification.summary.contains("declared but unchanged"));
+    assert!(verification.summary.contains("src/lib.rs"));
+}
+
+#[test]
+fn modification_of_already_dirty_file_is_measured_against_spawn_content() {
+    let tmp = tempdir().unwrap();
+    repository(tmp.path());
+    fs::write(tmp.path().join("src/lib.rs"), "existing dirty work\n").unwrap();
+    let (mut manager, id) = worker(tmp.path(), true, &[], &["src"]);
+    fs::write(
+        tmp.path().join("src/lib.rs"),
+        "worker changed this further\n",
+    )
+    .unwrap();
+    assert_eq!(
+        complete(&mut manager, &id, "CHANGES: src/lib.rs").status,
+        "self_report_only"
+    );
+}
+
+#[test]
+fn committed_change_is_compared_with_exact_spawn_head_without_timestamp_guessing() {
+    let tmp = tempdir().unwrap();
+    repository(tmp.path());
+    let (mut manager, id) = worker(tmp.path(), true, &[], &["src"]);
+    fs::write(tmp.path().join("src/lib.rs"), "worker commit\n").unwrap();
+    git(tmp.path(), &["add", "--", "src/lib.rs"]);
+    git(tmp.path(), &["commit", "--quiet", "-m", "worker"]);
+    assert_eq!(
+        complete(&mut manager, &id, "CHANGES: src/lib.rs").status,
+        "self_report_only"
+    );
+}
+
+#[test]
+fn an_owned_write_without_a_declaration_is_flagged_but_peer_changes_are_not() {
+    let tmp = tempdir().unwrap();
+    repository(tmp.path());
+    let (mut manager, id) = worker(tmp.path(), true, &[], &["src"]);
+    fs::write(tmp.path().join("src/lib.rs"), "new change\n").unwrap();
+    assert_eq!(
+        complete(&mut manager, &id, "CHANGES: None").status,
+        "claim_mismatch"
+    );
+    let (mut manager, id) = worker(tmp.path(), true, &[], &["reports"]);
+    fs::write(tmp.path().join("src/lib.rs"), "peer change\n").unwrap();
+    assert_eq!(
+        complete(&mut manager, &id, "CHANGES: None").status,
+        "self_report_only"
+    );
+}
+
+#[test]
+fn disjoint_sibling_write_paths_admit_and_ancestor_overlap_names_actual_remedy() {
+    let mut ledger = CoordinationLedger::default();
+    let claim = |owner: &str, path: &str| WriteScopeClaim {
+        owner: owner.into(),
+        roots: vec![path.into()],
+        exact_files: Vec::new(),
+        contracts: Vec::new(),
+    };
+    ledger
+        .register_claim(claim("a", "tmp/scan/a"), false, |_| true)
+        .unwrap();
+    ledger
+        .register_claim(claim("b", "tmp/scan/b"), false, |_| true)
+        .unwrap();
+    let error = ledger
+        .register_claim(claim("broad", "tmp/scan"), false, |_| true)
+        .unwrap_err();
+    for text in [
+        "tmp/scan/a",
+        "tmp/scan",
+        "disjoint sibling",
+        "exact_files",
+        "write_authority=read_only",
+    ] {
+        assert!(error.contains(text), "{error}");
+    }
+}
