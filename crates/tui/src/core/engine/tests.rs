@@ -3987,6 +3987,89 @@ async fn started_nonretryable_continuation_failure_blocks_goal_with_bounded_reas
 }
 
 #[tokio::test]
+async fn headless_host_drains_existing_engine_completion_inbox_before_exit() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().unwrap();
+    let config = goal_custom_route_config();
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "child evidence integrated by the existing Engine",
+    )]));
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".into(),
+            terminal_chrome_enabled: false,
+            ..deterministic_engine_config(workspace.path())
+        },
+        &config,
+        mock.clone(),
+    );
+    assert!(engine.subagent_settlement_snapshot().await.is_settled());
+    // Reproduce the host boundary: the parent already ended, and a terminal
+    // child's receipt is waiting for the Engine's normal idle fan-in path.
+    engine
+        .tx_event
+        .send(Event::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await
+        .unwrap();
+    engine
+        .tx_subagent_completion
+        .send(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
+            agent_id: "headless-settled-child".into(),
+            payload: "bounded local fixture evidence".into(),
+        })
+        .unwrap();
+    let pending = engine.subagent_settlement_snapshot().await;
+    assert_eq!(pending.running_children, 0);
+    assert_eq!(pending.pending_completions, 1);
+    assert!(
+        !pending.is_settled(),
+        "terminal child alone cannot release the host"
+    );
+
+    let run = tokio::spawn(engine.run());
+    let mut events = crate::exec_agent::ExecAgentEvents::new(
+        handle.clone(),
+        Instant::now() + model_turn_event_timeout(),
+    );
+    let mut content = String::new();
+    let mut starts = 0;
+    tokio::time::timeout(model_turn_event_timeout(), async {
+        loop {
+            match events.next().await.expect("host event") {
+                Event::TurnStarted { .. } => starts += 1,
+                Event::MessageDelta { content: delta, .. } => content.push_str(&delta),
+                Event::TurnComplete { status, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("bounded headless settlement");
+    assert_eq!(starts, 1, "fan-in uses exactly one existing Engine turn");
+    assert_eq!(mock.call_count(), 1);
+    assert!(content.contains("child evidence integrated"));
+    assert!(!handle.is_cancelled());
+    handle.send(Op::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), run)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 

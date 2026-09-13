@@ -6796,6 +6796,20 @@ impl SubAgentManager {
         self.admitted_count().saturating_sub(self.queued_count())
     }
 
+    /// Live tasks owned by this session, including queued/stalled tasks until
+    /// their real terminal transition. A heartbeat projection is not proof that
+    /// the task or its completion delivery has settled.
+    pub(crate) fn live_count_for_session(&self, active_session_id: &str) -> usize {
+        self.agents
+            .values()
+            .filter(|agent| {
+                agent.status == SubAgentStatus::Running
+                    && agent.task_handle.is_some()
+                    && self.agent_is_owned_by_session(agent, active_session_id)
+            })
+            .count()
+    }
+
     fn check_admission_capacity(&self) -> Result<()> {
         let admitted = self.admitted_count();
         if admitted >= self.max_admitted_agents {

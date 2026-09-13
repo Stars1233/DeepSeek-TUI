@@ -2797,6 +2797,16 @@ impl Engine {
                             );
                         }
                     }
+                    Op::GetSubAgentSettlement { tx } => {
+                        let snapshot = self.subagent_settlement_snapshot().await;
+                        if let Some(tx) = tx
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ = tx.send(snapshot);
+                        }
+                    }
                     Op::CancelSubAgent { agent_id } => {
                         let active_session_id = self.session.id.clone();
                         let result = {
@@ -3298,6 +3308,17 @@ impl Engine {
 
     fn host_managed_turns(&self) -> bool {
         self.config.runtime_services.active_thread_id.is_some()
+    }
+
+    async fn subagent_settlement_snapshot(&self) -> crate::core::ops::SubAgentSettlement {
+        // Terminal delivery enqueues the completion while holding this write
+        // lock, before changing Running to terminal. Keep the read guard until
+        // both observations are captured so no completion can fall in the gap.
+        let manager = self.subagent_manager.read().await;
+        crate::core::ops::SubAgentSettlement {
+            running_children: manager.live_count_for_session(&self.session.id),
+            pending_completions: self.rx_subagent_completion.len(),
+        }
     }
 
     async fn emit_session_updated(&self) {
