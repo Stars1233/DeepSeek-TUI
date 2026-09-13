@@ -594,6 +594,22 @@ fn token_budget_scope_is_shared_across_nested_workers_and_blocks_when_spent() {
     assert_eq!(child_scope.scope_id, "agent_root");
     assert_eq!(child_scope.limit, 100);
     assert_eq!(child_scope.spent, 50);
+    for request in [20, 1_000] {
+        let scope = manager
+            .resolve_spawn_budget_scope("agent_override", Some("agent_root"), Some(request))
+            .expect("a remaining inherited pool still permits a narrowed child")
+            .expect("inherited pool remains present");
+        assert_eq!(
+            scope.scope_id, "agent_root",
+            "a per-call cap cannot reset accounting"
+        );
+        assert_eq!(
+            scope.limit, 100,
+            "the local cap does not replace the aggregate ceiling"
+        );
+        assert_eq!(scope.spent, 50);
+        assert_eq!(scope.remaining, 50);
+    }
     manager.register_worker(child_spec);
     manager.attach_budget_scope("agent_child", child_scope);
     manager.record_worker_usage(
@@ -623,13 +639,15 @@ fn token_budget_scope_is_shared_across_nested_workers_and_blocks_when_spent() {
         "actionable exhaustion error: {err}"
     );
 
-    let override_scope = manager
-        .resolve_spawn_budget_scope("agent_override", Some("agent_child"), Some(20))
-        .expect("explicit override starts new scope")
-        .expect("override budget present");
-    assert_eq!(override_scope.scope_id, "agent_override");
-    assert_eq!(override_scope.limit, 20);
-    assert_eq!(override_scope.spent, 0);
+    for request in [20, 1_000] {
+        let error = manager
+            .resolve_spawn_budget_scope("agent_override", Some("agent_child"), Some(request))
+            .expect_err("neither a lower nor a higher local cap can escape an exhausted pool");
+        assert!(
+            error.to_string().contains("scope agent_root: 100/100"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -5316,7 +5334,9 @@ fn spawn_request_parses_token_budget_override() {
     }))
     .expect_err("zero budget is invalid in tool input");
     assert!(
-        err.to_string().contains("must be greater than zero"),
+        err.to_string()
+            .contains("token_budget must be an integer greater than zero")
+            && err.to_string().contains("omit it to inherit"),
         "clear token budget error: {err}"
     );
 }
@@ -5963,7 +5983,7 @@ fn agent_tool_schema_bounds_fields_by_explicit_action() {
     for action in ["message", "followup"] {
         assert_eq!(branch(action)["required"], json!(["message"]));
     }
-    for action in ["peek", "message", "followup", "interrupt", "cancel"] {
+    for action in ["peek", "message", "interrupt", "cancel"] {
         assert_eq!(
             branch(action)["anyOf"],
             json!([
@@ -5981,6 +6001,50 @@ fn agent_tool_schema_bounds_fields_by_explicit_action() {
     for action in ["roster", "status", "wait"] {
         assert!(branch(action).get("required").is_none());
         assert!(branch(action).get("anyOf").is_none());
+    }
+
+    // Followup now has three mutually exclusive target forms. Exercise the
+    // actual contract both before and after the generic provider sanitizer;
+    // required-only `not` branches used to be pruned into an impossible schema.
+    let mut generic = agent_schema.clone();
+    crate::tools::schema_sanitize::sanitize(&mut generic);
+    for (provider, schema) in [("canonical", agent_schema), ("generic", generic)] {
+        let validator = draft_2020_validator(&schema);
+        for target in [
+            json!({"agent_id": "child-a"}),
+            json!({"name": "researcher"}),
+            json!({"agent_ids": ["child-a", "child-b"]}),
+            json!({"all_parked": true}),
+        ] {
+            let mut input = json!({"action": "followup", "message": "continue"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(target.as_object().unwrap().clone());
+            assert!(
+                validator.is_valid(&input),
+                "{provider} rejected valid followup: {input}"
+            );
+        }
+        for target in [
+            json!({}),
+            json!({"all_parked": false}),
+            json!({"agent_ids": []}),
+            json!({"agent_ids": ["child-a", "child-a"]}),
+            json!({"agent_id": "child-a", "agent_ids": ["child-b"]}),
+            json!({"name": "researcher", "all_parked": true}),
+            json!({"agent_ids": ["child-a"], "all_parked": true}),
+        ] {
+            let mut input = json!({"action": "followup", "message": "continue"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(target.as_object().unwrap().clone());
+            assert!(
+                !validator.is_valid(&input),
+                "{provider} accepted invalid followup: {input}"
+            );
+        }
     }
 }
 
@@ -6045,6 +6109,26 @@ fn agent_tool_schema_rejects_empty_input_across_provider_forms() {
         assert!(
             validator.is_valid(&json!({"action": "start", "prompt": "inspect this"})),
             "{provider} agent schema must retain an ordinary explicit start"
+        );
+        for target in [
+            json!({"agent_id": "child-a"}),
+            json!({"agent_ids": ["child-a", "child-b"]}),
+            json!({"all_parked": true}),
+        ] {
+            let mut input = json!({"action": "followup", "message": "continue"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(target.as_object().unwrap().clone());
+            assert!(
+                validator.is_valid(&input),
+                "{provider} must retain followup: {input}"
+            );
+        }
+        assert!(
+            !validator
+                .is_valid(&json!({"action": "followup", "message": "continue", "agent_ids": []})),
+            "{provider} must preserve the lower bound on batch targets"
         );
     }
     assert!(
@@ -15403,7 +15487,9 @@ fn summarize_subagent_result_budget_exhaustion_is_actionable_not_raw_done() {
     let empty = make_snapshot(SubAgentStatus::BudgetExhausted);
     let summary = summarize_subagent_result(&empty);
     assert!(
-        summary.contains("retry with a smaller scoped task"),
+        summary.starts_with("Child budget exhausted")
+            && summary.contains("inspect the checkpoint")
+            && summary.contains("split the work"),
         "{summary}"
     );
 }

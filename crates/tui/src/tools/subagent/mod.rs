@@ -9075,20 +9075,30 @@ impl ToolSpec for AgentTool {
     /// One schema advertises the runtime's routing, scope, lifecycle and
     /// narrowing-budget contract. Legacy aliases remain accepted for replay.
     fn input_schema(&self) -> Value {
-        let target_required = json!([
+        // Generic provider sanitization prunes required fields unless the
+        // same schema node declares them. Presence tests inside `not` need
+        // those property stubs too, or every followup branch becomes false.
+        let field_present = |field: &str| {
+            json!({
+                "properties": {(field): {}}, "required": [field]
+            })
+        };
+        let target_required = json!([field_present("agent_id"), field_present("name")]);
+        let followup_targets = json!([
             {
-                "properties": {"agent_id": {}},
-                "required": ["agent_id"]
+                "anyOf": target_required.clone(),
+                "not": {"anyOf": [field_present("agent_ids"), field_present("all_parked")]}
             },
             {
-                "properties": {"name": {}},
-                "required": ["name"]
+                "properties": {"agent_ids": {"uniqueItems": true}},
+                "required": ["agent_ids"],
+                "not": {"anyOf": [field_present("agent_id"), field_present("name"), field_present("all_parked")]}
+            },
+            {
+                "properties": {"all_parked": {"const": true}},
+                "required": ["all_parked"],
+                "not": {"anyOf": [field_present("agent_id"), field_present("name"), field_present("agent_ids")]}
             }
-        ]);
-        let followup_targets = json!([
-            {"anyOf": target_required.clone(), "not": {"anyOf": [{"required": ["agent_ids"]}, {"required": ["all_parked"]}]}},
-            {"required": ["agent_ids"], "not": {"anyOf": [{"required": ["agent_id"]}, {"required": ["name"]}, {"required": ["all_parked"]}]}},
-            {"required": ["all_parked"], "not": {"anyOf": [{"required": ["agent_id"]}, {"required": ["name"]}, {"required": ["agent_ids"]}]}}
         ]);
         json!({
             "type": "object",
@@ -9108,12 +9118,17 @@ impl ToolSpec for AgentTool {
                     "description": "Agent id or session name for any action except start and unscoped status/wait."
                 },
                 "agent_ids": {
-                    "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true,
+                    "type": "array", "minItems": 1, "maxItems": 32,
                     "items": {"type": "string", "minLength": 1},
                     "description": "For followup, a bounded batch of ids. Choose exactly one target form: agent_id/name, agent_ids, or all_parked=true."
                 },
                 "all_parked": {
-                    "type": "boolean", "const": true,
+                    // Kimi MFJS cannot represent boolean const or array
+                    // uniqueness. Keep those action-dependent constraints
+                    // above, where the existing provider pass drops them
+                    // with a limitation note. Runtime validation still owns
+                    // target selection for every provider.
+                    "type": "boolean",
                     "description": "For followup, continue all parked children you control, with individual mappings and errors. Mutually exclusive with ids."
                 },
                 "detail": {
@@ -14734,9 +14749,11 @@ fn parse_optional_bounded_limit(
                 .as_u64()
                 .filter(|value| *value > 0 && *value <= maximum)
                 .ok_or_else(|| {
-                    ToolError::invalid_input(format!(
-                        "{name} must be between 1 and {maximum}; omit it to inherit"
-                    ))
+                    ToolError::invalid_input(if maximum == u64::MAX {
+                        format!("{name} must be an integer greater than zero; omit it to inherit")
+                    } else {
+                        format!("{name} must be between 1 and {maximum}; omit it to inherit")
+                    })
                 })?;
             limit = narrow_optional_limit(limit, Some(parsed));
         }
