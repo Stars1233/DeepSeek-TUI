@@ -12,8 +12,10 @@ Implementation exists for macOS, Windows, Linux and HarmonyOS target devices;
 platform support still depends on the tools, OS grants and actual device
 verification described by the upstream project. A source build is not a
 published or certified release.
-Current launch qualification covers the local macOS candidate. Windows,
-Wayland, HarmonyOS and SSH require separate device and workflow evidence.
+The bundled plugin is enabled on macOS only while Windows and Linux ports
+are being qualified. Their raw input uses the shared desktop; they do not
+yet provide equivalent background control or qualified native installers.
+HarmonyOS and SSH also require separate device and workflow evidence.
 
 ## Included runtime
 
@@ -25,9 +27,9 @@ Use `request_access` to inspect readiness; a loaded plugin alone does not prove
 its OS permissions work.
 
 When the standalone Computer Use helper is registered, it owns local input
-even when Codewhale carries an embedded native helper. Version 0.3.0 adds its
-whale menu, permission setup, a disposable background check and human
-Pause/Stop controls. A registered helper that cannot start causes a clear
+even when Codewhale carries an embedded native helper. Version 0.3.1 keeps its
+whale menu, permission setup, disposable background check and human
+Pause/Stop controls, and retires the daemon when its native owner disappears. A registered helper that cannot start causes a clear
 error; the client does not silently bypass its controls. Without a registered
 standalone app, the included helper remains available under the host's
 permission identity.
