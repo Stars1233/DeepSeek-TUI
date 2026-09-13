@@ -789,6 +789,26 @@ pub enum ViewEvent {
         provider_id: Option<String>,
         model: String,
     },
+    /// Enter on a Fleet editor row: open the standard `/model` picker for
+    /// that row (the editor stays underneath) instead of the editor's own
+    /// inline route list.
+    FleetDetailRoutePickRequested {
+        target: crate::tui::views::fleet_detail::FleetRouteTarget,
+        editor_id: uuid::Uuid,
+    },
+    /// The `/model` picker, opened for a Fleet editor row, resolved a route.
+    /// Carries the row's absolute route — never a diff against the session —
+    /// and the host applies and saves it on the editor still on the stack.
+    /// The picker's `auto` row means "inherit the session route".
+    FleetRoutePicked {
+        target: crate::tui::views::fleet_detail::FleetRouteTarget,
+        editor_id: uuid::Uuid,
+        provider: crate::config::ApiProvider,
+        /// Exact named route for `Custom`; built-in providers leave this unset.
+        provider_id: Option<String>,
+        model: String,
+        reasoning: Option<crate::reasoning_preference::ReasoningEffort>,
+    },
     ModelPickerNeedsAuth {
         provider: crate::config::ApiProvider,
         model: String,

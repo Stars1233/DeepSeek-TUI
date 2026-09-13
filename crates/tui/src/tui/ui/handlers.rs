@@ -1629,6 +1629,87 @@ pub(crate) async fn handle_view_events(
                     }
                 }
             }
+            // Enter on a Fleet editor row: the standard `/model` picker opens
+            // on top of the editor, and its pick comes back below as
+            // `FleetRoutePicked` to land on the editor still on the stack.
+            ViewEvent::FleetDetailRoutePickRequested { target, editor_id } => {
+                let selection = if app.view_stack.top_kind() == Some(ModalKind::FleetDetail)
+                    && let Some(mut editor) = app.view_stack.pop()
+                {
+                    let selection = editor
+                        .as_any_mut()
+                        .downcast_mut::<crate::tui::views::fleet_detail::FleetDetailView>()
+                        .and_then(|view| view.route_selection(editor_id, target));
+                    app.view_stack.push_boxed(editor);
+                    selection
+                } else {
+                    None
+                };
+                if let Some(selection) = selection {
+                    app.view_stack.push(
+                        crate::tui::model_picker::ModelPickerView::new_for_fleet_route(
+                            app, config, target, editor_id, selection,
+                        ),
+                    );
+                }
+            }
+            ViewEvent::FleetRoutePicked {
+                target,
+                editor_id,
+                provider,
+                provider_id,
+                model,
+                reasoning,
+            } => {
+                let provider_key = provider_id.unwrap_or_else(|| provider.as_str().to_string());
+                // The picker's `auto` row is "inherit": the Fleet row follows
+                // the session route again.
+                let pin = (model != "auto").then_some((provider_key, model));
+                if let Some((provider_key, _)) = &pin
+                    && let Some(rejection) =
+                        crate::commands::fleet_provider_rejection(app, config, provider_key)
+                {
+                    // Same gate as `/fleet add` and ⇧F: an unconfigured route
+                    // never enters a team from the picker.
+                    app.set_sticky_status(rejection, StatusToastLevel::Error, None);
+                } else if app.view_stack.top_kind() == Some(ModalKind::FleetDetail)
+                    && let Some(mut boxed) = app.view_stack.pop()
+                {
+                    let outcome = boxed
+                        .as_any_mut()
+                        .downcast_mut::<crate::tui::views::fleet_detail::FleetDetailView>()
+                        .map(|view| {
+                            let (provider, model) = match pin {
+                                Some((provider, model)) => (Some(provider), Some(model)),
+                                None => (None, None),
+                            };
+                            view.apply_picked_route(editor_id, target, provider, model, reasoning)
+                        });
+                    app.view_stack.push_boxed(boxed);
+                    match outcome {
+                        Some(Ok(message)) => {
+                            app.push_status_toast(message, StatusToastLevel::Success, Some(8_000));
+                            sync_fleet_roster(app, config, engine_handle);
+                            refresh_parked_fleet_roster(app, config);
+                        }
+                        Some(Err(reason)) => {
+                            app.set_sticky_status(reason, StatusToastLevel::Error, None);
+                        }
+                        None => {}
+                    }
+                } else {
+                    app.set_sticky_status(
+                        codewhale_localization::tr(
+                            app.ui_locale,
+                            codewhale_localization::MessageId::FleetRoutePickUnavailable,
+                        )
+                        .into_owned(),
+                        StatusToastLevel::Error,
+                        None,
+                    );
+                }
+                app.needs_redraw = true;
+            }
             ViewEvent::FleetStoreChanged { message } => {
                 app.status_message = Some(message);
                 sync_fleet_roster(app, config, engine_handle);
