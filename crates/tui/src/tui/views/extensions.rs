@@ -165,6 +165,8 @@ impl PluginProduct {
                 ],
             ),
             action: None,
+            toggle: None,
+            remove: None,
         }
     }
 }
@@ -211,6 +213,13 @@ pub struct ExtensionItem {
     pub tone: ExtensionTone,
     pub detail: String,
     pub action: Option<ExtensionAction>,
+    /// Reversible on/off toggle for the row (`e`): enable or disable a
+    /// plugin or MCP server without leaving the panel.
+    pub toggle: Option<ExtensionAction>,
+    /// Destructive removal for the row (`d` / Delete / right-click, armed and
+    /// confirmed in two steps). Only MCP servers offer it today; plugins keep
+    /// their reviewed uninstall flow.
+    pub remove: Option<ExtensionAction>,
 }
 
 /// Where a row's command lands when the user activates it.
@@ -578,6 +587,8 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 command: "/hooks edit".into(),
                 disposition: RowActionDisposition::LeavePanel,
             }),
+            toggle: None,
+            remove: None,
         })
         .collect::<Vec<_>>();
     let problems = config
@@ -607,6 +618,8 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 command: "/hooks edit".into(),
                 disposition: RowActionDisposition::LeavePanel,
             }),
+            toggle: None,
+            remove: None,
         })
         .collect::<Vec<_>>();
     let mut groups = Vec::new();
@@ -643,6 +656,8 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     command: "/hooks edit".into(),
                     disposition: RowActionDisposition::LeavePanel,
                 }),
+                toggle: None,
+                remove: None,
             }],
         });
     }
@@ -832,6 +847,33 @@ fn plugin_row_action(
     }
 }
 
+/// The reversible on/off control for a plugin row. A trusted plugin can be
+/// switched off and on from the panel; an untrusted one still goes through
+/// its reviewed trust flow first, so no toggle is offered.
+fn plugin_row_toggle(
+    locale: Locale,
+    plugin: &crate::plugins::types::LoadedPlugin,
+) -> Option<ExtensionAction> {
+    if !plugin.trusted() {
+        return None;
+    }
+    Some(if plugin.enabled {
+        ExtensionAction::Command {
+            // English fallback until the Extensions vocabulary gains a
+            // localized "disable" (#3167 tracks the panel's localization).
+            label: "disable".into(),
+            command: format!("/plugin disable {}", plugin.name()),
+            disposition: RowActionDisposition::InPlace,
+        }
+    } else {
+        ExtensionAction::Command {
+            label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
+            command: format!("/plugin enable {}", plugin.name()),
+            disposition: RowActionDisposition::InPlace,
+        }
+    })
+}
+
 /// How a plugin row reads, using the same ladder as [`plugin_row_action`].
 fn plugin_row_tone(plugin: &crate::plugins::types::LoadedPlugin) -> ExtensionTone {
     let has_error_diagnostics = plugin
@@ -861,6 +903,7 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         };
         let diagnostic_count = plugin.diagnostics.len();
         let action = plugin_row_action(locale, plugin);
+        let toggle = plugin_row_toggle(locale, plugin);
         by_scope[scope].push(ExtensionItem {
             id: plugin.id.as_str().to_string(),
             tone: plugin_row_tone(plugin),
@@ -889,6 +932,8 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 ],
             ),
             action: Some(action),
+            toggle,
+            remove: None,
         });
     }
     let labels = [
@@ -941,6 +986,8 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 command: "/plugin validate".into(),
                 disposition: RowActionDisposition::InPlacePager,
             }),
+            toggle: None,
+            remove: None,
         })
         .collect::<Vec<_>>();
     if !problems.is_empty() {
@@ -1017,6 +1064,8 @@ fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                                 },
                                 detail: plugin.canonical_root.display().to_string(),
                                 action: Some(plugin_row_action(locale, plugin)),
+                                toggle: None,
+                                remove: None,
                             };
                         }
                         let installable =
@@ -1078,6 +1127,8 @@ fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                                         .into_owned(),
                                 })
                             },
+                            toggle: None,
+                            remove: None,
                         }
                     })
                     .collect(),
@@ -1132,6 +1183,8 @@ fn skills_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 command: "/skills".into(),
                 disposition: RowActionDisposition::LeavePanel,
             }),
+            toggle: None,
+            remove: None,
         };
         if let Some(position) = position {
             groups[position].items.push(item);
@@ -1243,6 +1296,27 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     disposition: RowActionDisposition::InPlace,
                 },
             };
+            let command_safe = crate::mcp::mcp_name_is_command_safe(&name);
+            let toggle = command_safe.then(|| {
+                if enabled {
+                    ExtensionAction::Command {
+                        label: "disable".into(),
+                        command: format!("/mcp disable {name}"),
+                        disposition: RowActionDisposition::InPlace,
+                    }
+                } else {
+                    ExtensionAction::Command {
+                        label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
+                        command: format!("/mcp enable {name}"),
+                        disposition: RowActionDisposition::InPlace,
+                    }
+                }
+            });
+            let remove = command_safe.then(|| ExtensionAction::Command {
+                label: "remove".into(),
+                command: format!("/mcp remove {name}"),
+                disposition: RowActionDisposition::InPlace,
+            });
             ExtensionItem {
                 id: name.clone(),
                 tone: match (enabled, initializing, recovery) {
@@ -1288,6 +1362,8 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     },
                 ),
                 action: Some(action),
+                toggle,
+                remove,
             }
         })
         .collect();
@@ -1389,6 +1465,9 @@ pub struct ExtensionsView {
     /// Last time `tick` asked the host for a fresh snapshot. Bounds the poll
     /// so a per-frame tick cannot turn into a rebuild every frame.
     last_poll: std::time::Instant,
+    /// Row id whose removal is armed. A second `d` / Delete / right-click on
+    /// the same row confirms; any navigation or Esc disarms.
+    pending_remove: Option<String>,
 }
 
 impl ExtensionsView {
@@ -1417,6 +1496,7 @@ impl ExtensionsView {
             theme: codewhale_palette::UI_THEME,
             hits: RefCell::new(HitAreas::default()),
             last_poll: std::time::Instant::now(),
+            pending_remove: None,
         };
         // `/mcp` opens on the first server that needs a login, not on that
         // group's heading, so the one key the screen advertises — Enter —
@@ -1482,6 +1562,7 @@ impl ExtensionsView {
     }
 
     fn move_selection(&mut self, delta: isize) {
+        self.pending_remove = None;
         let len = self.visible_entries().len();
         if len == 0 {
             return;
@@ -1489,6 +1570,52 @@ impl ExtensionsView {
         let index = self.active_tab.index();
         self.selected[index] =
             (self.selected[index] as isize + delta).rem_euclid(len as isize) as usize;
+    }
+
+    fn selected_item(&self) -> Option<&ExtensionItem> {
+        let selected = self.selected[self.active_tab.index()];
+        match self.visible_entries().get(selected).copied() {
+            Some(VisibleEntry::Item(_, item)) => Some(item),
+            _ => None,
+        }
+    }
+
+    /// `e`: run the row's reversible on/off command in place.
+    fn toggle_selected(&mut self) -> ViewAction {
+        self.pending_remove = None;
+        match self.selected_item().and_then(|item| item.toggle.as_ref()) {
+            Some(ExtensionAction::Command { command, .. }) => {
+                ViewAction::Emit(ViewEvent::ExecutePanelCommand {
+                    command: command.clone(),
+                    pager_title: None,
+                })
+            }
+            _ => ViewAction::None,
+        }
+    }
+
+    /// `d` / Delete / right-click: arm removal on the first gesture, run the
+    /// row's remove command on the second. Rows without a remove command
+    /// ignore the gesture.
+    fn remove_selected(&mut self) -> ViewAction {
+        let Some((id, command)) = self.selected_item().and_then(|item| match &item.remove {
+            Some(ExtensionAction::Command { command, .. }) => {
+                Some((item.id.clone(), command.clone()))
+            }
+            _ => None,
+        }) else {
+            self.pending_remove = None;
+            return ViewAction::None;
+        };
+        if self.pending_remove.as_deref() == Some(id.as_str()) {
+            self.pending_remove = None;
+            return ViewAction::Emit(ViewEvent::ExecutePanelCommand {
+                command,
+                pager_title: None,
+            });
+        }
+        self.pending_remove = Some(id);
+        ViewAction::None
     }
 
     fn activate_selected(&mut self) -> ViewAction {
@@ -1545,11 +1672,20 @@ impl ExtensionsView {
     }
 
     fn set_tab(&mut self, tab: ExtensionsTab) {
+        self.pending_remove = None;
         self.active_tab = tab;
         self.clamp_selection();
     }
 
     fn selected_status(&self) -> String {
+        if let Some(item) = self.selected_item()
+            && self.pending_remove.as_deref() == Some(item.id.as_str())
+        {
+            return format!(
+                "Remove {}? Press d, Enter or right-click again to confirm · Esc cancels",
+                item.label
+            );
+        }
         let index = self.selected[self.active_tab.index()];
         match self.visible_entries().get(index).copied() {
             Some(VisibleEntry::Group(group)) => localize(
@@ -1631,11 +1767,34 @@ impl ModalView for ExtensionsView {
             }
             return ViewAction::None;
         }
+        if self.pending_remove.is_some()
+            && !matches!(
+                key.code,
+                KeyCode::Char('d') | KeyCode::Delete | KeyCode::Enter | KeyCode::Char('y')
+            )
+        {
+            // Anything but the confirming key disarms a pending removal.
+            self.pending_remove = None;
+            if key.code == KeyCode::Esc {
+                return ViewAction::None;
+            }
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
             KeyCode::Char('/') => {
                 self.focus = ExtensionsFocus::Search;
                 ViewAction::None
+            }
+            KeyCode::Char('e') => {
+                self.focus = ExtensionsFocus::List;
+                self.toggle_selected()
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                self.focus = ExtensionsFocus::List;
+                self.remove_selected()
+            }
+            KeyCode::Char('y') | KeyCode::Enter if self.pending_remove.is_some() => {
+                self.remove_selected()
             }
             // Left/Right and `[`/`]` are the same move for hands that reach
             // for them; the advertised chord is Tab.
@@ -1666,8 +1825,43 @@ impl ModalView for ExtensionsView {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-            return ViewAction::None;
+        match mouse.kind {
+            // The wheel moves this list, not the transcript behind it.
+            MouseEventKind::ScrollUp => {
+                self.pending_remove = None;
+                self.focus = ExtensionsFocus::List;
+                self.move_selection(-1);
+                return ViewAction::None;
+            }
+            MouseEventKind::ScrollDown => {
+                self.pending_remove = None;
+                self.focus = ExtensionsFocus::List;
+                self.move_selection(1);
+                return ViewAction::None;
+            }
+            // Right-click on a row selects it and arms (then confirms) its
+            // removal, the same two-step gesture as `d`.
+            MouseEventKind::Down(MouseButton::Right) => {
+                let row = self
+                    .hits
+                    .borrow()
+                    .rows
+                    .iter()
+                    .find(|(rect, _)| rect.contains((mouse.column, mouse.row).into()))
+                    .map(|(_, row)| *row);
+                let Some(row) = row else {
+                    self.pending_remove = None;
+                    return ViewAction::None;
+                };
+                self.focus = ExtensionsFocus::List;
+                if self.selected[self.active_tab.index()] != row {
+                    self.pending_remove = None;
+                    self.selected[self.active_tab.index()] = row;
+                }
+                return self.remove_selected();
+            }
+            MouseEventKind::Down(MouseButton::Left) => {}
+            _ => return ViewAction::None,
         }
         let hits = self.hits.borrow();
         if let Some((_, tab)) = hits
@@ -1932,6 +2126,14 @@ impl ModalView for ExtensionsView {
         if let Some(label) = enter_label {
             full_hints.push(super::ActionHint::new("Enter", label));
         }
+        if let Some(item) = self.selected_item() {
+            if let Some(toggle) = item.toggle.as_ref() {
+                full_hints.push(super::ActionHint::new("e", toggle.label().to_string()));
+            }
+            if let Some(remove) = item.remove.as_ref() {
+                full_hints.push(super::ActionHint::new("d", remove.label().to_string()));
+            }
+        }
         full_hints.push(super::ActionHint::new(
             "/",
             tr(self.locale, MessageId::SessionsActionSearch),
@@ -2126,6 +2328,8 @@ mod tests {
             tone: ExtensionTone::Attention,
             detail: detail.into(),
             action: Some(action),
+            toggle: None,
+            remove: None,
         }
     }
 
@@ -2248,6 +2452,8 @@ mod tests {
             tone: ExtensionTone::Idle,
             detail: "detail".into(),
             action: Some(action),
+            toggle: None,
+            remove: None,
         }
     }
 

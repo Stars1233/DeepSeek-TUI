@@ -1715,19 +1715,47 @@ async fn start_authorization(
     oauth_client_id: Option<&str>,
 ) -> Result<OAuthState> {
     let Some(client_id) = oauth_client_id.filter(|client_id| !client_id.trim().is_empty()) else {
-        let mut oauth_state = OAuthState::new_with_oauth_http_client(
-            server_url,
-            Arc::new(RecordingOAuthHttpClient::new(client)),
-        )
-        .await?;
-        oauth_state
-            .start_authorization(
-                AuthorizationRequest::new(redirect_uri)
-                    .with_scopes(scopes.iter().copied())
-                    .with_client_name("Codewhale"),
+        let mut attempt_scopes: Vec<String> =
+            scopes.iter().map(|scope| (*scope).to_string()).collect();
+        // Dynamic registration may reject part of the scope list the server
+        // itself advertised (Supabase validates registration scopes against a
+        // narrower allow-list than its `scopes_supported`). Drop exactly the
+        // scopes the server named invalid and retry once; if it named none,
+        // register without scopes so the server applies its defaults.
+        for retried in [false, true] {
+            let mut oauth_state = OAuthState::new_with_oauth_http_client(
+                server_url,
+                Arc::new(RecordingOAuthHttpClient::new(client.clone())),
             )
             .await?;
-        return Ok(oauth_state);
+            let started = oauth_state
+                .start_authorization(
+                    AuthorizationRequest::new(redirect_uri)
+                        .with_scopes(attempt_scopes.iter().map(String::as_str))
+                        .with_client_name("Codewhale"),
+                )
+                .await;
+            match started {
+                Ok(()) => return Ok(oauth_state),
+                Err(error) if !retried && !attempt_scopes.is_empty() => {
+                    let message = error.to_string();
+                    let Some(narrowed) =
+                        scopes_after_registration_rejection(&attempt_scopes, &message)
+                    else {
+                        return Err(error.into());
+                    };
+                    tracing::warn!(
+                        target: "mcp::oauth",
+                        server_url,
+                        dropped = attempt_scopes.len() - narrowed.len(),
+                        "OAuth client registration rejected part of the requested scope list; retrying with the accepted scopes"
+                    );
+                    attempt_scopes = narrowed;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        unreachable!("registration retry loop returns on success or error");
     };
 
     let mut manager = AuthorizationManager::new_with_oauth_http_client(
@@ -1745,6 +1773,40 @@ async fn start_authorization(
     Ok(OAuthState::Session(
         AuthorizationSession::for_scope_upgrade(manager, auth_url, redirect_uri),
     ))
+}
+
+/// Given a registration failure message, return the scopes to retry with, or
+/// `None` when the failure is not about scopes. Servers that validate the
+/// `scope` field report positions like `scope.3: Invalid option`; those exact
+/// entries are dropped. A scope error without positions retries with no
+/// scopes at all, letting the server grant its defaults.
+fn scopes_after_registration_rejection(scopes: &[String], message: &str) -> Option<Vec<String>> {
+    let lower = message.to_ascii_lowercase();
+    if !(lower.contains("registration") && lower.contains("scope")) {
+        return None;
+    }
+    let mut rejected = std::collections::BTreeSet::new();
+    for (start, _) in message.match_indices("scope.") {
+        let digits: String = message[start + "scope.".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(index) = digits.parse::<usize>() {
+            rejected.insert(index);
+        }
+    }
+    let narrowed: Vec<String> = scopes
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !rejected.contains(index))
+        .map(|(_, scope)| scope.clone())
+        .collect();
+    if narrowed.len() == scopes.len() {
+        // The server complained about scopes without naming any position:
+        // the only safe retry is to omit the field.
+        return Some(Vec::new());
+    }
+    Some(narrowed)
 }
 
 fn spawn_callback_server(
@@ -1985,6 +2047,37 @@ impl McpServerConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn registration_rejection_drops_exactly_the_named_scopes() {
+        let scopes: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let message = concat!(
+            "Registration failed: Dynamic registration failed: HTTP 400 Bad Request: ",
+            "{\"message\":\"scope.1: Invalid option: expected one of \\\"a\\\"|\\\"c\\\",",
+            "scope.3: Invalid option\"}"
+        );
+        assert_eq!(
+            super::scopes_after_registration_rejection(&scopes, message),
+            Some(vec!["a".to_string(), "c".to_string()])
+        );
+        // A scope complaint without positions retries without scopes.
+        assert_eq!(
+            super::scopes_after_registration_rejection(
+                &scopes,
+                "Registration failed: invalid scope"
+            ),
+            Some(Vec::new())
+        );
+        // Unrelated registration failures are not retried.
+        assert_eq!(
+            super::scopes_after_registration_rejection(&scopes, "Registration failed: HTTP 500"),
+            None
+        );
+        assert_eq!(
+            super::scopes_after_registration_rejection(&scopes, "network unreachable"),
+            None
+        );
+    }
+
     #[test]
     fn a_refresh_parse_failure_names_the_login_remedy_and_the_server() {
         let text = super::refresh_failure_context("supabase", true, None);
