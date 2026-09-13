@@ -9192,6 +9192,13 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
         }
         object.insert("effective_limits".to_string(), Value::Object(limits));
     }
+    if let Some(paths) = object
+        .get("worker_record")
+        .and_then(|worker| worker.pointer("/spec/launch_manifest/deliverables"))
+        .cloned()
+    {
+        object.insert("deliverables".to_string(), paths);
+    }
     object.remove("worker_record");
     object.remove("checkpoint");
     object.remove("artifacts");

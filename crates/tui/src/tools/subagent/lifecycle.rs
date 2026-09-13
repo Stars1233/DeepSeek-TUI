@@ -100,6 +100,33 @@ pub(super) fn compact_row(manager: &SubAgentManager, agent: &SubAgent) -> Value 
             object.insert("activity".into(), json!(text_preview(message, 96)));
         }
         let mut verification = serde_json::to_value(&record.verification).unwrap_or(Value::Null);
+        if let Some(verdicts) = verification
+            .get_mut("deliverables")
+            .and_then(Value::as_array_mut)
+        {
+            let mut counts = std::collections::BTreeMap::<String, usize>::new();
+            for verdict in verdicts.iter() {
+                *counts
+                    .entry(
+                        verdict
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    )
+                    .or_default() += 1;
+            }
+            verdicts.sort_by_key(|verdict| {
+                matches!(
+                    verdict.get("status").and_then(Value::as_str),
+                    Some("present" | "pending")
+                )
+            });
+            let total = verdicts.len();
+            verification["deliverables_total"] = json!(total);
+            verification["deliverables_omitted"] = json!(total.saturating_sub(4));
+            verification["deliverable_counts"] = json!(counts);
+        }
         bound_detail_value(&mut verification, 0, 4, &mut 1200);
         object.insert("verification".into(), verification);
         if let Some(route) = &record.spec.child_route {
@@ -151,7 +178,9 @@ pub(super) fn compact_row(manager: &SubAgentManager, agent: &SubAgent) -> Value 
             .pointer("/verification/status")
             .cloned()
             .unwrap_or(Value::Null);
-        row["verification"] = json!({"status": status, "detail_required": true});
+        let counts = row.pointer("/verification/deliverable_counts").cloned();
+        let total = row.pointer("/verification/deliverables_total").cloned();
+        row["verification"] = json!({"status": status, "deliverable_counts": counts, "deliverables_total": total, "detail_required": true});
         row.as_object_mut().expect("row object").remove("activity");
     }
     row
@@ -267,6 +296,23 @@ pub(super) fn bounded_detail(
     offset: usize,
     limit: usize,
 ) -> Value {
+    let mut verification = value.get("verification").cloned().unwrap_or(Value::Null);
+    if let Some(verdicts) = verification
+        .get_mut("deliverables")
+        .and_then(Value::as_array_mut)
+    {
+        let total = verdicts.len();
+        *verdicts = std::mem::take(verdicts)
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect();
+        verification["deliverables_total"] = json!(total);
+        verification["deliverables_next_offset"] = (offset.saturating_add(limit) < total)
+            .then_some(offset.saturating_add(limit))
+            .map_or(Value::Null, |next| json!(next));
+    }
+    bound_detail_value(&mut verification, 0, limit, &mut 4000);
     // Page the two archives at their actual boundaries, not every content
     // array inside a message, before enforcing the byte budget.
     for pointer in [
@@ -295,6 +341,7 @@ pub(super) fn bounded_detail(
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
     }
+    object.insert("verification".into(), verification);
     object.insert("compact".into(), json!(false));
     object.insert("detail_bounded".into(), json!(true));
     object.insert("detail_offset".into(), json!(offset));

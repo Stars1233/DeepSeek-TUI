@@ -357,3 +357,52 @@ async fn lifecycle_followup_rechecks_actual_successor_authority() {
     );
     assert!(!manager.read().await.child_was_woken(&sibling));
 }
+
+#[tokio::test]
+async fn lifecycle_deliverable_preview_reports_omissions_and_detail_pages_the_full_list() {
+    let dir = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 2);
+    let id = manager.insert_test_running_agent("outputs", dir.path());
+    manager
+        .worker_records
+        .get_mut(&id)
+        .unwrap()
+        .verification
+        .deliverables = (0..9)
+        .map(|index| DeliverableVerdict {
+            path: format!("report-{index}.md"),
+            status: if index == 8 {
+                "missing".into()
+            } else {
+                "present".into()
+            },
+            bytes: (index != 8).then_some(20),
+        })
+        .collect();
+    let compact = lifecycle::compact_row(&manager, &manager.agents[&id]);
+    assert_eq!(compact["verification"]["deliverables_total"], 9);
+    assert_eq!(compact["verification"]["deliverables_omitted"], 5);
+    assert_eq!(compact["verification"]["deliverable_counts"]["missing"], 1);
+    assert_eq!(
+        compact["verification"]["deliverables"][0]["status"],
+        "missing"
+    );
+    let detail = lifecycle::bounded_detail(
+        json!({"verification": manager.worker_records[&id].verification}),
+        compact,
+        4,
+        2,
+    );
+    assert_eq!(
+        detail["verification"]["deliverables"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        detail["verification"]["deliverables"][0]["path"],
+        "report-4.md"
+    );
+    assert_eq!(detail["verification"]["deliverables_next_offset"], 6);
+}
