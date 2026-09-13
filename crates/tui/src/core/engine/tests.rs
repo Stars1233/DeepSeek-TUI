@@ -4174,6 +4174,81 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
 }
 
 #[tokio::test]
+async fn cancellation_during_blocked_idle_handoff_survives_turn_admission() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    for child_completion in [true, false] {
+        let workspace = tempdir().unwrap();
+        let config = goal_custom_route_config();
+        let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+            "must not dispatch after cancellation",
+        )]));
+        let (mut engine, mut handle) = Engine::new_with_model_client(
+            EngineConfig {
+                model: "local-model".into(),
+                terminal_chrome_enabled: false,
+                ..deterministic_engine_config(workspace.path())
+            },
+            &config,
+            mock.clone(),
+        );
+        // Force the handoff to stop at its status send after its initial
+        // cancellation check and before handle_send_message admits a turn.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        engine.tx_event = tx;
+        handle.rx_event = Arc::new(RwLock::new(rx));
+        engine
+            .tx_event
+            .send(Event::status("full".into()))
+            .await
+            .unwrap();
+        let completion = SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
+            agent_id: "cancel-race-child".into(),
+            payload: "retained-after-cancel-race".into(),
+        };
+        let mut wake: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> =
+            if child_completion {
+                Box::pin(engine.handle_idle_subagent_completion(completion))
+            } else {
+                Box::pin(engine.handle_idle_shell_completion_wake())
+            };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut wake)
+                .await
+                .is_err(),
+            "the full event channel must hold the handoff before admission"
+        );
+        handle.cancel_with_reason(CancelReason::External);
+        handle.rx_event.write().await.try_recv().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut wake)
+            .await
+            .expect("cancelled handoff returns without a provider call");
+        drop(wake);
+        assert_eq!(mock.call_count(), 0);
+        assert!(handle.is_cancelled());
+        assert!(engine.delivered_subagent_completion_ids.is_empty());
+        assert_eq!(
+            engine.rx_subagent_completion.len(),
+            usize::from(child_completion)
+        );
+        if child_completion {
+            assert!(
+                engine
+                    .rx_subagent_completion
+                    .try_recv()
+                    .unwrap()
+                    .payload
+                    .contains("retained-after-cancel-race")
+            );
+        }
+        // A new explicit user action still receives a fresh turn control.
+        let _turn = engine.begin_turn_control();
+        assert!(!handle.is_cancelled());
+    }
+}
+
+#[tokio::test]
 async fn cancelled_parent_defers_child_receipts_until_an_explicit_turn() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 

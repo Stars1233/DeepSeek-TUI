@@ -1211,14 +1211,29 @@ impl Engine {
     }
 
     fn begin_turn_control(&mut self) -> handle::TurnControlGuard {
+        self.begin_turn_control_for_provenance(UserInputProvenance::ExternalUser)
+    }
+
+    fn begin_turn_control_for_provenance(
+        &mut self,
+        provenance: UserInputProvenance,
+    ) -> handle::TurnControlGuard {
         let mut controls = self
             .turn_controls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let control = self
-            .admitted_turn_control
-            .take()
-            .unwrap_or_else(|| controls.fresh());
+        let control = self.admitted_turn_control.take().unwrap_or_else(|| {
+            let mut control = controls.fresh();
+            if !provenance.can_authorize_work() {
+                // Idle handoffs are continuations of the existing user
+                // request. Chain cancellation while holding the same
+                // activation lock used by cancel_with_reason, so a cancel
+                // during an earlier status send cannot be reset here.
+                control.cancel = self.cancel_token.child_token();
+                control.reason = Arc::clone(&self.cancel_reason);
+            }
+            control
+        });
         self.cancel_token = control.cancel.clone();
         self.cancel_reason = Arc::clone(&control.reason);
         *self
@@ -3917,6 +3932,13 @@ impl Engine {
             for agent_id in claimed_ids {
                 self.delivered_subagent_completion_ids.remove(&agent_id);
             }
+            if self.cancel_token.is_cancelled() {
+                // Admission lost to cancellation before the transcript took
+                // ownership. Leave these receipts for the next explicit turn.
+                for completion in completions {
+                    let _ = self.tx_subagent_completion.send(completion);
+                }
+            }
         }
     }
 
@@ -4716,7 +4738,11 @@ impl Engine {
                 };
             }
         };
-        let turn_control = self.begin_turn_control();
+        let autonomous = self.admitted_turn_control.is_none() && !provenance.can_authorize_work();
+        let turn_control = self.begin_turn_control_for_provenance(provenance);
+        if autonomous && self.cancel_token.is_cancelled() {
+            return SendMessageOutcome::NotStarted { error: None };
+        }
         let mut goal_objective = goal_objective;
         let mut goal_token_budget = goal_token_budget;
         let mut goal_status = goal_status;
