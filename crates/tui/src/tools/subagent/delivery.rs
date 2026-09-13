@@ -112,7 +112,10 @@ fn fingerprint(root: &Path, relative: &str) -> Option<String> {
         }
         hash.update(&buffer[..count]);
     }
-    Some(format!("sha256:{:x}", hash.finalize()))
+    Some(format!(
+        "sha256:{}",
+        crate::hashing::hex_bytes(hash.finalize())
+    ))
 }
 
 impl DeliveryEvidence {
