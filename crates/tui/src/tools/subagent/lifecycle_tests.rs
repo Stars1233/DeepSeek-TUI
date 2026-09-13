@@ -406,3 +406,70 @@ async fn lifecycle_deliverable_preview_reports_omissions_and_detail_pages_the_fu
     );
     assert_eq!(detail["verification"]["deliverables_next_offset"], 6);
 }
+
+#[tokio::test]
+async fn lifecycle_continuation_link_is_durable_before_the_child_can_run() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let path = base.join(".codewhale/subagents/state.json");
+    let manager = Arc::new(RwLock::new(
+        SubAgentManager::new(base.clone(), 4).with_state_path(path.clone()),
+    ));
+    let (client, calls, _) =
+        super::tests::delayed_chat_client(Duration::from_secs(30), "fixture").await;
+    let mut runtime = super::tests::stub_runtime();
+    runtime.client = client;
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(&base);
+    let mut guard = manager.write().await;
+    let (source, _) =
+        guard.insert_test_interrupted_continuable_agent("durable-source", &base, prior_messages());
+    guard.agents.get_mut(&source).unwrap().model = "deepseek-v4-flash".into();
+    let successor = guard
+        .resume_from_checkpoint(Arc::clone(&manager), runtime, &source, "Continue")
+        .unwrap();
+    // Holding the manager lock keeps run_subagent_task_inner at its first
+    // await. This is the earliest published snapshot, before any child step.
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let persisted: PersistedSubAgentState =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        persisted.resume_targets.get(&source),
+        Some(&successor.agent_id)
+    );
+    assert!(
+        persisted
+            .agents
+            .iter()
+            .any(|agent| agent.id == successor.agent_id)
+    );
+    let _ = guard.cancel_agent(&successor.agent_id);
+}
+
+#[tokio::test]
+async fn lifecycle_continuation_persist_failure_rolls_back_worker_and_link() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let path = base.join(".codewhale/subagents/state.json");
+    let manager = Arc::new(RwLock::new(
+        SubAgentManager::new(base.clone(), 4).with_state_path(path),
+    ));
+    let mut runtime = super::tests::stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(&base);
+    let mut guard = manager.write().await;
+    let (source, _) =
+        guard.insert_test_interrupted_continuable_agent("failed-source", &base, prior_messages());
+    guard.agents.get_mut(&source).unwrap().model = "deepseek-v4-flash".into();
+    std::fs::create_dir_all(base.join(".codewhale")).unwrap();
+    std::fs::write(base.join(".codewhale/subagents"), "not a directory").unwrap();
+    let result = guard.resume_from_checkpoint(Arc::clone(&manager), runtime, &source, "Continue");
+    assert!(result.is_err());
+    assert_eq!(guard.agents.len(), 1);
+    assert_eq!(guard.worker_records.len(), 1);
+    assert!(guard.resume_targets.is_empty());
+    assert!(matches!(
+        guard.get_result(&source).unwrap().status,
+        SubAgentStatus::Interrupted(_)
+    ));
+}

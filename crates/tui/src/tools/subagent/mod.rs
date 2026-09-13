@@ -1576,6 +1576,9 @@ pub(crate) struct SubAgentSpawnOptions {
     /// Source agent id this child continues, stamped into the ChildLaunchManifest
     /// for receipt traceability.
     pub resume_from_agent_id: Option<String>,
+    /// Internal continuation, distinct from a deliberate transcript fork.
+    /// Commits the old-to-new link with the worker before task scheduling.
+    pub checkpoint_continuation: bool,
     /// Checkpoint resume: the claim comes from the coordination ledger and is
     /// already namespaced — skip re-namespacing in the spawn seam.
     pub claim_pre_namespaced: bool,
@@ -6356,6 +6359,7 @@ impl SubAgentManager {
                 .map(|manifest| manifest.deliverables.clone())
                 .unwrap_or_default(),
             resume_from_agent_id: Some(agent_id.clone()),
+            checkpoint_continuation: true,
             ..Default::default()
         };
         let resumed = self.spawn_background_with_assignment_options(
@@ -6367,9 +6371,6 @@ impl SubAgentManager {
             allowed_tools,
             options,
         )?;
-        self.resume_targets
-            .insert(agent_id, resumed.agent_id.clone());
-        self.persist_state_best_effort();
         Ok(resumed)
     }
 
@@ -6945,6 +6946,22 @@ impl SubAgentManager {
             ));
         }
         let wall_time = Duration::from_millis(deadline_ms - now_ms);
+        let continuation_from = if options.checkpoint_continuation {
+            let source = options
+                .resume_from_agent_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("Checkpoint continuation requires a source agent"))?;
+            let source =
+                self.resolve_agent_ref_for_session(&runtime.context.state_namespace, source)?;
+            if self.resume_targets.contains_key(&source) {
+                return Err(anyhow!(
+                    "Source already has a continuation; address it with followup"
+                ));
+            }
+            Some(source)
+        } else {
+            None
+        };
 
         if let Some(model) = options.model.as_deref() {
             runtime.model = model.to_string();
@@ -7088,8 +7105,9 @@ impl SubAgentManager {
                 ));
             }
         }
+        let durable_registration = write_capable || continuation_from.is_some();
         let durable_launch_snapshot =
-            write_capable.then(|| (self.worker_records.clone(), self.coordination.clone()));
+            durable_registration.then(|| (self.worker_records.clone(), self.coordination.clone()));
         let persisted_claim = if write_capable {
             options
                 .write_claim
@@ -7243,8 +7261,13 @@ impl SubAgentManager {
         // identity and claim are durably replayable. Persist a Starting record
         // while the manager write lock still excludes the child; then launch.
         // A crash can therefore leave an interrupted owner, never an accepted
-        // edit with no durable scope/identity record.
-        if write_capable {
+        // edit with no durable scope/identity record. Checkpoint continuations
+        // commit their source link in this same snapshot, even for read-only
+        // workers, so a crash cannot preserve the worker but lose its lineage.
+        if durable_registration {
+            if let Some(source) = continuation_from.as_ref() {
+                self.resume_targets.insert(source.clone(), agent_id.clone());
+            }
             self.agents.insert(agent_id.clone(), agent);
             let persist_result = self.persist_state_synchronously();
             agent = self
@@ -7252,8 +7275,11 @@ impl SubAgentManager {
                 .remove(&agent_id)
                 .expect("pre-launch agent remains registered under manager lock");
             if let Err(error) = persist_result {
+                if let Some(source) = continuation_from.as_ref() {
+                    self.resume_targets.remove(source);
+                }
                 let (worker_records, coordination) = durable_launch_snapshot
-                    .expect("write-capable launch captured a registration snapshot");
+                    .expect("durable launch captured a registration snapshot");
                 self.worker_records = worker_records;
                 self.coordination = coordination;
                 if let Some(lifecycle) = agent.work_lifecycle.as_ref() {
@@ -10150,6 +10176,7 @@ async fn spawn_subagent_from_input(
             expected_artifact: spawn_request.expected_artifact.clone(),
             deliverables: spawn_request.deliverables.clone(),
             resume_from_agent_id: resume_from_agent_id.clone(),
+            checkpoint_continuation: false,
             claim_pre_namespaced: false,
             preserve_runtime_profile: None,
         },
