@@ -361,25 +361,54 @@ pub(super) fn explicit_change_paths(summary: &str) -> BTreeSet<String> {
             in_changes = false;
             continue;
         }
-        for token in content.split_whitespace() {
-            let token = token.trim_matches(|ch: char| {
-                matches!(
-                    ch,
-                    '`' | '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '*' | '-'
-                )
-            });
-            if citation(token)
-                || token.contains("://")
-                || (!token.contains('/') && !token.contains('.'))
-            {
-                continue;
+        let content = content.trim();
+        let mut remaining = content
+            .strip_prefix("- ")
+            .or_else(|| content.strip_prefix("* "))
+            .unwrap_or(content);
+        // File declarations lead with paths. Stop when their description
+        // starts instead of interpreting sentence-final prose ("parsing.")
+        // or a later reference ("see notes.md") as another claimed edit.
+        while !remaining.is_empty() {
+            remaining = remaining
+                .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';'));
+            let Some(first) = remaining.chars().next() else {
+                break;
+            };
+            let quoted = matches!(first, '`' | '"' | '\'');
+            let (token, rest) = if quoted {
+                let Some((token, rest)) = remaining[1..].split_once(first) else {
+                    break;
+                };
+                (token, rest)
+            } else {
+                let end = remaining
+                    .find(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';'))
+                    .unwrap_or(remaining.len());
+                remaining.split_at(end)
+            };
+            remaining = rest;
+            if citation(token) || token.contains("://") {
+                break;
             }
+            let token = if quoted {
+                token
+            } else {
+                token
+                    .trim_matches(|ch: char| matches!(ch, '(' | ')' | '[' | ']' | '*' | '-'))
+                    .trim_end_matches(['.', ':', '!', '?'])
+            };
             let token = token.split_once("](").map_or(token, |(label, _)| label);
-            if let Ok(path) = normalize_claim_path(token)
-                && path != "."
-            {
-                paths.insert(path);
+            if !token.contains('/') && !token.contains('.') {
+                break;
             }
+            let Ok(path) = normalize_claim_path(token) else {
+                break;
+            };
+            if path == "." {
+                break;
+            }
+            paths.insert(path);
         }
     }
     paths

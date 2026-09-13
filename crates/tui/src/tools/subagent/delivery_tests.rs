@@ -262,6 +262,67 @@ fn five_heading_output_declares_changed_files_without_claiming_evidence_or_risks
 }
 
 #[test]
+fn changes_bullet_descriptions_do_not_invent_file_claims() {
+    let tmp = tempdir().unwrap();
+    repository(tmp.path());
+    let (mut manager, id) = worker(tmp.path(), true, &[], &["src"]);
+    fs::write(tmp.path().join("src/lib.rs"), "updated\n").unwrap();
+    manager
+        .worker_records
+        .get_mut(&id)
+        .unwrap()
+        .delivery_evidence
+        .observed_writes
+        .insert("src/lib.rs".into());
+    for declaration in [
+        "- `src/lib.rs` — updated parsing.",
+        "- src/lib.rs: Updated parsing.",
+        "- src/lib.rs updated parsing; reviewed notes.md.",
+        "- [src/lib.rs](src/lib.rs) - Updated parsing! See notes.md.",
+        "- 'src/lib.rs' — matches src/reference.rs:12-19.",
+    ] {
+        let report = format!(
+            "### SUMMARY\n\nUpdated the parser.\n\n\
+             ### EVIDENCE\n\n- Reviewed src/reference.rs:12-19.\n\n\
+             ### CHANGES\n\n{declaration}\n\n\
+             ### RISKS\n\n- Check notes.md separately.\n\n\
+             ### BLOCKERS\n\nNone.\n"
+        );
+        assert_eq!(
+            delivery::explicit_change_paths(&report),
+            BTreeSet::from(["src/lib.rs".into()]),
+            "{declaration}"
+        );
+        assert_ne!(
+            complete(&mut manager, &id, &report).status,
+            "claim_mismatch",
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn explicit_change_path_lists_preserve_quoted_spaces_and_punctuation() {
+    let expected = BTreeSet::from([
+        "src/lib.rs".into(),
+        "src/with spaces.rs".into(),
+        "src/another file.rs".into(),
+        "src/trailing.".into(),
+    ]);
+    for label in ["CHANGES:", "Changed files:", "Files changed:"] {
+        let report = format!(
+            "{label} src/lib.rs, `src/with spaces.rs`; \"src/another file.rs\" 'src/trailing.'"
+        );
+        assert_eq!(delivery::explicit_change_paths(&report), expected);
+    }
+    assert!(delivery::explicit_change_paths("CHANGES: Updated parsing.").is_empty());
+    assert!(
+        delivery::explicit_change_paths("CHANGES: src/reference.rs:12-19. — reviewed only.")
+            .is_empty()
+    );
+}
+
+#[test]
 fn modification_of_already_dirty_file_is_measured_against_spawn_content() {
     let tmp = tempdir().unwrap();
     repository(tmp.path());
