@@ -5215,6 +5215,18 @@ async fn patch_undo_endpoint_forks_and_reports_file_rollback_state() -> Result<(
         create_seeded_thread(&addr, &runtime_threads, &root, "Roll back the patch").await?;
     let client = crate::tls::reqwest_client();
 
+    // A workspace directory that is not available proves nothing about the
+    // files a turn changed: the undo is refused instead of forking the
+    // conversation away from them.
+    let resp = client
+        .post(format!("http://{addr}/v1/threads/{thread_id}/patch-undo"))
+        .json(&json!({}))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert!(resp.text().await?.contains("not available"));
+
+    fs::create_dir_all(root.join("workspace"))?;
     let resp = client
         .post(format!("http://{addr}/v1/threads/{thread_id}/patch-undo"))
         .json(&json!({}))
@@ -5223,8 +5235,8 @@ async fn patch_undo_endpoint_forks_and_reports_file_rollback_state() -> Result<(
     assert_eq!(resp.status(), StatusCode::CREATED);
     let undone: serde_json::Value = resp.json().await?;
     // The fresh workspace has no tool/pre-turn snapshots to roll back to,
-    // so the file-restore step reports failure while the conversation
-    // undo still forks the thread.
+    // so the file-restore step reports nothing restored while the
+    // conversation undo still forks the thread.
     assert_eq!(undone["patch_result"]["files_restored"], false);
     assert!(undone["patch_result"]["summary"].is_string());
     assert_eq!(undone["original_user_text"], "Roll back the patch");
@@ -5255,14 +5267,524 @@ fn patch_undo_helper_restores_only_the_bound_session() -> Result<()> {
     repo.snapshot_with_session("pre-turn:foreign", Some("session-foreign"))?;
     fs::write(&file, "current-after")?;
 
-    let restored = patch_undo_workspace_files(&workspace, Some("session-current"));
+    let restored = patch_undo_workspace_files(&workspace, Some("session-current"), true)
+        .expect("a trusted rollback should succeed");
     assert!(restored.files_restored, "{:?}", restored.summary);
     assert_eq!(fs::read_to_string(&file)?, "current-before");
 
     fs::write(&file, "must-stay")?;
-    let unbound = patch_undo_workspace_files(&workspace, None);
+    let unbound = patch_undo_workspace_files(&workspace, None, true)
+        .expect("an unbound thread has nothing to roll back, which is not a refusal");
     assert!(!unbound.files_restored);
     assert_eq!(fs::read_to_string(&file)?, "must-stay");
+    Ok(())
+}
+
+/// The gate the TUI's `/undo` applies, stated as a contract: an untrusted
+/// thread may not roll files back. When there *is* something to roll back the
+/// whole undo aborts — nothing is changed, and the caller must not fork the
+/// conversation either.
+#[test]
+fn patch_undo_helper_refuses_an_untrusted_rollback_and_touches_nothing() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
+    let file = workspace.join("a.txt");
+
+    fs::write(&file, "before")?;
+    repo.snapshot_with_session("pre-turn:1", Some("session-a"))?;
+    fs::write(&file, "after")?;
+
+    let err = patch_undo_workspace_files(&workspace, Some("session-a"), false)
+        .expect_err("an untrusted rollback must be refused");
+    assert_eq!(err.status, StatusCode::CONFLICT);
+    assert!(
+        err.message.contains("outside trusted mode"),
+        "got: {}",
+        err.message
+    );
+    assert_eq!(
+        fs::read_to_string(&file)?,
+        "after",
+        "a refusal must leave the workspace exactly as it was"
+    );
+
+    // The identical call once trusted performs the rollback.
+    let restored = patch_undo_workspace_files(&workspace, Some("session-a"), true)
+        .expect("a trusted rollback should succeed");
+    assert!(restored.files_restored, "{:?}", restored.summary);
+    assert_eq!(fs::read_to_string(&file)?, "before");
+    Ok(())
+}
+
+/// ...but with provably nothing to roll back, an untrusted undo is still
+/// allowed: the conversation half needs no trust, and skipping it would make
+/// Undo useless in Ask / Auto-Review for no safety gain.
+#[test]
+fn patch_undo_helper_allows_an_untrusted_undo_with_nothing_to_roll_back() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
+    let file = workspace.join("a.txt");
+
+    fs::write(&file, "only-state")?;
+    repo.snapshot_with_session("pre-turn:1", Some("session-a"))?;
+    // Nothing changed after the snapshot, so no target exists.
+
+    let result = patch_undo_workspace_files(&workspace, Some("session-a"), false)
+        .expect("nothing to roll back is not a refusal");
+    assert!(!result.files_restored);
+    assert!(result.summary.is_some());
+    assert_eq!(fs::read_to_string(&file)?, "only-state");
+    Ok(())
+}
+
+fn sha256_of(path: &FsPath) -> String {
+    format!(
+        "sha256:{}",
+        crate::hashing::sha256_hex(fs::read(path).unwrap())
+    )
+}
+
+fn revert_request(path: &str, snapshot_id: &str, expected_hash: &str) -> RevertThreadFileRequest {
+    RevertThreadFileRequest {
+        path: path.to_string(),
+        snapshot_id: snapshot_id.to_string(),
+        expected_hash: expected_hash.to_string(),
+    }
+}
+
+/// The acceptance criterion for per-file revert: restoring one file must not
+/// roll back any other file's turn changes.
+#[test]
+fn revert_file_helper_restores_only_the_named_file() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
+    let wanted = workspace.join("wanted.txt");
+    let other = workspace.join("other.txt");
+
+    fs::write(&wanted, "wanted-before")?;
+    fs::write(&other, "other-before")?;
+    repo.snapshot_with_session("pre-turn:1", Some("session-a"))?;
+
+    fs::write(&wanted, "wanted-after")?;
+    fs::write(&other, "other-after")?;
+
+    let snapshot = repo.list(10)?.remove(0);
+    let reverted = revert_file_from_snapshot(
+        &workspace,
+        "session-a",
+        &revert_request("wanted.txt", snapshot.id.as_str(), &sha256_of(&wanted)),
+    )
+    .expect("scoped revert should succeed");
+    assert_eq!(reverted.path, "wanted.txt");
+    assert_eq!(reverted.action, "modified");
+    assert_eq!(reverted.snapshot_label, "pre-turn:1");
+    assert_eq!(reverted.snapshot_id, snapshot.id.as_str());
+    assert_eq!(fs::read_to_string(&wanted)?, "wanted-before");
+    assert_eq!(
+        fs::read_to_string(&other)?,
+        "other-after",
+        "reverting one file must leave every other file's changes in place"
+    );
+    Ok(())
+}
+
+#[test]
+fn revert_file_helper_accepts_an_absolute_path_inside_the_workspace() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
+    let file = workspace.join("a.txt");
+
+    fs::write(&file, "v1")?;
+    repo.snapshot_with_session("pre-turn:1", Some("session-a"))?;
+    fs::write(&file, "v2")?;
+
+    // A recorded path may arrive absolute; normalization reports it back
+    // workspace-relative so the GUI's change record stays consistent.
+    let snapshot = repo.list(10)?.remove(0);
+    let reverted = revert_file_from_snapshot(
+        &workspace,
+        "session-a",
+        &revert_request(
+            &file.to_string_lossy(),
+            snapshot.id.as_str(),
+            &sha256_of(&file),
+        ),
+    )
+    .expect("scoped revert should accept an in-workspace absolute path");
+    assert_eq!(reverted.path, "a.txt");
+    assert_eq!(fs::read_to_string(&file)?, "v1");
+    Ok(())
+}
+
+/// The client names the exact snapshot from its change record. A newer
+/// unrelated snapshot must not be selected for it, and a stale hash means
+/// the user edited the file after the record was captured: refuse and leave
+/// the workspace untouched.
+#[test]
+fn revert_file_helper_requires_exact_snapshot_identity_and_reviewed_hash() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
+    let a = workspace.join("a.txt");
+    let b = workspace.join("b.txt");
+
+    // Tool A edits a.txt; tool B snapshots before editing only b.txt; the user
+    // then edits a.txt by hand.
+    fs::write(&a, "a-before")?;
+    fs::write(&b, "b-before")?;
+    let tool_a = repo.snapshot_with_session("tool:call-a", Some("session-a"))?;
+    fs::write(&a, "a-after-tool")?;
+    let tool_b = repo.snapshot_with_session("tool:call-b", Some("session-a"))?;
+    fs::write(&b, "b-after-tool")?;
+    fs::write(&a, "a-user-edit")?;
+
+    // Restoring a.txt from tool B's snapshot would erase only the user edit;
+    // the client must ask for tool A's snapshot and gets back a-before.
+    let err = revert_file_from_snapshot(
+        &workspace,
+        "session-a",
+        &revert_request("a.txt", tool_a.as_str(), &sha256_of(&b)),
+    )
+    .expect_err("a hash from different bytes must refuse");
+    assert_eq!(err.status, StatusCode::CONFLICT);
+    assert!(
+        err.message.contains("changed after"),
+        "got: {}",
+        err.message
+    );
+    assert_eq!(fs::read_to_string(&a)?, "a-user-edit");
+
+    let reverted = revert_file_from_snapshot(
+        &workspace,
+        "session-a",
+        &revert_request("a.txt", tool_a.as_str(), &sha256_of(&a)),
+    )
+    .expect("exact identity restores");
+    assert_eq!(reverted.snapshot_label, "tool:call-a");
+    assert_eq!(fs::read_to_string(&a)?, "a-before");
+    assert_eq!(
+        fs::read_to_string(&b)?,
+        "b-after-tool",
+        "b.txt is untouched"
+    );
+
+    // Already matching: 409, nothing changed.
+    let err = revert_file_from_snapshot(
+        &workspace,
+        "session-a",
+        &revert_request("a.txt", tool_a.as_str(), &sha256_of(&a)),
+    )
+    .expect_err("nothing to revert");
+    assert_eq!(err.status, StatusCode::CONFLICT);
+    assert!(
+        err.message.contains("nothing to revert"),
+        "got: {}",
+        err.message
+    );
+
+    // A snapshot owned by another session, an unknown id, or a non-restore
+    // label are all refused with a refresh hint.
+    let foreign = repo.snapshot_with_session("tool:foreign", Some("session-b"))?;
+    let post = repo.snapshot_with_session("post-turn:1", Some("session-a"))?;
+    for id in [
+        foreign.as_str(),
+        post.as_str(),
+        "0123456789abcdef0123456789abcdef01234567",
+    ] {
+        let err = revert_file_from_snapshot(
+            &workspace,
+            "session-a",
+            &revert_request("b.txt", id, &sha256_of(&b)),
+        )
+        .expect_err(id);
+        assert_eq!(err.status, StatusCode::CONFLICT, "{id}");
+        assert!(
+            err.message.contains("refresh the change record"),
+            "{id}: {}",
+            err.message
+        );
+    }
+    assert_eq!(fs::read_to_string(&b)?, "b-after-tool");
+    let _ = tool_b;
+
+    // Directories and Git metadata are 400s before anything is compared.
+    for path in ["", "src", ".git/config", "../escape.txt"] {
+        fs::create_dir_all(workspace.join("src"))?;
+        let err = revert_file_from_snapshot(
+            &workspace,
+            "session-a",
+            &revert_request(path, tool_a.as_str(), "absent"),
+        )
+        .expect_err(path);
+        assert_eq!(err.status, StatusCode::BAD_REQUEST, "{path}");
+    }
+    Ok(())
+}
+
+#[test]
+fn revert_file_helper_refuses_foreign_sessions_and_paths_outside_the_workspace() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
+    let file = workspace.join("a.txt");
+
+    // Only another session owns a snapshot, so this session has nothing it is
+    // allowed to revert.
+    fs::write(&file, "foreign-before")?;
+    repo.snapshot_with_session("pre-turn:1", Some("session-b"))?;
+    fs::write(&file, "foreign-after")?;
+
+    let foreign = repo.list(10)?.remove(0);
+    let err = revert_file_from_snapshot(
+        &workspace,
+        "session-a",
+        &revert_request("a.txt", foreign.id.as_str(), &sha256_of(&file)),
+    )
+    .expect_err("a foreign session's snapshot must not be restorable");
+    assert_eq!(err.status, StatusCode::CONFLICT);
+    assert!(
+        err.message.contains("another session"),
+        "got: {}",
+        err.message
+    );
+    assert_eq!(fs::read_to_string(&file)?, "foreign-after");
+
+    let traversal = revert_file_from_snapshot(
+        &workspace,
+        "session-a",
+        &revert_request("../escape.txt", foreign.id.as_str(), "absent"),
+    )
+    .expect_err("traversal must be refused");
+    assert_eq!(traversal.status, StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+/// The GUI decides whether to show the per-file Revert button from a `GET`
+/// probe of this route: 405 ("route exists, wrong method") means available,
+/// 404 means an older engine that must degrade with an explanation. Assert the
+/// wire contract, not just the Rust helper.
+#[tokio::test]
+async fn file_revert_route_probes_as_available_and_404s_unknown_threads() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-file-revert-route-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let probe = client
+        .get(format!("http://{addr}/v1/threads/__probe__/file-revert"))
+        .send()
+        .await?;
+    assert_eq!(
+        probe.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "the capability probe reads any non-404 as 'endpoint available'"
+    );
+
+    let body = json!({
+        "path": "a.txt",
+        "snapshot_id": "0123456789abcdef0123456789abcdef01234567",
+        "expected_hash": "absent"
+    });
+    let missing = client
+        .post(format!("http://{addr}/v1/threads/thr_missing/file-revert"))
+        .json(&body)
+        .send()
+        .await?;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}
+
+/// Route-level contract for the new destructive endpoint: malformed bodies
+/// are 422/400 before any thread state is read, an untrusted thread is a 409
+/// even with a well-formed request, and a trusted thread without a bound
+/// session is a 409 that names the reason. No file is touched in any case.
+#[tokio::test]
+async fn file_revert_route_validates_body_then_trust_then_session_binding() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-file-revert-gates-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let thread_id = create_seeded_thread(&addr, &runtime_threads, &root, "Edit a.txt").await?;
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let file = workspace.join("a.txt");
+    fs::write(&file, "keep")?;
+    let client = crate::tls::reqwest_client();
+    let url = format!("http://{addr}/v1/threads/{thread_id}/file-revert");
+    let well_formed = json!({
+        "path": "a.txt",
+        "snapshot_id": "0123456789abcdef0123456789abcdef01234567",
+        "expected_hash": format!("sha256:{}", "a".repeat(64))
+    });
+
+    // Missing required fields: rejected by the JSON extractor.
+    let resp = client
+        .post(&url)
+        .json(&json!({ "path": "a.txt" }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // Malformed identity/hash: 400 with the expected format.
+    for bad in [
+        json!({ "path": "a.txt", "snapshot_id": "not-hex", "expected_hash": "absent" }),
+        json!({ "path": "a.txt", "snapshot_id": "0123456789abcdef0123456789abcdef01234567", "expected_hash": "md5:abc" }),
+        json!({ "path": "a.txt", "snapshot_id": "0123456789abcdef0123456789abcdef01234567", "expected_hash": format!("sha256:{}", "A".repeat(64)) }),
+    ] {
+        let resp = client.post(&url).json(&bad).send().await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    // Untrusted thread: 409 that says how to proceed.
+    let resp = client.post(&url).json(&well_formed).send().await?;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let text = resp.text().await?;
+    assert!(text.contains("trusted mode"), "got: {text}");
+
+    // Trusted, but no bound session: still a 409 with the reason.
+    client
+        .patch(format!("http://{addr}/v1/threads/{thread_id}"))
+        .json(&json!({ "trust_mode": true }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let resp = client.post(&url).json(&well_formed).send().await?;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let text = resp.text().await?;
+    assert!(text.contains("no bound session"), "got: {text}");
+    assert_eq!(fs::read_to_string(&file)?, "keep");
+
+    handle.abort();
+    Ok(())
+}
+
+/// All three restore routes refuse while a turn is active in an overlapping
+/// workspace, and admit again once it settles. Nothing is changed on refusal.
+#[tokio::test]
+async fn restore_routes_refuse_an_active_turn_in_the_workspace() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-restore-active-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let thread_id = create_seeded_thread(&addr, &runtime_threads, &root, "Keep working").await?;
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let file = workspace.join("a.txt");
+    fs::write(&file, "live")?;
+    let client = crate::tls::reqwest_client();
+    client
+        .patch(format!("http://{addr}/v1/threads/{thread_id}"))
+        .json(&json!({ "trust_mode": true }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let harness = crate::core::engine::mock_engine_handle();
+    runtime_threads
+        .install_test_engine(&thread_id, harness.handle.clone())
+        .await?;
+    runtime_threads
+        .set_active_turn_for_test(&thread_id, Some("turn_live"))
+        .await?;
+
+    let revert_body = json!({
+        "path": "a.txt",
+        "snapshot_id": "0123456789abcdef0123456789abcdef01234567",
+        "expected_hash": "absent"
+    });
+    let refusals = [
+        client
+            .post(format!("http://{addr}/v1/threads/{thread_id}/file-revert"))
+            .json(&revert_body)
+            .send()
+            .await?,
+        client
+            .post(format!("http://{addr}/v1/threads/{thread_id}/patch-undo"))
+            .json(&json!({}))
+            .send()
+            .await?,
+    ];
+    for resp in refusals {
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let text = resp.text().await?;
+        assert!(text.contains("already has an active turn"), "got: {text}");
+    }
+    assert_eq!(fs::read_to_string(&file)?, "live");
+    // The server-wide snapshot route validates its id first, then admission.
+    let resp = client
+        .post(format!("http://{addr}/v1/snapshots/not-hex/restore"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    runtime_threads
+        .set_active_turn_for_test(&thread_id, None)
+        .await?;
+    // Admitted again: the revert now fails on the unknown snapshot id, past
+    // the admission and trust gates, without touching the file.
+    let resp = client
+        .post(format!("http://{addr}/v1/threads/{thread_id}/file-revert"))
+        .json(&revert_body)
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let text = resp.text().await?;
+    assert!(
+        text.contains("no bound session") || text.contains("refresh the change record"),
+        "got: {text}"
+    );
+    assert_eq!(fs::read_to_string(&file)?, "live");
+
+    handle.abort();
     Ok(())
 }
 
