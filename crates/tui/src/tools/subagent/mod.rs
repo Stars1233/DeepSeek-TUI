@@ -9530,10 +9530,7 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
 /// return a compact "no change" nudge instead of a full projection (#4097).
 const PEEK_UNCHANGED_THROTTLE_WINDOW: Duration = Duration::from_secs(30);
 
-/// Stable change fingerprint for a running child's model-visible state.
-/// Volatile fields (durations, timestamps) are deliberately excluded so an
-/// idle child fingerprints identically across back-to-back peeks.
-
+/// Read bounded supervision facts, or an explicitly addressed diagnostic page.
 async fn inspect_agent_from_input(
     input: &Value,
     manager: SharedSubAgentManager,

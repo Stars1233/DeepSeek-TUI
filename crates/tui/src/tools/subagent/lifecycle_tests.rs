@@ -425,6 +425,19 @@ async fn lifecycle_continuation_link_is_durable_before_the_child_can_run() {
     let (source, _) =
         guard.insert_test_interrupted_continuable_agent("durable-source", &base, prior_messages());
     guard.agents.get_mut(&source).unwrap().model = "deepseek-v4-flash".into();
+    guard
+        .worker_records
+        .get_mut(&source)
+        .unwrap()
+        .spec
+        .runtime_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    assert!(
+        !guard.worker_records[&source]
+            .spec
+            .runtime_profile
+            .permissions
+            .write
+    );
     let successor = guard
         .resume_from_checkpoint(Arc::clone(&manager), runtime, &source, "Continue")
         .unwrap();
@@ -461,6 +474,19 @@ async fn lifecycle_continuation_persist_failure_rolls_back_worker_and_link() {
     let (source, _) =
         guard.insert_test_interrupted_continuable_agent("failed-source", &base, prior_messages());
     guard.agents.get_mut(&source).unwrap().model = "deepseek-v4-flash".into();
+    guard
+        .worker_records
+        .get_mut(&source)
+        .unwrap()
+        .spec
+        .runtime_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    assert!(
+        !guard.worker_records[&source]
+            .spec
+            .runtime_profile
+            .permissions
+            .write
+    );
     std::fs::create_dir_all(base.join(".codewhale")).unwrap();
     std::fs::write(base.join(".codewhale/subagents"), "not a directory").unwrap();
     let result = guard.resume_from_checkpoint(Arc::clone(&manager), runtime, &source, "Continue");
