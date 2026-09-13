@@ -632,3 +632,52 @@ async fn lifecycle_detail_budget_keeps_the_transcript_handle_retrievable() {
             .is_some()
     );
 }
+
+#[tokio::test]
+async fn lifecycle_cleanup_keeps_source_identity_while_descendants_still_need_it() {
+    let dir = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 5);
+    let source = manager.insert_test_running_agent("original", dir.path());
+    let current = manager.insert_test_running_agent("continuation", dir.path());
+    let child = manager.insert_test_running_agent("existing-child", dir.path());
+    manager
+        .resume_targets
+        .insert(source.clone(), current.clone());
+    let record = manager.worker_records.get_mut(&child).unwrap();
+    record.parent_run_id = Some(source.clone());
+    record.spec.parent_run_id = Some(source.clone());
+    let old = Instant::now() - Duration::from_secs(120);
+    manager.agents.get_mut(&source).unwrap().status = SubAgentStatus::Completed;
+    manager.agents.get_mut(&source).unwrap().started_at = old;
+    let record = manager.worker_records.get_mut(&source).unwrap();
+    record.status = AgentWorkerStatus::Completed;
+    record.completed_at_ms = Some(epoch_millis_now().saturating_sub(120_000));
+
+    manager.cleanup_for_session("workspace", Duration::from_secs(60));
+    assert_eq!(manager.continuation_target(&source).unwrap(), current);
+    assert!(
+        manager
+            .continuation_target_for_caller("workspace", &child, Some(&current), "test")
+            .is_ok()
+    );
+    manager
+        .cancel_agent_for_session("workspace", &source)
+        .unwrap();
+    assert_eq!(
+        manager.get_result(&child).unwrap().status,
+        SubAgentStatus::Cancelled
+    );
+
+    // Once no live work uses either projection, normal expiry reclaims the
+    // archived workers and their continuation edge together.
+    for agent in manager.agents.values_mut() {
+        agent.started_at = old;
+    }
+    for record in manager.worker_records.values_mut() {
+        record.completed_at_ms = Some(epoch_millis_now().saturating_sub(120_000));
+    }
+    manager.cleanup_for_session("workspace", Duration::from_secs(60));
+    assert!(manager.agents.is_empty());
+    assert!(manager.worker_records.is_empty());
+    assert!(manager.resume_targets.is_empty());
+}

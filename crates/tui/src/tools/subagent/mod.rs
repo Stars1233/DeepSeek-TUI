@@ -7849,7 +7849,14 @@ impl SubAgentManager {
         // the flock (owner report, 2026-08-04). See `docs/architecture/
         // delegated-coordination.md` for what lock loss legitimately costs.
 
+        // The same retained lineage that prevents a budget refund also owns
+        // continuation lookup and descendant control. Keep both projections
+        // while live work references them.
+        let budget_records = self.budget_records_in_use();
         self.agents.retain(|agent_id, agent| {
+            if budget_records.contains(agent_id) {
+                return true;
+            }
             if active_session_id.is_some() && !scoped_agent_ids.contains(agent_id) {
                 return true;
             }
@@ -7878,6 +7885,13 @@ impl SubAgentManager {
             }
             let anchor_ms = record.completed_at_ms.unwrap_or(record.updated_at_ms);
             now_ms.saturating_sub(anchor_ms) < max_age_ms
+        });
+        let previous_links = self.resume_targets.len();
+        self.resume_targets.retain(|source, target| {
+            self.agents.contains_key(source)
+                || self.worker_records.contains_key(source)
+                || self.agents.contains_key(target)
+                || self.worker_records.contains_key(target)
         });
         // The transcript artifact follows the same retention lifecycle as the
         // worker ledger. Keep it while either the agent or worker record is
@@ -7909,6 +7923,7 @@ impl SubAgentManager {
         if self.agents.len() != before
             || auto_cancelled > 0
             || self.worker_records.len() != before_workers
+            || self.resume_targets.len() != previous_links
         {
             self.persist_state_best_effort();
         }
