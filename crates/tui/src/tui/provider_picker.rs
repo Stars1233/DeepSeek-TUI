@@ -281,6 +281,11 @@ pub struct ProviderDashboardRow {
     /// optional — that would clutter the default view with every untouched
     /// local-provider slot.
     pub is_configured: bool,
+    /// The setup template this row stands in for: a compatible host the
+    /// operator has not configured yet (Baseten, Groq, Cerebras, ...).
+    /// Activating such a row opens the custom-provider form pre-filled from
+    /// the template instead of a key prompt for a route that does not exist.
+    pub template_id: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -676,6 +681,7 @@ impl ProviderDashboardRow {
                     configured,
                     provider == ApiProvider::Custom && provider_id_override.is_some(),
                 ),
+                template_id: None,
             };
         };
 
@@ -895,6 +901,7 @@ impl ProviderDashboardRow {
                 configured,
                 provider == ApiProvider::Custom && provider_id_override.is_some(),
             ),
+            template_id: None,
         }
     }
 
@@ -1711,6 +1718,7 @@ impl ProviderPickerView {
             })
             .collect();
         rows.extend(custom_rows);
+        rows.extend(template_dashboard_rows(active, config, runtime_status));
         // Providers you have configured lead; the rest of the catalog follows
         // alphabetically. Founder live-test: "we should also make that list
         // ordered logically so like the ones you have configured at the top
@@ -4140,6 +4148,18 @@ impl ProviderPickerView {
         if !self.row_visible(self.selected_idx) {
             return ViewAction::None;
         }
+        if let Some(template) = self.rows[self.selected_idx]
+            .template_id
+            .and_then(provider_setup_template)
+        {
+            // A template row is a host the operator has not configured yet:
+            // land on the custom-provider form with the template's endpoint,
+            // model and key variable filled in, exactly as `/provider
+            // templates` does, instead of prompting for a key on a route that
+            // does not exist.
+            self.apply_template(template);
+            return ViewAction::None;
+        }
         let provider = self.selected_provider();
         let provider_id = self.selected_provider_id();
         if provider == ApiProvider::Custom && !self.rows[self.selected_idx].is_configured {
@@ -4975,6 +4995,62 @@ fn custom_provider_dashboard_rows(
         .collect()
 }
 
+/// Compatible setup templates the operator has not configured yet (Baseten,
+/// Groq, Cerebras, ...) as rows of the provider list. They used to be
+/// reachable only through `/provider templates`; a row is what the operator
+/// looks for. Each row is derived the way a configured custom provider's row
+/// is — from a scoped config carrying the template's endpoint, model and key
+/// variable — so its protocol, readiness and credential-source facts are the
+/// real ones. It is then marked unconfigured, so it sorts with the catalog
+/// and stays out of the configured-only view, and tagged with its template so
+/// activation lands on the pre-filled custom-provider form.
+fn template_dashboard_rows(
+    active: ApiProvider,
+    config: &Config,
+    runtime_status: Option<&ProviderRuntimeStatus>,
+) -> Vec<ProviderDashboardRow> {
+    provider_setup_templates()
+        .iter()
+        .filter(|template| template.is_compatible())
+        .filter(|template| {
+            // A custom provider the operator already named after the
+            // template has its own configured row.
+            !config
+                .providers
+                .as_ref()
+                .is_some_and(|providers| providers.custom_provider_config(template.id).is_some())
+        })
+        .map(|template| {
+            let mut scoped = config.clone();
+            scoped
+                .providers
+                .get_or_insert_with(Default::default)
+                .custom
+                .insert(
+                    template.id.to_string(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        base_url: template.base_url().map(str::to_string),
+                        model: template.default_model().map(str::to_string),
+                        api_key_env: template.api_key_env().map(str::to_string),
+                        ..Default::default()
+                    },
+                );
+            let mut row = ProviderDashboardRow::from_custom_config_with_runtime_status(
+                template.id,
+                active,
+                &scoped,
+                runtime_status,
+            );
+            row.display_name = template.display_name.to_string();
+            row.is_active = false;
+            row.is_configured = false;
+            row.template_id = Some(template.id);
+            row
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5113,8 +5189,18 @@ mod tests {
             .map(|row| row.display_name.as_str())
             .collect();
 
-        // Catalog surface: one identity per vendor (not dual-wire / plan kinds).
-        assert_eq!(names.len(), ApiProvider::catalog().len());
+        // Catalog surface: one identity per vendor (not dual-wire / plan
+        // kinds), plus one row per compatible setup template the operator has
+        // not configured (Baseten and friends).
+        let compatible_templates = provider_setup_templates()
+            .iter()
+            .filter(|template| template.is_compatible())
+            .count();
+        assert_eq!(
+            names.len(),
+            ApiProvider::catalog().len() + compatible_templates
+        );
+        assert!(names.contains(&"Baseten"), "{names:?}");
         assert!(names.contains(&"DeepSeek"));
         assert!(names.contains(&"Alibaba Cloud Model Studio"));
         // Dialect is wire config — no second MiniMax / Model Studio rows.
@@ -5150,6 +5236,76 @@ mod tests {
                 .all(|row| row.is_configured),
             "configured providers lead the list"
         );
+    }
+
+    /// Baseten (and every other compatible template) is a row of the list,
+    /// not just a `/provider templates` entry, and Enter on it lands on the
+    /// custom-provider form already filled from the template.
+    #[test]
+    fn compatible_templates_are_catalog_rows_that_open_a_prefilled_form() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        let idx = picker
+            .rows
+            .iter()
+            .position(|row| row.template_id == Some("baseten"))
+            .expect("a Baseten template row");
+        let row = &picker.rows[idx];
+        assert_eq!(row.display_name, "Baseten");
+        assert_eq!(row.provider_id, "baseten");
+        assert_eq!(row.provider, ApiProvider::Custom);
+        assert!(
+            !row.is_configured,
+            "a template is not a configured provider"
+        );
+        assert!(!row.is_active);
+        assert!(row.matches_query("baseten"));
+
+        picker.view = ProviderListView::Catalog;
+        picker.selected_idx = idx;
+        assert!(picker.row_visible(idx));
+        assert!(matches!(picker.activate_selected_row(), ViewAction::None));
+        assert!(
+            matches!(picker.stage, Stage::CustomForm),
+            "{:?}",
+            picker.stage
+        );
+        assert_eq!(picker.custom_provider_id, "baseten");
+        assert_eq!(
+            picker.custom_provider_base_url,
+            "https://inference.baseten.co/v1"
+        );
+        assert_eq!(picker.custom_provider_api_key_env, "BASETEN_API_KEY");
+    }
+
+    /// Once the operator has named a custom provider after a template, the
+    /// configured row is the only one; the template row does not duplicate it.
+    #[test]
+    fn a_configured_custom_provider_replaces_its_template_row() {
+        let mut config = Config::default();
+        config
+            .providers
+            .get_or_insert_with(Default::default)
+            .custom
+            .insert(
+                "baseten".to_string(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    base_url: Some("https://inference.baseten.co/v1".to_string()),
+                    model: Some("deepseek-ai/DeepSeek-V3.1".to_string()),
+                    api_key_env: Some("BASETEN_API_KEY".to_string()),
+                    ..Default::default()
+                },
+            );
+        let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        let baseten: Vec<_> = picker
+            .rows
+            .iter()
+            .filter(|row| row.provider_id == "baseten")
+            .collect();
+        assert_eq!(baseten.len(), 1, "one Baseten row, the configured one");
+        assert!(baseten[0].is_configured);
+        assert_eq!(baseten[0].template_id, None);
     }
 
     #[test]
@@ -7469,6 +7625,7 @@ mod tests {
         let mut listed = picker
             .rows
             .iter()
+            .filter(|row| row.template_id.is_none())
             .map(|row| row.provider)
             .collect::<Vec<_>>();
         // With no configured custom providers, the catalog keeps the Custom
@@ -7482,6 +7639,12 @@ mod tests {
         assert_eq!(
             listed, expected,
             "setup must use the canonical provider universe"
+        );
+        assert!(
+            picker
+                .rows
+                .iter()
+                .any(|row| row.template_id == Some("baseten"))
         );
     }
 
