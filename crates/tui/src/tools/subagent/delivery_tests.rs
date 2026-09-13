@@ -324,3 +324,120 @@ fn disjoint_sibling_write_paths_admit_and_ancestor_overlap_names_actual_remedy()
         assert!(error.contains(text), "{error}");
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn enforced_readonly_python_queries_sqlite_under_a_live_peer_write_claim() {
+    let tmp = tempdir().unwrap();
+    let database = rusqlite::Connection::open(tmp.path().join("fixture.sqlite")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE fixture(value TEXT); INSERT INTO fixture VALUES ('peer-read-receipt');",
+        )
+        .unwrap();
+    drop(database);
+    fs::write(tmp.path().join("peer.txt"), "preserve peer bytes").unwrap();
+    fs::write(tmp.path().join("own.txt"), "own bytes").unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    {
+        let mut guard = manager.write().await;
+        guard.insert_test_running_agent("analysis", tmp.path());
+        guard.insert_test_running_agent("peer", tmp.path());
+        for (owner, file) in [("agent_analysis", "own.txt"), ("agent_peer", "peer.txt")] {
+            guard
+                .coordination
+                .register_claim(
+                    WriteScopeClaim {
+                        owner: owner.into(),
+                        roots: Vec::new(),
+                        exact_files: vec![file.into()],
+                        contracts: Vec::new(),
+                    },
+                    false,
+                    |_| true,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            guard.live_peer_shared_write_claim_owners("agent_analysis"),
+            ["agent_peer"]
+        );
+    }
+    let python = [
+        "/usr/bin/python3",
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+    ]
+    .into_iter()
+    .find(|path| Path::new(path).is_file())
+    .expect("Python fixture runtime");
+    for role in [FleetRole::Builder, FleetRole::Scout] {
+        let mut runtime = super::tests::stub_runtime();
+        runtime.manager = Arc::clone(&manager);
+        runtime.context = ToolContext::new(tmp.path());
+        runtime.context.auto_approve = true;
+        runtime.context.elevated_sandbox_policy =
+            Some(crate::sandbox::SandboxPolicy::DangerFullAccess);
+        #[cfg(target_os = "linux")]
+        runtime
+            .context
+            .shell_manager
+            .lock()
+            .unwrap()
+            .set_prefer_bwrap(true);
+        let available = runtime
+            .context
+            .shell_manager
+            .lock()
+            .unwrap()
+            .configured_sandbox_type()
+            .is_some();
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
+        let registry = SubAgentToolRegistry::new_with_owner(
+            runtime,
+            role,
+            "agent_analysis".into(),
+            "analysis".into(),
+            Some(vec!["bash".into()]),
+            Arc::new(Mutex::new(TodoList::new())),
+            Arc::new(Mutex::new(PlanState::default())),
+        );
+        let script = "import sqlite3; c=sqlite3.connect('file:fixture.sqlite?mode=ro', uri=True); print(c.execute('SELECT value FROM fixture').fetchone()[0])";
+        let query = json!({"command": format!("{python} -I -B -c {}", shell_words::quote(script)), "read_only": true});
+        let read = registry.execute("agent_analysis", "bash", query).await;
+        if !available {
+            let error = read.unwrap_err().to_string();
+            assert!(error.contains("native read-only enforcement"), "{error}");
+            eprintln!("UNRUN: native child+peer Python probe; unavailable sandbox was refused");
+            continue;
+        }
+        let read = read.unwrap();
+        assert!(read.contains("peer-read-receipt"), "{read}");
+        let write = json!({"command": format!("{python} -I -B -c {}", shell_words::quote("open('peer.txt', 'w').write('corrupt')")), "read_only": true});
+        let error = registry
+            .execute("agent_analysis", "bash", write)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains("blocking peers"),
+            "read-only execution must reach native enforcement: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("peer.txt")).unwrap(),
+            "preserve peer bytes"
+        );
+        assert_eq!(
+            manager
+                .read()
+                .await
+                .get_result("agent_peer")
+                .unwrap()
+                .status,
+            SubAgentStatus::Running
+        );
+        eprintln!(
+            "NATIVE_READONLY_ENFORCED: child SQLite query passed under a live peer claim; mutation denied"
+        );
+    }
+}

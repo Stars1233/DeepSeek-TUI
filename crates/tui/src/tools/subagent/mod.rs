@@ -16912,7 +16912,7 @@ impl SubAgentToolRegistry {
                     manager.live_peer_shared_write_claim_owners(&self.owner_agent_id);
                 if !blocking_peers.is_empty() {
                     return Err(anyhow!(
-                        "Tool {name} cannot prove a bounded file target or read-only execution while peers are writing in this shared checkout (blocking peers: {}). Use a bounded write tool or a proven read-only command, or run executable work in worktree isolation. Disjoint write_roots alone do not constrain arbitrary code.",
+                        "Tool {name} cannot prove a bounded file target or read-only execution while peers are writing in this shared checkout (blocking peers: {}). Use a bounded write tool, a proven read-only command, or bash with read_only=true for analysis under native enforcement. Executable work that needs writes requires worktree isolation. Disjoint write_roots alone do not constrain arbitrary code.",
                         blocking_peers.join(", ")
                     ));
                 }
@@ -17008,7 +17008,7 @@ fn is_unbounded_shell_run(name: &str, input: &Value) -> bool {
 }
 
 /// Whether this exact call is a shell run the agent read-only classifier
-/// proves mutation-free — the contention gate's carve-out.
+/// proves mutation-free, or native read-only mode enforces — the contention carve-out.
 ///
 /// This shares its classifier with `bounded_readonly_bash_evidence` but not
 /// its role restriction, deliberately: the envelope helper's carve-out
@@ -17016,7 +17016,9 @@ fn is_unbounded_shell_run(name: &str, input: &Value) -> bool {
 /// to them; the contention gate grants nothing — shell authority, posture, and
 /// the envelope have already settled by the time it runs — and asks only
 /// whether this call can collide with a live peer's writes. A proven
-/// read-only `ls` cannot, whichever role runs it.
+/// read-only `ls` cannot, whichever role runs it. An explicit read_only=true
+/// call likewise cannot: the shared bash executor requires native read-only
+/// enforcement or refuses the call before process spawn.
 fn proven_readonly_shell_run(name: &str, input: &Value) -> bool {
     is_unbounded_shell_run(name, input) && crate::tools::shell::agent_readonly_bash_input(input)
 }
