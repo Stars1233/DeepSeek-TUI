@@ -5452,9 +5452,10 @@ fn test_parse_spawn_request_accepts_fleet_role_token_for_runtime_resolution() {
 
 #[test]
 fn test_parse_spawn_request_accepts_full_role_vocabulary() {
-    // Regression for #2649: roles that `FleetRole::from_str` accepts must
-    // also pass the second `normalize_role_alias` validation pass instead of
-    // being rejected with a stale hint.
+    // Regression for #2649: every token `FleetRole::from_str` accepts must
+    // pass the spawn boundary through `role` *and* `type`, in any case and
+    // with surrounding whitespace, land on the canonical serialized role,
+    // never become a profile key, and conflict with a different type.
     for (role, expected_type, expected_role) in [
         ("general", FleetRole::Worker, "general"),
         ("general-purpose", FleetRole::Worker, "general"),
@@ -5477,6 +5478,7 @@ fn test_parse_spawn_request_accepts_full_role_vocabulary() {
         ("implement", FleetRole::Builder, "implement"),
         ("implementation", FleetRole::Builder, "implement"),
         ("builder", FleetRole::Builder, "implement"),
+        ("test", FleetRole::Verifier, "test"),
         ("verifier", FleetRole::Verifier, "test"),
         ("verify", FleetRole::Verifier, "test"),
         ("verification", FleetRole::Verifier, "test"),
@@ -5487,38 +5489,63 @@ fn test_parse_spawn_request_accepts_full_role_vocabulary() {
         ("advisor", FleetRole::Consultant, "advisor"),
         ("custom", FleetRole::Custom, "custom"),
     ] {
-        assert_eq!(
-            FleetRole::from_str(role),
-            Some(expected_type.clone()),
-            "from_str should accept role alias {role:?}"
-        );
-        assert_eq!(
-            normalize_role_alias(role),
-            Some(expected_role),
-            "normalize_role_alias should accept role alias {role:?}"
-        );
-
-        let mut input = json!({ "prompt": "do work", "role": role });
-        if matches!(&expected_type, FleetRole::Worker | FleetRole::Builder) {
-            input["write_roots"] = json!(["."]);
-        } else if expected_type == FleetRole::Custom {
-            input["write_authority"] = json!("workspace_write");
-            input["write_roots"] = json!(["."]);
+        let shouted = format!("  {} ", role.to_ascii_uppercase());
+        for (key, spelling) in [
+            ("role", role.to_string()),
+            ("role", shouted.clone()),
+            ("type", role.to_string()),
+            ("type", shouted),
+        ] {
+            let mut input = json!({ "prompt": "do work", key: spelling });
+            if matches!(&expected_type, FleetRole::Worker | FleetRole::Builder) {
+                input["write_roots"] = json!(["."]);
+            } else if expected_type == FleetRole::Custom {
+                input["write_authority"] = json!("workspace_write");
+                input["write_roots"] = json!(["."]);
+            }
+            let mut parsed = parse_spawn_request(&input)
+                .unwrap_or_else(|e| panic!("{key}={spelling:?} should parse, got {e}"));
+            assert_eq!(
+                parsed.agent_type, expected_type,
+                "type for {key}={spelling:?}"
+            );
+            assert_eq!(
+                parsed.assignment.role.as_deref(),
+                Some(expected_role),
+                "canonical role for {key}={spelling:?}"
+            );
+            assert_eq!(
+                serde_json::to_string(&parsed.agent_type).expect("serialize role"),
+                format!("\"{expected_role}\""),
+                "serialized role for {key}={spelling:?} must be canonical"
+            );
+            assert!(
+                parsed.profile.is_none(),
+                "descriptive alias {key}={spelling:?} must not become a role profile"
+            );
+            resolve_spawn_role(&mut parsed).unwrap_or_else(|e| {
+                panic!("{key}={spelling:?} should resolve without a profile: {e}")
+            });
         }
-        let mut parsed = parse_spawn_request(&input)
-            .unwrap_or_else(|e| panic!("role {role:?} should parse, got {e}"));
-        assert_eq!(parsed.agent_type, expected_type, "type for role {role:?}");
-        assert_eq!(
-            parsed.assignment.role.as_deref(),
-            Some(expected_role),
-            "canonical role for {role:?}"
-        );
+
+        // The same alias paired with a different explicit type is a conflict,
+        // not a silent pick of either side.
+        let other = if expected_type == FleetRole::Scout {
+            "general"
+        } else {
+            "explore"
+        };
+        let err = parse_spawn_request(&json!({
+            "prompt": "do work",
+            "type": other,
+            "role": role,
+        }))
+        .expect_err("conflicting type and role alias must fail");
         assert!(
-            parsed.profile.is_none(),
-            "descriptive role alias {role:?} must not become a role profile"
+            err.to_string()
+                .contains("Fleet role conflicts with the explicit legacy agent type"),
+            "conflict error for role {role:?} with type {other:?}: {err}"
         );
-        resolve_spawn_role(&mut parsed)
-            .unwrap_or_else(|e| panic!("role {role:?} should resolve without a profile: {e}"));
     }
 }
 
@@ -6928,6 +6955,27 @@ fn test_build_assignment_prompt_includes_metadata() {
     assert!(prompt.contains("Assignment metadata"));
     assert!(prompt.contains("resolved_type: explore"));
     assert!(prompt.contains("role: explore"));
+
+    // Free-form saved roles retain their exact prompt label; consolidating
+    // the canonical parser must not turn display cleanup into a migration.
+    for role in [
+        None,
+        Some("  release_lead  "),
+        Some("custom"),
+        Some(" TEST "),
+    ] {
+        let assignment = SubAgentAssignment::new("Inspect".into(), role.map(str::to_string));
+        let prompt = build_assignment_prompt("Inspect", &assignment, &FleetRole::Scout);
+        let expected = match role {
+            None => "default",
+            Some(" TEST ") => "test",
+            Some(role) => role,
+        };
+        assert!(
+            prompt.contains(&format!("\n- role: {expected}\n")),
+            "{prompt}"
+        );
+    }
 }
 
 #[test]

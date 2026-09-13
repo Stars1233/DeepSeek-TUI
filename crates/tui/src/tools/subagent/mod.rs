@@ -13357,11 +13357,6 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .or(parsed_role_type)
         .unwrap_or(FleetRole::Worker);
 
-    let role_alias = role_input
-        .and_then(normalize_role_alias)
-        .or_else(|| type_input.and_then(normalize_role_alias))
-        .map(str::to_string);
-
     // Fleet role token: the raw role only when it is not a descriptive type
     // alias. Type aliases remain local FleetRole vocabulary and must not be
     // promoted into profile keys.
@@ -13373,11 +13368,14 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         _ => None,
     };
 
-    let role = role_alias.or_else(|| fleet_role_token.clone()).or_else(|| {
-        type_input
-            .and_then(normalize_role_alias)
-            .map(str::to_string)
-    });
+    // Assignment role label: the canonical spelling of whichever type/role
+    // alias was given (both agree past the conflict check above), otherwise
+    // the raw Fleet role token that `resolve_spawn_role` resolves later.
+    let role = if agent_type_explicit {
+        Some(agent_type.as_str().to_string())
+    } else {
+        fleet_role_token.clone()
+    };
 
     let mut profile = optional_input_str(input, &["profile", "fleet_profile", "roster_profile"])?
         .map(validate_profile_name)
@@ -15426,26 +15424,6 @@ fn parse_optional_worktree_request(
     }
 }
 
-/// Resolve a user-supplied role/agent_role value to a canonical role string.
-///
-/// This must accept the full set that [`FleetRole::from_str`] accepts, plus
-/// role-only aliases (`worker`, `default`, `awaiter`). Before #2649 it covered
-/// only a subset, so `role: "reviewer"` (accepted by `from_str`) was rejected
-/// here by the second validation pass with a misleading four-value hint.
-fn normalize_role_alias(input: &str) -> Option<&'static str> {
-    match input.to_ascii_lowercase().as_str() {
-        "default" | "worker" | "general" | "general-purpose" | "general_purpose" => Some("general"),
-        "scout" | "explorer" | "explore" | "exploration" => Some("explore"),
-        "awaiter" | "plan" | "planner" | "planning" => Some("planner"),
-        "reviewer" | "review" | "code-review" | "code_review" => Some("reviewer"),
-        "implementer" | "implement" | "implementation" | "builder" => Some("implement"),
-        "verifier" | "verify" | "verification" | "validator" | "tester" => Some("test"),
-        "consultant" | "oracle" | "advisor" => Some("advisor"),
-        "custom" => Some("custom"),
-        _ => None,
-    }
-}
-
 fn build_assignment_prompt(
     prompt: &str,
     assignment: &SubAgentAssignment,
@@ -15454,7 +15432,11 @@ fn build_assignment_prompt(
     let role = assignment
         .role
         .as_deref()
-        .map(|role| normalize_role_alias(role).unwrap_or(role))
+        .map(|token| {
+            FleetRole::from_str(token)
+                .map(|role| role.as_str())
+                .unwrap_or(token)
+        })
         .unwrap_or("default");
     format!(
         "Assignment metadata:\n- objective: {}\n- role: {}\n- resolved_type: {}\n\nTask:\n{}",

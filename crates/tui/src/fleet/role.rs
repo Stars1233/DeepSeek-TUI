@@ -40,9 +40,11 @@ pub(crate) const FLEET_ROLE_SCHEMA_VALUES: [&str; 8] = [
     "custom",
 ];
 
-/// Role aliases accepted by `normalize_role_alias`. Kept in sync with the
-/// match arms below so every input that `FleetRole::from_str` accepts also
-/// resolves to a canonical role (avoids the dual-validation rejection in #2649).
+/// Human-readable hint listing every token [`FleetRole::from_str`] accepts,
+/// for spawn-time error messages. Keep in sync with
+/// [`migrate_legacy_role_token`] and the `from_str` match arms; those two are
+/// the only role parser (#2649 was a second table in the spawn tool drifting
+/// from this set).
 pub(crate) const VALID_ROLE_ALIASES: &str = "general; explore; planner; reviewer; implement; test; advisor; custom \
      (legacy aliases remain accepted: worker; scout; builder; verifier; consultant; default; general-purpose; general_purpose; exploration; explorer; plan; planning; awaiter; review; code-review; code_review; implementer; implementation; verify; verification; validator; tester; oracle)";
 
