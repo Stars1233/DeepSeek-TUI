@@ -476,3 +476,42 @@ async fn measured_budget_caps_actual_wire_output_and_accounts_overshoot_without_
     );
     assert!(result.result.as_deref().unwrap().contains("15/7"));
 }
+
+#[tokio::test]
+async fn root_fork_of_depth_two_leaf_cannot_regain_a_generation() {
+    let tmp = tempdir().unwrap();
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        4,
+    )));
+    let mut runtime = stub_runtime().with_max_spawn_depth(3).child_runtime();
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.manager = Arc::clone(&manager);
+    runtime.cancel_token.cancel();
+    let mut guard = manager.write().await;
+    let mut source = make_worker_spec("leaf", tmp.path().to_path_buf());
+    source.spawn_depth = 2;
+    source.max_spawn_depth = 2;
+    source.runtime_profile.spawn_depth = 2;
+    source.runtime_profile.max_spawn_depth = 2;
+    guard.register_worker(source);
+    let child = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime,
+            FleetRole::Scout,
+            "fork leaf".to_string(),
+            SubAgentAssignment::new("fork leaf".to_string(), None),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                resume_from_agent_id: Some("leaf".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let spec = &guard.worker_records[&child.agent_id].spec;
+    assert_eq!(spec.spawn_depth, 2);
+    assert_eq!(spec.max_spawn_depth, 2);
+    assert_eq!(spec.runtime_profile.spawn_depth, 2);
+    assert!(!spec.runtime_profile.can_spawn_child());
+}

@@ -6857,6 +6857,7 @@ impl SubAgentManager {
         // current parent's allowance. The manifest edge preserves this after
         // reload and for descendant accounting.
         if let Some(preserved) = options.preserve_runtime_profile.as_ref() {
+            runtime.spawn_depth = runtime.spawn_depth.max(preserved.spawn_depth);
             runtime.max_spawn_depth = runtime.max_spawn_depth.min(preserved.max_spawn_depth);
             runtime.worker_profile.token_budget =
                 narrow_optional_limit(runtime.worker_profile.token_budget, preserved.token_budget);
@@ -6906,6 +6907,13 @@ impl SubAgentManager {
                 }
                 max_steps = narrow_model_steps(max_steps, remaining);
             }
+            // A source's absolute position is part of its authority. A fork
+            // requested by root cannot turn a depth-2 leaf into a depth-1
+            // worker and thereby regain a generation of delegation.
+            runtime.spawn_depth = runtime
+                .spawn_depth
+                .max(source.spec.spawn_depth)
+                .max(source.spec.runtime_profile.spawn_depth);
             runtime.max_spawn_depth = runtime.max_spawn_depth.min(source.spec.max_spawn_depth);
         }
         if runtime.spawn_depth > runtime.max_spawn_depth {
