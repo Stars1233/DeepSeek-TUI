@@ -324,8 +324,20 @@ pub(super) fn explicit_change_paths(summary: &str) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     let mut in_changes = false;
     for line in summary.lines() {
-        let line = line.trim().trim_start_matches('#').trim();
+        let line = line.trim();
+        let is_heading = line.starts_with('#');
+        let line = line.trim_start_matches('#').trim();
         let lower = line.to_ascii_lowercase();
+        // SUBAGENT_OUTPUT_FORMAT uses a bare Markdown heading, with ordinary
+        // blank lines before its file bullets. That is an explicit declaration
+        // boundary just like the compatibility CHANGES: label.
+        if is_heading && lower == "changes" {
+            in_changes = true;
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
         let declaration = ["changes:", "changed files:", "files changed:"]
             .into_iter()
             .find(|prefix| lower.starts_with(prefix));

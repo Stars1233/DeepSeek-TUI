@@ -229,6 +229,39 @@ fn unchanged_dirty_file_does_not_satisfy_a_new_edit_claim() {
 }
 
 #[test]
+fn five_heading_output_declares_changed_files_without_claiming_evidence_or_risks() {
+    let tmp = tempdir().unwrap();
+    repository(tmp.path());
+    let (mut manager, id) = worker(tmp.path(), true, &[], &["src"]);
+    fs::write(tmp.path().join("src/lib.rs"), "updated\n").unwrap();
+    manager
+        .worker_records
+        .get_mut(&id)
+        .unwrap()
+        .delivery_evidence
+        .observed_writes
+        .insert("src/lib.rs".into());
+    let report = "### SUMMARY\n\nUpdated the parser.\n\n\
+        ### EVIDENCE\n\n- Reviewed src/reference.rs:12-19.\n\n\
+        ### CHANGES\n\n- `src/lib.rs` — adjusted the parser\n\n\
+        ### RISKS\n\n- src/consumer.rs still needs a separate review\n\n\
+        ### BLOCKERS\n\nNone.\n";
+    for report in [
+        report.to_string(),
+        report.replace("### CHANGES", "### changes"),
+    ] {
+        assert_eq!(
+            delivery::explicit_change_paths(&report),
+            BTreeSet::from(["src/lib.rs".into()])
+        );
+        assert_ne!(
+            complete(&mut manager, &id, &report).status,
+            "claim_mismatch"
+        );
+    }
+}
+
+#[test]
 fn modification_of_already_dirty_file_is_measured_against_spawn_content() {
     let tmp = tempdir().unwrap();
     repository(tmp.path());
