@@ -30,27 +30,27 @@ export const CHANGELOG: ChangelogRelease[] = [
   },
   {
     "version": "0.9.13",
-    "date": "2026-09-12",
+    "date": "2026-09-13",
     "unreleased": false,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13",
     "sections": [
       {
         "heading": "Fixed",
         "items": [
-          "Computer Use 0.2.2: mouse actions no longer steal focus or reclaim the foreground when the user switches apps mid-action; background typing, scrolling and selection use semantic input, and screenshots stay scoped to the targeted app. The bundled plugin and the first-party marketplace pin carry the same 0.2.2 sources.",
-          "Selecting a saved agent profile that is malformed, unreadable or duplicated now fails before any child request, including when its name matches a built-in role; the parent's default route is never substituted silently. agent(action: \"roster\") lists affected profile identities and paths, Fleet run creation performs the same check, and docs/SUBAGENTS.md documents the valid personal profile format with [permissions] (#6117, thanks @Gabriel-Degret).",
-          "Interactive startup no longer mistakes worker scheduling delays for an unresponsive terminal. Terminal ownership checks and shutdown cleanup remain enforced (#5929).",
-          "Interrupted conversations whose saved runtime store is missing recover into a fresh scope without restoring old tasks or approvals. Stale session saves cannot resurrect the broken binding (#6102).",
-          "Permission checks distinguish literal heredoc data from executable commands, including substitutions and shell stdin (#6098).",
-          "Automatic compaction runs quietly from live context pressure, preserving the current task and recent tool exchanges while keeping the system/tool prefix stable. Original history and the handoff are saved before context replacement; failed or canceled compaction retains the conversation (#5620, #6047).",
-          "Custom and gateway providers can override context limits for each exact model, so switching models also switches the meter and compaction budget (#6108).",
-          "Plugin suggestions explain their matching term and remember explicit dismissals across restarts. Generic words and repository-host domains no longer trigger unrelated installation prompts (#6031).",
-          "Plugin trust and automation deletion have keyboard and mouse confirmation controls bound to the exact reviewed content; users can still copy the command and changed content requires a fresh review (#6039).",
-          "The model-facing MCP start tool can reconnect an existing configured name after login without changing its credential key or restarting healthy siblings (#6030). A decreasing token-expiry countdown no longer makes a revoked credential look like a new login from another session.",
-          "Gemini setup uses the official endpoint's supported reasoning-effort field, avoiding the rejected top-level Google thinking object. Gemini 2.5 and 3 keep their supported effort ranges; signed tool history still survives reasoning changes and restart (#6018, thanks @vmakarov-uk).",
-          "Missed automation occurrences coalesce without overlapping a running job; restart reconciles durable receipts without replaying accepted work. Damaged neighboring records are isolated while preserving their original bytes."
+          "Operate can run structured workflows directly, with named phases, model assignments from Fleet, prerequisite results and shared budgets. Independent steps run together; dependent work waits for its required results and gates. Detached runs return their outcome to the owning conversation, and headless sessions stay alive between phases until the final handback is consumed.",
+          "Computer Use 0.3.1: mouse actions no longer steal focus or reclaim the foreground when the user switches apps mid-action; background typing, scrolling and selection use semantic input, and screenshots stay scoped to the targeted app. The bundled plugin and the first-party marketplace pin carry the same 0.3.1 sources. A registered macOS helper stays in charge of input through its Pause and Stop controls; an unavailable registered helper produces an error instead of silently…",
+          "The Fleet editor uses the standard model picker to manage sub-agent model and thinking assignments. Enter edits the selected row without changing the running session's model. Unconfigured providers are refused, failed saves retain the previous assignment, and a changed or removed team file must be reopened before a pick can overwrite it.",
+          "The provider catalog includes Baseten and the other compatible-provider templates as selectable rows, opening their existing prefilled setup forms. DeepSeek routes with clock-based pricing show the current peak or off-peak tier beside session cost, with translated labels.",
+          "Extensions, teams, workflows and automations support mouse-wheel scrolling. Plugin and MCP rows have keyboard enable/disable controls and two-step removal; MCP OAuth can retry with narrower scopes after a scope rejection.",
+          "Healthy sub-agents continue after an ordinary parent reply. Headless runs keep the existing Engine alive for child results within the run deadline. Explicit cancellation remains authoritative when result queues are full or a completion starts a followup turn.",
+          "Sub-agent followup supports multiple targets and all parked children, keeps old IDs connected to their current continuation, and saves continuation identity before starting work. Repeated followup does not fork duplicates.",
+          "Sub-agents validate declared output files and distinguish real edit claims from file citations and unrelated workspace changes. Disjoint file claims can run together; overlapping writers receive the actual conflict and remedies. Explicit read-only shell analysis requires an enforcing native sandbox and refuses execution when that protection is unavailable.",
+          "Delegation depth stays absolute through saved profiles, nested workers and continuations. Per-call token, step and time limits narrow inherited limits; continuation retains ancestor usage and deadlines. Budget stops preserve a bounded partial result and run the declared-output checks.",
+          "Agent rosters and detail pages have bounded output, visible continuation and descendant relationships, and usable handles for full diagnostic evidence. Completion receipts include measured worker and descendant token usage, count each continuation once, and distinguish unreported usage from zero.",
+          "Localization builds resolve the active checkout at build-script execution, preventing a shared Cargo target from embedding another worktree's catalog.",
+          "Selecting a saved agent profile that is malformed, unreadable or duplicated now fails before any child request, including when its name matches a built-in role; the parent's default route is never substituted silently. agent(action: \"roster\") lists affected profile identities and paths, Fleet run creation performs the same check, and docs/SUBAGENTS.md documents the valid personal profile format with [permissions] (#6117, thanks @Gabriel-Degret)."
         ],
-        "itemCount": 79
+        "itemCount": 89
       },
       {
         "heading": "Changed",

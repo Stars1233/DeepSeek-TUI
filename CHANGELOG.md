@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.13] - 2026-09-12
+## [0.9.13] - 2026-09-13
 
 Codewhale v0.9.13 addresses integrity issues in 0.9.12:
 multiline paste is one paste again, truncated tool arguments can no longer execute, strict
 ACP clients connect again, concurrent instances stop destroying each
-other's queued text, and the Computer Use bundle includes plugin 0.2.2
+other's queued text, and the Computer Use bundle includes plugin 0.3.1
 with an accessibility-first pointer that no longer steals focus. DeepSeek V4.1 Flash
 (`deepseek-flash`) is the default DeepSeek model, reasoning-capable routes
 keep reasoning out of the answer even when a model id carries no version
@@ -21,11 +21,52 @@ reconnect.
 
 ### Fixed
 
-- Computer Use 0.2.2: mouse actions no longer steal focus or reclaim the
+- Operate can run structured workflows directly, with named phases, model
+  assignments from Fleet, prerequisite results and shared budgets. Independent
+  steps run together; dependent work waits for its required results and gates.
+  Detached runs return their outcome to the owning conversation, and headless
+  sessions stay alive between phases until the final handback is consumed.
+- Computer Use 0.3.1: mouse actions no longer steal focus or reclaim the
   foreground when the user switches apps mid-action; background typing,
   scrolling and selection use semantic input, and screenshots stay scoped to
   the targeted app. The bundled plugin and the first-party marketplace pin
-  carry the same 0.2.2 sources.
+  carry the same 0.3.1 sources. A registered macOS helper stays in charge of
+  input through its Pause and Stop controls; an unavailable registered helper
+  produces an error instead of silently bypassing those controls.
+- The Fleet editor uses the standard model picker to manage sub-agent model
+  and thinking assignments. Enter edits the selected row without changing the
+  running session's model. Unconfigured providers are refused, failed saves
+  retain the previous assignment, and a changed or removed team file must be
+  reopened before a pick can overwrite it.
+- The provider catalog includes Baseten and the other compatible-provider
+  templates as selectable rows, opening their existing prefilled setup forms.
+  DeepSeek routes with clock-based pricing show the current peak or off-peak
+  tier beside session cost, with translated labels.
+- Extensions, teams, workflows and automations support mouse-wheel scrolling.
+  Plugin and MCP rows have keyboard enable/disable controls and two-step
+  removal; MCP OAuth can retry with narrower scopes after a scope rejection.
+- Healthy sub-agents continue after an ordinary parent reply. Headless runs
+  keep the existing Engine alive for child results within the run deadline.
+  Explicit cancellation remains authoritative when result queues are full or
+  a completion starts a followup turn.
+- Sub-agent followup supports multiple targets and all parked children, keeps
+  old IDs connected to their current continuation, and saves continuation
+  identity before starting work. Repeated followup does not fork duplicates.
+- Sub-agents validate declared output files and distinguish real edit claims
+  from file citations and unrelated workspace changes. Disjoint file claims
+  can run together; overlapping writers receive the actual conflict and remedies.
+  Explicit read-only shell analysis requires an enforcing native sandbox and
+  refuses execution when that protection is unavailable.
+- Delegation depth stays absolute through saved profiles, nested workers and
+  continuations. Per-call token, step and time limits narrow inherited limits;
+  continuation retains ancestor usage and deadlines. Budget stops preserve a
+  bounded partial result and run the declared-output checks.
+- Agent rosters and detail pages have bounded output, visible continuation and
+  descendant relationships, and usable handles for full diagnostic evidence.
+  Completion receipts include measured worker and descendant token usage,
+  count each continuation once, and distinguish unreported usage from zero.
+- Localization builds resolve the active checkout at build-script execution,
+  preventing a shared Cargo target from embedding another worktree's catalog.
 - Selecting a saved agent profile that is malformed, unreadable or duplicated
   now fails before any child request, including when its name matches a
   built-in role; the parent's default route is never substituted silently.
