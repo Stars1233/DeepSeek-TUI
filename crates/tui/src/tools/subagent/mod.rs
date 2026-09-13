@@ -5594,25 +5594,11 @@ impl SubAgentManager {
         }
         let workspace = &record.spec.workspace;
         let changed = record.delivery_evidence.changed_paths(workspace);
-        let owned_changes = changed
-            .as_ref()
-            .map(|paths| {
-                paths
-                    .iter()
-                    .filter(|path| {
-                        self.validate_write_scope(worker_id, std::slice::from_ref(path))
-                            .is_ok()
-                    })
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
         let mut verification = delivery::verify_changes(
             result.result.as_deref().unwrap_or_default(),
             record.spec.runtime_profile.permissions.write,
             &record.delivery_evidence,
             changed.as_ref(),
-            &owned_changes,
             &record
                 .spec
                 .launch_manifest

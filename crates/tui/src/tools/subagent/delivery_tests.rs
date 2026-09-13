@@ -192,6 +192,11 @@ fn change_like_prose_and_line_citations_are_never_edit_claims() {
         "Fixed behavior is documented in src/lib.rs:12-19.",
         "CHANGES: None\nThe added guard is at src/lib.rs:12-19",
         "CHANGES: src/lib.rs:12-19",
+        "CHANGES:\n- Reviewed src/lib.rs:12-19.",
+        "CHANGES:\n- Reviewed src/lib.rs:12-19!",
+        "CHANGES:\n- Reviewed src/lib.rs:12-19:",
+        "CHANGES: [src/lib.rs:12-19](src/lib.rs#L12-L19)",
+        "CHANGES: [source](src/lib.rs:12-19)",
     ] {
         assert!(
             delivery::explicit_change_paths(report).is_empty(),
@@ -255,21 +260,40 @@ fn committed_change_is_compared_with_exact_spawn_head_without_timestamp_guessing
 }
 
 #[test]
-fn an_owned_write_without_a_declaration_is_flagged_but_peer_changes_are_not() {
+fn an_observed_write_without_a_declaration_is_flagged_but_external_changes_are_not() {
     let tmp = tempdir().unwrap();
     repository(tmp.path());
     let (mut manager, id) = worker(tmp.path(), true, &[], &["src"]);
     fs::write(tmp.path().join("src/lib.rs"), "new change\n").unwrap();
+    manager
+        .worker_records
+        .get_mut(&id)
+        .unwrap()
+        .delivery_evidence
+        .observed_writes
+        .insert("src/lib.rs".into());
     assert_eq!(
         complete(&mut manager, &id, "CHANGES: None").status,
         "claim_mismatch"
     );
-    let (mut manager, id) = worker(tmp.path(), true, &[], &["reports"]);
-    fs::write(tmp.path().join("src/lib.rs"), "peer change\n").unwrap();
-    assert_eq!(
-        complete(&mut manager, &id, "CHANGES: None").status,
-        "self_report_only"
-    );
+    for scope in ["reports", "."] {
+        let (mut manager, id) = worker(tmp.path(), true, &[], &[scope]);
+        fs::write(
+            tmp.path().join("src/lib.rs"),
+            format!("external {scope} change\n"),
+        )
+        .unwrap();
+        assert!(
+            manager.worker_records[&id]
+                .delivery_evidence
+                .observed_writes
+                .is_empty()
+        );
+        assert_eq!(
+            complete(&mut manager, &id, "CHANGES: None").status,
+            "self_report_only"
+        );
+    }
 }
 
 #[test]

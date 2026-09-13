@@ -296,14 +296,25 @@ pub(super) fn check_deliverable(workspace: &Path, path: &str, allowed: bool) -> 
 }
 
 fn citation(token: &str) -> bool {
-    let Some((_, line)) = token.rsplit_once(':') else {
-        return false;
-    };
-    let mut numbers = line.split('-');
-    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-    numbers.next().is_some_and(numeric)
-        && numbers.next().is_none_or(numeric)
-        && numbers.next().is_none()
+    // A citation may be sentence-final or either side of a Markdown link.
+    // Normalize punctuation only for citation detection; never rewrite a path.
+    token.split("](").any(|part| {
+        let part = part.trim_end_matches(|ch: char| {
+            matches!(
+                ch,
+                '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"' | '`'
+            )
+        });
+        let Some((_, line)) = part.rsplit_once(':') else {
+            return false;
+        };
+        let mut numbers = line.split('-');
+        let numeric =
+            |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+        numbers.next().is_some_and(numeric)
+            && numbers.next().is_none_or(numeric)
+            && numbers.next().is_none()
+    })
 }
 
 pub(super) fn explicit_change_paths(summary: &str) -> BTreeSet<String> {
@@ -348,6 +359,7 @@ pub(super) fn explicit_change_paths(summary: &str) -> BTreeSet<String> {
             {
                 continue;
             }
+            let token = token.split_once("](").map_or(token, |(label, _)| label);
             if let Ok(path) = normalize_claim_path(token)
                 && path != "."
             {
@@ -363,7 +375,6 @@ pub(super) fn verify_changes(
     write_capable: bool,
     evidence: &DeliveryEvidence,
     changed: Option<&BTreeSet<String>>,
-    owned_changes: &BTreeSet<String>,
     declared_outputs: &BTreeSet<String>,
 ) -> Option<AgentRunVerificationSummary> {
     if !write_capable {
@@ -373,12 +384,11 @@ pub(super) fn verify_changes(
     let missing = changed
         .map(|changed| claimed.difference(changed).cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    let observed = evidence
+    // A path changing inside a writable scope proves neither the actor nor a
+    // child write. External tools and people can edit the same checkout, so only
+    // successful bounded write receipts can support an undeclared-write claim.
+    let undeclared = evidence
         .observed_writes
-        .union(owned_changes)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let undeclared = observed
         .iter()
         .filter(|path| {
             changed.is_none_or(|changed| changed.contains(*path))
