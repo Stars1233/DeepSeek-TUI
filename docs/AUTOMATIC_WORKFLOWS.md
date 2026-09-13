@@ -1,11 +1,13 @@
 # Automatic Workflows
 
-You do **not** need to write a `.workflow.js` file to coordinate agents. In
-Operate, ordinary messages can use direct tools or background workers; workers
-are preferred for independent, parallel, background, or long-running work.
-Workflow is reserved for ordered phases, gates, shared budgets, replay, or
-deterministic fan-in. Act/Agent can still use the optional soft-auto policy
-described below.
+You do **not** need to write a `.workflow.js` file to coordinate agents. Operate
+handles small or tightly coupled work directly. Multi-step delegation starts
+with a compact Workflow plan: named steps, dependencies, bounded scopes, and
+completion checks. Workflow runs the same sub-agents that Fleet configures and
+manages, passing results and evidence between dependent steps. One bounded,
+independent task can use a direct background agent; follow-up work should reuse
+that agent with `followup`. Act/Agent can still use the optional soft-auto
+policy described below.
 
 Related docs:
 
@@ -28,10 +30,13 @@ Related docs:
 5. **Launch** — structured `plan` JSON (goal / phases / children) or a short
    inline script. Parallel branches use `parallel()` partial-success semantics.
 
-In Operate, those same asks prefer one or more direct background workers when
-the split improves throughput, isolation, or context focus. Small or tightly
-coupled work can stay in the parent under the active tool and approval policy.
-You can always type `/workflow` to request orchestration explicitly.
+In Operate, those same asks use a compact Workflow plan when they need multiple
+delegated steps. The plan makes parallel work, dependency handoffs, and the
+evidence needed to finish visible together. Small or tightly coupled work can
+stay in the parent under the active tool and approval policy; one bounded,
+independent task can use a direct agent. Continue an existing agent with
+`followup` when the task remains the same. You can always type `/workflow` to
+request orchestration explicitly.
 
 ## Read-only auto-start vs write approval
 

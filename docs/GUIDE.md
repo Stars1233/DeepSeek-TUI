@@ -336,9 +336,11 @@ Act mode is the default for most contribution work. It lets Codewhale read,
 run checks, and edit files while keeping risky actions behind approval gates.
 
 Operate keeps that direct tool surface and its approval, sandbox, shell,
-ask-rule, and repository protections. Its difference is orchestration emphasis:
-Codewhale prefers fleet workers for independent, parallel, background, or
-long-running work, while small or tightly coupled work can remain in the parent.
+ask-rule, and repository protections. Small or tightly coupled work stays
+direct. Multi-step delegation uses a compact Workflow plan with dependencies,
+bounded scopes, and completion evidence passed between steps. Fleet configures
+and manages those same sub-agents and their roles. One bounded, independent
+task can use a direct agent; continued work reuses it through `followup`.
 Heavy work can also be proposed to a Daytona cloud agent with `codewhale
 dispatch` or `/dispatch` (explicit confirmation; remotes are `github` / `cnb` /
 `gitee`). See [DAYTONA_CLOUD_DISPATCH.md](DAYTONA_CLOUD_DISPATCH.md).
