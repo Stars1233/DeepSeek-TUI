@@ -1328,6 +1328,8 @@
   "InfoLineHelp": "मदद",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "पीक",
+  "InfoLineOffPeak": "ऑफ-पीक",
   "InfoLineWhales": "व्हेल",
   "InfoLineAutomation": "स्वचालन",
   "InfoLineNotConnected": "कनेक्ट नहीं है",

@@ -1328,6 +1328,8 @@
   "InfoLineHelp": "довідка",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "пік",
+  "InfoLineOffPeak": "непіковий",
   "InfoLineWhales": "кити",
   "InfoLineAutomation": "автоматизація",
   "InfoLineNotConnected": "не підключено",

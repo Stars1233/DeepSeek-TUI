@@ -33,6 +33,30 @@ pub(crate) fn session_cost_label(app: &App) -> String {
     .unwrap_or_default()
 }
 
+/// The clock-dependent billing tier of the active route, when the route has
+/// one: DeepSeek's V4 Pro/Flash and Flash halve their rates off-peak. `None`
+/// for flat-priced routes, for other vendors, and while auto routing has not
+/// pinned a concrete model.
+pub(crate) fn billing_tier_label(app: &App, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    use crate::config::ApiProvider;
+    use codewhale_localization::{MessageId, tr};
+    if app.auto_model
+        || !matches!(
+            app.api_provider.catalog_identity(),
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN
+        )
+    {
+        return None;
+    }
+    let peak = crate::pricing::deepseek_time_tier(&app.model, now)?;
+    let id = if peak {
+        MessageId::InfoLinePeak
+    } else {
+        MessageId::InfoLineOffPeak
+    };
+    Some(tr(app.ui_locale, id).into_owned())
+}
+
 /// Output tokens for the metrics line: the live stream's running estimate,
 /// else the last turn's provider receipt. Request throughput is independently
 /// sourced from SessionMetrics, so a long tool call cannot lower that rate.
@@ -207,6 +231,21 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
             InfoSegmentId::Cost,
             "",
             cost,
+            ChromeInk::MetadataValue,
+        ));
+    }
+
+    // DeepSeek bills by the clock: the same flag that halves the rates
+    // off-peak is painted beside the cost, so the operator can see which tier
+    // the next turn buys without opening /cost. Gated on the cost item, whose
+    // owner asked for price readings by name.
+    if shows(StatusItem::Cost)
+        && let Some(tier) = billing_tier_label(app, chrono::Utc::now())
+    {
+        segments.push(InfoSegment::new(
+            InfoSegmentId::BillingTier,
+            "",
+            tier,
             ChromeInk::MetadataValue,
         ));
     }
@@ -2523,6 +2562,56 @@ mod tests {
                 .any(|field| field.kind == RouteFieldKind::Effort && field.text == label),
             "{fields:?}"
         );
+    }
+
+    /// DeepSeek's clock-tiered routes show which tier the next turn buys,
+    /// beside the cost; flat routes and other vendors show nothing.
+    #[test]
+    fn deepseek_tiered_routes_paint_the_billing_tier_beside_the_cost() {
+        use crate::config::ApiProvider;
+        use chrono::TimeZone as _;
+        let mut app = app_with_context_percent(10);
+        app.auto_model = false;
+        app.api_provider = ApiProvider::Deepseek;
+        app.model = "deepseek-v4-flash".to_string();
+        // Wednesday 2026-09-16: 02:00Z is inside the 01:00-04:00 peak
+        // window, 12:00Z outside every window.
+        let peak = chrono::Utc.with_ymd_and_hms(2026, 9, 16, 2, 0, 0).unwrap();
+        let off = chrono::Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0).unwrap();
+        assert_eq!(
+            super::billing_tier_label(&app, peak).as_deref(),
+            Some("peak")
+        );
+        assert_eq!(
+            super::billing_tier_label(&app, off).as_deref(),
+            Some("off-peak")
+        );
+        let ids: Vec<InfoSegmentId> = super::info_segments(&app, 200)
+            .iter()
+            .map(|segment| segment.id)
+            .collect();
+        assert!(ids.contains(&InfoSegmentId::BillingTier), "{ids:?}");
+        let row = metrics_row(&app, 200);
+        assert!(row.contains("peak"), "the tier reads in the row: {row:?}");
+
+        // A flat-priced DeepSeek model has no tier to show.
+        app.model = "deepseek-chat".to_string();
+        assert_eq!(super::billing_tier_label(&app, peak), None);
+        let ids: Vec<InfoSegmentId> = super::info_segments(&app, 200)
+            .iter()
+            .map(|segment| segment.id)
+            .collect();
+        assert!(!ids.contains(&InfoSegmentId::BillingTier), "{ids:?}");
+
+        // Another vendor serving a DeepSeek id is priced on its own terms.
+        app.model = "deepseek-v4-flash".to_string();
+        app.api_provider = ApiProvider::Openai;
+        assert_eq!(super::billing_tier_label(&app, peak), None);
+
+        // Auto routing has not pinned a model, so there is nothing to claim.
+        app.api_provider = ApiProvider::Deepseek;
+        app.auto_model = true;
+        assert_eq!(super::billing_tier_label(&app, peak), None);
     }
 
     /// A provider switch must not hide missing historical coverage.

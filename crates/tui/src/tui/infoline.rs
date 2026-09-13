@@ -76,6 +76,10 @@ pub enum InfoSegmentId {
     Context,
     /// Session cost, the one price number (`$0.14`).
     Cost,
+    /// The clock-dependent billing tier of the active route (`peak` /
+    /// `off-peak`), painted beside the cost only for routes whose rates move
+    /// with the clock (DeepSeek V4 Pro/Flash and Flash).
+    BillingTier,
     /// Output tokens of the live or last turn (`↓ 1.2K`).
     OutputTokens,
     /// Time to first token (`ttft 400ms`).
@@ -112,6 +116,9 @@ impl InfoSegmentId {
             Self::Cache => 8,
             Self::Ttft => 8,
             Self::OutputTokens => 7,
+            // The tier is a reading about the cost, not the cost: it sheds
+            // with the telemetry, ahead of the number it annotates.
+            Self::BillingTier => 7,
             Self::Cost => 6,
             // The balance outlives the cost: it is off by default, so a row
             // that shows one is a row whose owner asked for it by name.

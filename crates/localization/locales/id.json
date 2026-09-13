@@ -1328,6 +1328,8 @@
   "InfoLineHelp": "bantuan",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "jam puncak",
+  "InfoLineOffPeak": "non-puncak",
   "InfoLineWhales": "paus",
   "InfoLineAutomation": "otomatisasi",
   "InfoLineNotConnected": "tidak terhubung",

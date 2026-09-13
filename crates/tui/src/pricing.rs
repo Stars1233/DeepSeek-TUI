@@ -1015,6 +1015,21 @@ fn deepseek_is_peak(now: DateTime<Utc>) -> bool {
     !deepseek_weekend_off_peak(now) && deepseek_peak_hour(now.hour())
 }
 
+/// The clock-dependent tier a DeepSeek route bills at right now: `Some(true)`
+/// at peak, `Some(false)` off-peak, `None` for a model whose rates do not move
+/// with the clock. The model set is exactly the time-aware arm of
+/// [`pricing_for_model_at`], so the chip that shows this and the receipt that
+/// prices the turn can never disagree about which routes are tiered.
+#[must_use]
+pub(crate) fn deepseek_time_tier(model: &str, now: DateTime<Utc>) -> Option<bool> {
+    let lower = model.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-flash"
+    )
+    .then(|| deepseek_is_peak(now))
+}
+
 fn deepseek_v4_pro_pricing(now: DateTime<Utc>) -> ModelPricing {
     // September 11 vendor reversal: Pro remains available at its own rates.
     let peak = deepseek_is_peak(now);
@@ -4229,6 +4244,31 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn deepseek_time_tier_names_the_window_for_tiered_models_only() {
+        // Wednesday 2026-09-16: 02:00Z sits inside the 01:00-04:00 peak
+        // window, 12:00Z outside every window.
+        let peak = Utc.with_ymd_and_hms(2026, 9, 16, 2, 0, 0).unwrap();
+        let off = Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0).unwrap();
+        // Saturday 02:00 Beijing time (Friday 18:00Z) bills off-peak even
+        // inside a weekday peak hour.
+        let weekend = Utc.with_ymd_and_hms(2026, 9, 18, 18, 0, 0).unwrap();
+        for model in ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-flash"] {
+            assert_eq!(deepseek_time_tier(model, peak), Some(true), "{model}");
+            assert_eq!(deepseek_time_tier(model, off), Some(false), "{model}");
+            assert_eq!(deepseek_time_tier(model, weekend), Some(false), "{model}");
+        }
+        assert_eq!(deepseek_time_tier(" DeepSeek-V4-Flash ", peak), Some(true));
+        for flat in [
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "deepseek-ai/deepseek-v4-flash",
+            "",
+        ] {
+            assert_eq!(deepseek_time_tier(flat, peak), None, "{flat}");
+        }
     }
 
     #[test]

@@ -1351,6 +1351,8 @@
   "InfoLineHelp": "도움말",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "피크",
+  "InfoLineOffPeak": "오프피크",
   "InfoLineWhales": "고래",
   "InfoLineAutomation": "자동화",
   "InfoLineNotConnected": "연결 안 됨",

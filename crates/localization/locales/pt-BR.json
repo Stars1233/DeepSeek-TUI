@@ -1351,6 +1351,8 @@
   "InfoLineHelp": "ajuda",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "pico",
+  "InfoLineOffPeak": "fora de pico",
   "InfoLineWhales": "baleias",
   "InfoLineAutomation": "automação",
   "InfoLineNotConnected": "não conectado",

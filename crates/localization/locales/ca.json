@@ -1328,6 +1328,8 @@
   "InfoLineHelp": "ajuda",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "hora punta",
+  "InfoLineOffPeak": "hora vall",
   "InfoLineWhales": "balenes",
   "InfoLineAutomation": "automatització",
   "InfoLineNotConnected": "no connectat",

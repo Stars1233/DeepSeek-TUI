@@ -1351,6 +1351,8 @@
   "InfoLineHelp": "帮助",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "高峰",
+  "InfoLineOffPeak": "错峰",
   "InfoLineWhales": "鲸鱼",
   "InfoLineAutomation": "自动化",
   "InfoLineNotConnected": "未连接",

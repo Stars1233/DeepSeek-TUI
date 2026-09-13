@@ -1351,6 +1351,8 @@
   "InfoLineHelp": "trợ giúp",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "cao điểm",
+  "InfoLineOffPeak": "thấp điểm",
   "InfoLineWhales": "cá voi",
   "InfoLineAutomation": "tự động hóa",
   "InfoLineNotConnected": "chưa kết nối",

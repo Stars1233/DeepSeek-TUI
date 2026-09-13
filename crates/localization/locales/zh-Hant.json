@@ -921,6 +921,8 @@
   "InfoLineHelp": "幫助",
   "InfoLineContext": "ctx",
   "InfoLineTtft": "ttft",
+  "InfoLinePeak": "尖峰",
+  "InfoLineOffPeak": "離峰",
   "InfoLineWhales": "鯨魚",
   "InfoLineAutomation": "自動化",
   "InfoLineNotConnected": "未連線",
