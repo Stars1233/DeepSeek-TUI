@@ -3330,8 +3330,12 @@ fn agent_definition_explains_background_child_and_wait() {
     assert!(until.contains("every child running at call time has settled"));
     assert!(until.contains("activity also returns on progress"));
     let detached = schema_property_description(&schema, "detached");
-    assert!(detached.contains("False (default): the turn owns"));
-    assert!(detached.contains("true: detached work outlives the turn"));
+    assert!(detached.contains("continue after ordinary parent turn completion"));
+    assert!(detached.contains("remain explicitly cancellable"));
+    assert!(
+        detached.contains("true additionally opts this subtree out of parent-turn cancellation")
+    );
+    assert!(detached.contains("its own budgets still apply"));
     assert!(description.contains("action=claim"));
     assert!(description.contains("Fleet role"));
     assert!(
@@ -6281,9 +6285,43 @@ async fn agent_tool_status_returns_running_child_projection() {
         .expect("status action succeeds");
 
     assert_eq!(result.metadata.as_ref().unwrap()["action"], json!("status"));
-    assert!(result.content.contains("agent_status_probe"));
-    assert!(result.content.contains("running"));
-    assert!(result.content.contains("transcript_handle"));
+    let compact: Value = serde_json::from_str(&result.content).expect("compact status");
+    assert_eq!(compact["agent_id"], agent_id);
+    assert_eq!(compact["status"], "model_wait");
+    assert_eq!(compact["terminal"], false);
+    assert_eq!(
+        result.metadata.as_ref().unwrap()["status"],
+        compact["status"]
+    );
+    assert!(compact.get("transcript_handle").is_none());
+    assert!(
+        compact["detail_hint"]
+            .as_str()
+            .unwrap()
+            .contains("detail=true")
+    );
+    assert!(result.content.len() <= lifecycle::COMPACT_STATUS_BYTES);
+
+    let detail = tool
+        .execute(
+            json!({"action": "status", "agent_id": agent_id, "detail": true}),
+            &context,
+        )
+        .await
+        .expect("addressed diagnostic page");
+    let detail_json: Value = serde_json::from_str(&detail.content).expect("detail status");
+    let handle: VarHandle = serde_json::from_value(detail_json["transcript_handle"].clone())
+        .expect("typed transcript handle");
+    assert!(
+        context
+            .runtime
+            .handle_store
+            .lock()
+            .await
+            .get(&handle)
+            .is_some()
+    );
+    assert_eq!(detail.metadata.as_ref().unwrap()["agent_id"], agent_id);
 }
 
 #[tokio::test]
@@ -6546,6 +6584,19 @@ async fn coordination_interrupt_fans_in_once_and_preserves_checkpoint() {
     let mut child_spec = make_worker_spec(&agent_id, tmp.path().to_path_buf());
     child_spec.parent_run_id = Some("agent_parent".to_string());
     manager.register_worker(child_spec);
+    manager.register_worker(make_worker_spec(
+        "agent_unrelated",
+        tmp.path().to_path_buf(),
+    ));
+    // A real headless parent has only a ledger row. Unknown, unrelated and
+    // self identities must still fail before any terminal delivery occurs.
+    for caller in ["agent_missing", "agent_unrelated", agent_id.as_str()] {
+        assert!(
+            manager
+                .interrupt_child(&agent_id, Some(caller), "forbidden".into())
+                .is_err()
+        );
+    }
     manager.record_worker_event(
         &agent_id,
         AgentWorkerStatus::RunningTool,

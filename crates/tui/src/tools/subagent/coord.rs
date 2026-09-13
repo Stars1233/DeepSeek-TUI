@@ -347,7 +347,7 @@ impl AgentsFollowupTool {
                 continued_from_checkpoint: true,
                 continuation_handle: None,
                 note: format!(
-                    "continued from {source} as {}; original receipt retained",
+                    "resumed from checkpoint {source} as {}; original receipt retained",
                     snapshot.agent_id
                 ),
             }

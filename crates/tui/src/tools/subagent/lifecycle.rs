@@ -2,6 +2,7 @@
 use super::*;
 
 pub(super) const COMPACT_STATUS_BYTES: usize = 8192;
+pub(super) const COMPACT_SPAWN_BYTES: usize = 4096;
 const DETAIL_STATUS_BYTES: usize = 32 * 1024;
 
 pub(super) fn text_preview(value: &str, bytes: usize) -> String {
@@ -33,6 +34,56 @@ pub(super) fn page(input: &Value) -> Result<(usize, usize), ToolError> {
         return Err(ToolError::invalid_input("limit must be 1..20"));
     }
     Ok((offset, limit))
+}
+
+// Keep the same typed route receipt on every surface. Exceptionally long
+// profile/model labels are previews; detail inspection retains their source.
+pub(super) fn compact_child_route(mut route: Value) -> Value {
+    if serde_json::to_vec(&route).is_ok_and(|bytes| bytes.len() <= 1024) {
+        return route;
+    }
+    let Some(object) = route.as_object_mut() else {
+        return route;
+    };
+    for cap in [128, 64, 32, 16, 8] {
+        let mut truncated = false;
+        for value in object.values_mut() {
+            if let Value::String(text) = value
+                && text.len() > cap
+            {
+                *text = text_preview(text, cap);
+                truncated = true;
+            }
+        }
+        if truncated {
+            object.insert("truncated".into(), json!(true));
+        }
+        if serde_json::to_vec(&object).is_ok_and(|bytes| bytes.len() <= 1024) {
+            break;
+        }
+    }
+    route
+}
+
+pub(super) fn status_result(mut payload: Value, peek: bool) -> Result<ToolResult, ToolError> {
+    let action = if peek { "peek" } else { "status" };
+    payload["action"] = json!(action);
+    let mut metadata = if payload.get("agent_id").is_some() {
+        json!({
+            "action": action, "agent_id": payload["agent_id"],
+            "status": payload["status"], "terminal": payload["terminal"],
+            "child_route": payload["child_route"],
+        })
+    } else {
+        json!({"action": action, "count": payload["count"]})
+    };
+    if let Some(unchanged) = payload.get("unchanged") {
+        metadata["unchanged"] = unchanged.clone();
+    }
+    let mut result = ToolResult::json(&payload)
+        .map_err(|error| ToolError::execution_failed(error.to_string()))?;
+    result.metadata = Some(metadata);
+    Ok(result)
 }
 
 pub(super) fn compact_row(manager: &SubAgentManager, agent: &SubAgent) -> Value {
@@ -131,11 +182,8 @@ pub(super) fn compact_row(manager: &SubAgentManager, agent: &SubAgent) -> Value 
         object.insert("verification".into(), verification);
         if let Some(route) = &record.spec.child_route {
             object.insert(
-                "route".into(),
-                json!({
-                    "provider": text_preview(&route.provider_id, 48),
-                    "model": text_preview(&route.model_id, 64),
-                }),
+                "child_route".into(),
+                compact_child_route(serde_json::to_value(route).unwrap_or(Value::Null)),
             );
         }
     }

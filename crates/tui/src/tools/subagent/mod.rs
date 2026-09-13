@@ -7571,7 +7571,15 @@ impl SubAgentManager {
         else {
             return Ok(agent_id);
         };
-        let caller_identity = self.continuation_target(caller)?;
+        let caller_identity = if self.agents.contains_key(caller) {
+            self.continuation_target(caller)?
+        } else {
+            // Internal headless parents can own a worker record without a
+            // paired SubAgent projection. A missing caller still fails closed.
+            self.worker_record_by_ref(caller)
+                .map(|(id, _)| id)
+                .ok_or_else(|| anyhow!("Calling agent not found"))?
+        };
         if caller_identity == self.continuation_target(&agent_id)? {
             return Err(anyhow!(
                 "Refusing {action} on self (agent_id '{agent_id}'); child coordination authority is limited to strict descendants."
@@ -9535,7 +9543,7 @@ impl ToolSpec for AgentTool {
             "terminal": projection.terminal,
             "context_mode": projection.context_mode,
             "prefix_cache": projection.prefix_cache,
-            "child_route": projection.child_route,
+            "child_route": value["child_route"],
         });
         tool_result.metadata = Some(metadata);
         Ok(tool_result)
@@ -9555,6 +9563,27 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
         return;
     };
     object.remove("snapshot");
+    // Context mode already states whether the prefix is inherited. These
+    // repeated descriptions otherwise crowd out the effective budget receipt.
+    object.remove("prefix_cache");
+    object.remove("fork_context");
+    object.remove("fleet_profile");
+    if object.get("run_id") == object.get("agent_id") {
+        object.remove("run_id");
+    }
+    if let Some(name) = object.get("name").and_then(Value::as_str) {
+        let name = lifecycle::text_preview(name, 64);
+        object.insert("name".into(), json!(name));
+    }
+    if let Some(route) = object.get_mut("child_route") {
+        *route = lifecycle::compact_child_route(std::mem::take(route));
+    }
+    if let Some(follow_up) = object.get_mut("follow_up").and_then(Value::as_object_mut) {
+        follow_up.remove("session_name");
+    }
+    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
+        usage.remove("note");
+    }
     if let Some(profile) = object
         .get("worker_record")
         .and_then(|worker| worker.pointer("/spec/runtime_profile"))
@@ -9568,7 +9597,7 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
             "wall_time_secs",
             "wall_deadline_ms",
         ] {
-            if let Some(value) = profile.get(key) {
+            if let Some(value) = profile.get(key).filter(|value| !value.is_null()) {
                 limits.insert(key.to_string(), value.clone());
             }
         }
@@ -9577,6 +9606,7 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
     if let Some(paths) = object
         .get("worker_record")
         .and_then(|worker| worker.pointer("/spec/launch_manifest/deliverables"))
+        .filter(|paths| paths.as_array().is_some_and(|paths| !paths.is_empty()))
         .cloned()
     {
         object.insert("deliverables".to_string(), paths);
@@ -9590,8 +9620,25 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
     object.insert("compact".to_string(), json!(true));
     object.insert(
         "compact_note".to_string(),
-        json!("Spawn receipt compacted; inspect with agent_id or start verbose: true."),
+        json!("Inspect with agent_id, detail=true; start verbose: true."),
     );
+    // Declared output paths can be numerous and long. Keep every path that
+    // fits verbatim and make omissions explicit; addressed detail has them all.
+    let mut omitted = 0;
+    while serde_json::to_vec(&object)
+        .is_ok_and(|bytes| bytes.len() > lifecycle::COMPACT_SPAWN_BYTES)
+    {
+        if object
+            .get_mut("deliverables")
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop)
+            .is_none()
+        {
+            break;
+        }
+        omitted += 1;
+        object.insert("deliverables_omitted".into(), json!(omitted));
+    }
 }
 
 /// Repeat peek/status calls on an unchanged running child inside this window
@@ -9684,8 +9731,7 @@ async fn inspect_agent_from_input(
                 store.evict_session(&format!("agent:{id}"));
             }
         }
-        return ToolResult::json(&payload)
-            .map_err(|error| ToolError::execution_failed(error.to_string()));
+        return lifecycle::status_result(payload, peek);
     }
 
     if let Some(agent_ref) = parse_agent_ref(input)? {
@@ -9739,8 +9785,7 @@ async fn inspect_agent_from_input(
         let value = serde_json::to_value(&projection)
             .map_err(|error| ToolError::execution_failed(error.to_string()))?;
         let payload = lifecycle::bounded_detail(value, compact, offset, limit);
-        return ToolResult::json(&payload)
-            .map_err(|error| ToolError::execution_failed(error.to_string()));
+        return lifecycle::status_result(payload, peek);
     }
 
     unreachable!("unaddressed status returned through the compact roster")
