@@ -421,6 +421,7 @@ fn disjoint_sibling_write_paths_admit_and_ancestor_overlap_names_actual_remedy()
 
 #[cfg(unix)]
 #[tokio::test]
+#[allow(clippy::print_stderr)] // Test receipt must distinguish refused probes from exercised isolation.
 async fn enforced_readonly_python_queries_sqlite_under_a_live_peer_write_claim() {
     let tmp = tempdir().unwrap();
     let database = rusqlite::Connection::open(tmp.path().join("fixture.sqlite")).unwrap();

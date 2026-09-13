@@ -103,6 +103,7 @@ async fn enforced_readonly_refuses_external_backend_without_dispatch() {
 }
 
 #[cfg(unix)]
+#[allow(clippy::print_stderr)] // Test receipt distinguishes unavailable enforcement from a real probe.
 fn native_context(root: &std::path::Path) -> Option<ToolContext> {
     let mut context = ToolContext::new(root);
     context.auto_approve = true;
@@ -139,6 +140,7 @@ fn python(script: &str) -> String {
 
 #[cfg(unix)]
 #[tokio::test]
+#[allow(clippy::print_stderr)] // Native enforcement receipt, outside the TUI runtime.
 async fn enforced_readonly_native_python_reads_sqlite_and_cannot_write() {
     let tmp = tempdir().unwrap();
     let Some(context) = native_context(tmp.path()) else {
@@ -188,6 +190,7 @@ async fn enforced_readonly_native_python_reads_sqlite_and_cannot_write() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[allow(clippy::print_stderr)] // Native enforcement receipt, outside the TUI runtime.
 async fn enforced_readonly_native_python_cannot_reach_a_loopback_listener() {
     let tmp = tempdir().unwrap();
     let Some(context) = native_context(tmp.path()) else {

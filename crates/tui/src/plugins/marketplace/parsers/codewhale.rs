@@ -245,16 +245,16 @@ fn parse_codewhale_entry(
         labels.push(bounded.map(ToString::to_string));
     }
     let mut icon = labels.pop().flatten();
-    if let Some(value) = &icon {
-        if let Err(reason) = crate::plugins::manifest::validate_icon(value) {
-            entry_diags.push(MarketplaceDiagnostic::error(
-                "INVALID_ICON",
-                reason,
-                Some(name.clone()),
-                Some(index),
-            ));
-            icon = None;
-        }
+    if let Some(value) = &icon
+        && let Err(reason) = crate::plugins::manifest::validate_icon(value)
+    {
+        entry_diags.push(MarketplaceDiagnostic::error(
+            "INVALID_ICON",
+            reason,
+            Some(name.clone()),
+            Some(index),
+        ));
+        icon = None;
     }
     let author = labels.pop().flatten();
     let display_name = labels.pop().flatten();
