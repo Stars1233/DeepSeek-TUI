@@ -735,7 +735,7 @@ fn runtime_permission_ceiling(role: &FleetRole) -> PermissionCeiling {
         write: profile.permissions.write,
         network_tool: profile.permissions.network,
         shell,
-        delegation_depth: profile.max_spawn_depth,
+        delegation_depth: profile.remaining_spawn_depth(),
         tools,
     }
 }

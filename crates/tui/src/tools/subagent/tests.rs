@@ -159,7 +159,7 @@ fn make_assignment() -> SubAgentAssignment {
     SubAgentAssignment::new("prompt".to_string(), Some("worker".to_string()))
 }
 
-fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
+pub(super) fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
     SubAgentResult {
         usage: None,
         name: "agent_test".to_string(),
@@ -188,14 +188,15 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
     }
 }
 
-fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
+pub(super) fn make_worker_spec(worker_id: &str, workspace: PathBuf) -> AgentWorkerSpec {
     let tool_profile =
         AgentWorkerToolProfile::Explicit(vec!["read_file".to_string(), "grep_files".to_string()]);
     let mut runtime_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
     runtime_profile.tools =
         ToolScope::Explicit(vec!["read_file".to_string(), "grep_files".to_string()]);
     runtime_profile.model = ModelRoute::Fixed("deepseek-v4-flash".to_string());
-    runtime_profile.max_spawn_depth = DEFAULT_MAX_SPAWN_DEPTH.saturating_sub(1);
+    runtime_profile.max_spawn_depth = DEFAULT_MAX_SPAWN_DEPTH;
+    runtime_profile.spawn_depth = 1;
     AgentWorkerSpec {
         worker_id: worker_id.to_string(),
         run_id: worker_id.to_string(),
@@ -661,7 +662,8 @@ fn agent_worker_profile_derives_from_parent_without_escalation() {
          surface + network); children inherit the full-shell authority \
          without gaining write"
     );
-    assert_eq!(profile.max_spawn_depth, DEFAULT_MAX_SPAWN_DEPTH - 1);
+    assert_eq!(profile.max_spawn_depth, DEFAULT_MAX_SPAWN_DEPTH);
+    assert_eq!(profile.spawn_depth, runtime.spawn_depth);
     assert_eq!(
         profile.model,
         ModelRoute::Fixed("deepseek-v4-pro".to_string())
@@ -5617,18 +5619,31 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     let mut expected = [
         "action",
         "agent_id",
+        "agent_ids",
+        "all_parked",
+        "coordination_contracts",
+        "deliverables",
+        "detail",
         "detached",
+        "exact_files",
+        "expected_artifact",
+        "limit",
+        "max_steps",
         "message",
         "model",
         "model_strength",
         "name",
+        "offset",
         "profile",
         "prompt",
         "resume_from",
         "thinking",
+        "token_budget",
         "type",
         "until",
+        "wall_time_secs",
         "worktree",
+        "write_authority",
         "write_roots",
     ];
     expected.sort_unstable();
@@ -5639,11 +5654,8 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     );
     for unadvertised in [
         "max_depth",
-        "max_steps",
-        "wall_time_secs",
         "fork_context",
         "workspace_policy",
-        "write_authority",
         "worktree_base",
         "worktree_branch",
         "worktree_path",
@@ -5651,14 +5663,10 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "deliberate",
         "dependencies",
         "acceptance",
-        "expected_artifact",
-        "exact_files",
-        "coordination_contracts",
         "timeout_secs",
         "reason",
         "include_archived",
         // Pre-#5324 precedent: parse-accepted but never advertised.
-        "token_budget",
     ] {
         assert!(
             agent_schema["properties"].get(unadvertised).is_none(),
@@ -16024,7 +16032,7 @@ fn format_step_counter_keeps_concrete_budgets() {
 #[test]
 fn child_step_override_wins_and_clamps_to_hard_ceiling() {
     assert_eq!(resolve_max_steps(FleetRole::Scout, None, None), 0);
-    assert_eq!(resolve_max_steps(FleetRole::Scout, Some(0), Some(90)), 0);
+    assert_eq!(resolve_max_steps(FleetRole::Scout, Some(0), Some(90)), 90);
     assert_eq!(resolve_max_steps(FleetRole::Builder, Some(7), None), 7);
     assert_eq!(
         resolve_max_steps(FleetRole::Worker, Some(u32::MAX), None),
@@ -16046,8 +16054,8 @@ fn child_wall_timeout_reason_is_typed_and_actionable() {
     let reason = child_wall_time_exhausted_reason(Duration::from_millis(1));
     assert!(reason.contains("wall-time budget exhausted"), "{reason}");
     assert!(reason.contains("limit: 0s"), "{reason}");
-    assert!(reason.contains("wall_time_secs"), "{reason}");
-    assert!(reason.contains("smaller independent tasks"), "{reason}");
+    assert!(reason.contains("operator"), "{reason}");
+    assert!(reason.contains("partial work is preserved"), "{reason}");
     assert!(!reason.contains("token_budget"), "{reason}");
 }
 
@@ -16479,9 +16487,12 @@ async fn launch_gate_wait_counts_against_child_wall_timeout() {
     let snapshot = manager
         .get_result(&agent_id)
         .expect("timed-out child remains inspectable");
-    let SubAgentStatus::Failed(error) = &snapshot.status else {
-        panic!("wall timeout must be a typed child failure: {snapshot:?}");
-    };
+    assert_eq!(snapshot.status, SubAgentStatus::BudgetExhausted);
+    let error = &snapshot
+        .checkpoint
+        .as_ref()
+        .expect("wall-budget checkpoint")
+        .reason;
     assert!(
         error.contains("child wall-time budget exhausted"),
         "{error}"
@@ -16646,7 +16657,7 @@ async fn incomplete_then_complete_chat_client(
     (client, calls)
 }
 
-async fn run_incomplete_response_worker(
+pub(super) async fn run_incomplete_response_worker(
     workspace: &Path,
     stop_reason: &str,
     max_steps: u32,
@@ -16781,18 +16792,21 @@ async fn output_limit_cause_wins_over_generic_token_budget() {
         run_incomplete_response_worker(tmp.path(), "max_tokens", 4, Some(10)).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let SubAgentStatus::Failed(reason) = &result.status else {
-        panic!(
-            "expected exact output-limit failure, got {:?}",
-            result.status
-        );
-    };
+    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
+    let reason = &result
+        .checkpoint
+        .as_ref()
+        .expect("budget checkpoint")
+        .reason;
     assert!(reason.contains("output was truncated"), "{reason}");
     assert!(reason.contains("`max_tokens`"), "{reason}");
-    assert!(!reason.contains("token budget exhausted ("), "{reason}");
-    assert_eq!(
-        result.result.as_deref(),
-        Some("partial response diagnostics")
+    assert!(reason.contains("token budget exhausted"), "{reason}");
+    assert!(
+        result
+            .result
+            .as_deref()
+            .unwrap()
+            .contains("partial response diagnostics")
     );
     assert_eq!(total_tokens, Some(15), "usage must still be recorded");
     assert_partial_tool_was_not_executed(&mailbox);
@@ -16805,15 +16819,21 @@ async fn non_output_incomplete_cause_wins_over_generic_token_budget() {
         run_incomplete_response_worker(tmp.path(), "incomplete:content_filter", 4, Some(10)).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let SubAgentStatus::Failed(reason) = &result.status else {
-        panic!("expected exact incomplete failure, got {:?}", result.status);
-    };
+    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
+    let reason = &result
+        .checkpoint
+        .as_ref()
+        .expect("budget checkpoint")
+        .reason;
     assert!(reason.contains("response was incomplete"), "{reason}");
     assert!(reason.contains("`content_filter`"), "{reason}");
-    assert!(!reason.contains("token budget exhausted"), "{reason}");
-    assert_eq!(
-        result.result.as_deref(),
-        Some("partial response diagnostics")
+    assert!(reason.contains("token budget exhausted"), "{reason}");
+    assert!(
+        result
+            .result
+            .as_deref()
+            .unwrap()
+            .contains("partial response diagnostics")
     );
     assert_eq!(total_tokens, Some(15), "usage must still be recorded");
     assert_partial_tool_was_not_executed(&mailbox);
@@ -16923,14 +16943,15 @@ async fn worker_stops_with_typed_wall_time_reason() {
         .await
         .get_result(&agent_id)
         .expect("agent registered");
-    match result.status {
-        SubAgentStatus::Failed(reason) => {
-            assert!(reason.contains("wall-time budget exhausted"), "{reason}");
-            assert!(reason.contains("limit:"), "{reason}");
-            assert!(reason.contains("wall_time_secs"), "{reason}");
-        }
-        other => panic!("expected typed wall-time failure, got {other:?}"),
-    }
+    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
+    let reason = &result
+        .checkpoint
+        .as_ref()
+        .expect("wall-budget checkpoint")
+        .reason;
+    assert!(reason.contains("wall-time budget exhausted"), "{reason}");
+    assert!(reason.contains("limit:"), "{reason}");
+    assert!(reason.contains("operator"), "{reason}");
 }
 
 #[tokio::test]

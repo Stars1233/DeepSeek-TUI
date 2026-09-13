@@ -73,6 +73,7 @@ use crate::work_graph::{
 };
 use crate::worker_profile::{
     ChildLaunchManifest, ModelRoute, ShellPolicy, ToolScope, WorkerRuntimeProfile,
+    narrow_model_steps, narrow_optional_limit,
 };
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
@@ -289,16 +290,16 @@ fn format_step_counter(steps: u32, max_steps: u32) -> String {
 }
 
 fn resolve_max_steps(role: FleetRole, explicit: Option<u32>, configured: Option<u32>) -> u32 {
-    explicit
-        .unwrap_or_else(|| {
-            configured.unwrap_or_else(|| WorkerRuntimeProfile::default_max_steps(role))
-        })
-        .min(MAX_SUBAGENT_STEPS)
+    narrow_model_steps(
+        WorkerRuntimeProfile::default_max_steps(role),
+        narrow_model_steps(configured.unwrap_or(0), explicit.unwrap_or(0)),
+    )
+    .min(MAX_SUBAGENT_STEPS)
 }
 
 fn child_wall_time_exhausted_reason(limit: Duration) -> String {
     format!(
-        "child wall-time budget exhausted (limit: {}s); raise it with wall_time_secs or split the work into smaller independent tasks",
+        "child wall-time budget exhausted (limit: {}s); partial work is preserved; narrow the task or have the operator raise the inherited limit",
         limit.as_secs()
     )
 }
@@ -1435,7 +1436,8 @@ fn worker_profile_from_spec(spec: &AgentWorkerSpec) -> WorkerRuntimeProfile {
     let mut profile = WorkerRuntimeProfile::for_role(spec.agent_type.clone());
     profile.tools = worker_tool_scope(&spec.tool_profile);
     profile.model = ModelRoute::Fixed(spec.model.clone());
-    profile.max_spawn_depth = spec.max_spawn_depth.saturating_sub(spec.spawn_depth);
+    profile.max_spawn_depth = spec.max_spawn_depth;
+    profile.spawn_depth = spec.spawn_depth;
     profile.max_steps = spec.max_steps.min(MAX_SUBAGENT_STEPS);
     profile.background = true;
     profile
@@ -1468,9 +1470,10 @@ fn worker_profile_for_spawn(
             .map(|config| config.provider_identity_for(provider))
             .unwrap_or_else(|| provider.as_str().to_string()),
     );
-    requested.max_spawn_depth = runtime.max_spawn_depth.saturating_sub(runtime.spawn_depth);
+    requested.max_spawn_depth = runtime.max_spawn_depth;
     requested.background = true;
     let mut profile = runtime.worker_profile.derive_child(&requested);
+    profile.spawn_depth = runtime.spawn_depth;
     // Route binding already resolved the child tier, including an absent tier.
     // Authority intersection must not re-inherit a different parent setting.
     profile.reasoning_effort = runtime.reasoning_effort.clone();
@@ -1482,6 +1485,15 @@ fn normalize_worker_record(mut record: AgentWorkerRecord) -> AgentWorkerRecord {
     if record.spec.runtime_profile == WorkerRuntimeProfile::default() {
         record.spec.runtime_profile = worker_profile_from_spec(&record.spec);
     }
+    // Pre-migration profile depths were relative. Keep their smaller ceiling
+    // rather than upgrading old persisted authority; align the current position
+    // from the authoritative worker spec.
+    record.spec.runtime_profile.spawn_depth = record.spec.spawn_depth;
+    record.spec.max_spawn_depth = record
+        .spec
+        .max_spawn_depth
+        .min(record.spec.runtime_profile.max_spawn_depth);
+    record.spec.runtime_profile.max_spawn_depth = record.spec.max_spawn_depth;
     let run_id = agent_worker_run_id(&record.spec);
     if record.actor_kind.is_empty() {
         record.actor_kind = default_subagent_actor_kind();
@@ -2756,7 +2768,8 @@ impl SubAgentRuntime {
     #[must_use]
     #[allow(dead_code)]
     pub fn with_max_spawn_depth(mut self, max: u32) -> Self {
-        self.max_spawn_depth = max;
+        self.max_spawn_depth = max.min(codewhale_config::MAX_SPAWN_DEPTH_CEILING);
+        self.worker_profile.max_spawn_depth = self.max_spawn_depth;
         self
     }
 
@@ -2864,9 +2877,11 @@ impl SubAgentRuntime {
             worker_profile: self.worker_profile.clone(),
             event_tx: self.event_tx.clone(),
             manager: self.manager.clone(),
-            spawn_depth: self.spawn_depth + 1,
+            spawn_depth: self.spawn_depth.saturating_add(1),
             parent_agent_id: self.parent_agent_id.clone(),
-            max_spawn_depth: self.max_spawn_depth,
+            max_spawn_depth: self
+                .max_spawn_depth
+                .min(self.worker_profile.max_spawn_depth),
             cancel_token,
             foreground_children: self.foreground_children.clone(),
             mailbox: self.mailbox.clone(),
@@ -2898,7 +2913,10 @@ impl SubAgentRuntime {
     /// Whether the next spawn would exceed the depth cap.
     #[must_use]
     pub fn would_exceed_depth(&self) -> bool {
-        self.spawn_depth + 1 > self.max_spawn_depth
+        self.spawn_depth
+            >= self
+                .max_spawn_depth
+                .min(self.worker_profile.max_spawn_depth)
     }
 }
 
@@ -4653,11 +4671,14 @@ impl SubAgentManager {
     }
 
     fn prune_worker_records(&mut self) {
+        let budget_records = self.budget_records_in_use();
         while self.worker_records.len() > MAX_AGENT_WORKER_RECORDS {
             let oldest_terminal = self
                 .worker_records
                 .values()
-                .filter(|record| record.status.is_terminal())
+                .filter(|record| {
+                    record.status.is_terminal() && !budget_records.contains(&record.spec.worker_id)
+                })
                 .min_by(|a, b| {
                     a.updated_at_ms
                         .cmp(&b.updated_at_ms)
@@ -5153,7 +5174,15 @@ impl SubAgentManager {
     fn aggregate_budget_spent(&self, scope_id: &str) -> u64 {
         self.worker_records
             .values()
-            .filter(|record| record.usage.budget_scope.as_deref() == Some(scope_id))
+            .filter(|record| {
+                self.budget_ancestors(&record.spec.worker_id)
+                    .iter()
+                    .any(|id| {
+                        self.worker_records.get(id).is_some_and(|ancestor| {
+                            ancestor.usage.budget_scope.as_deref() == Some(scope_id)
+                        })
+                    })
+            })
             .fold(0_u64, |total, record| {
                 total.saturating_add(record.usage.total_tokens.unwrap_or(0))
             })
@@ -5176,14 +5205,16 @@ impl SubAgentManager {
         parent_run_id: Option<&str>,
         requested_budget: Option<u64>,
     ) -> Result<Option<AgentUsageBudgetScope>> {
-        let scope = if let Some(limit) = positive_token_budget(requested_budget) {
-            Some((worker_id.to_string(), limit))
-        } else if let Some(parent_scope) = self.inherited_budget_scope(parent_run_id) {
-            Some(parent_scope)
-        } else {
-            self.default_token_budget
-                .map(|limit| (worker_id.to_string(), limit))
-        };
+        // A nested request stays in its ancestor's accounting pool. Its local
+        // cap is stored on the worker profile and checked separately; creating
+        // a new pool here would make its spend disappear from the parent.
+        let scope = self.inherited_budget_scope(parent_run_id).or_else(|| {
+            narrow_optional_limit(
+                self.default_token_budget,
+                positive_token_budget(requested_budget),
+            )
+            .map(|limit| (worker_id.to_string(), limit))
+        });
 
         let Some((scope_id, limit)) = scope else {
             return Ok(None);
@@ -5201,6 +5232,119 @@ impl SubAgentManager {
             spent,
             remaining,
         }))
+    }
+
+    /// Follow both delegation and continuation edges. A set makes malformed
+    /// persisted cycles finite and ensures shared descendants count once.
+    fn budget_ancestors(&self, worker_id: &str) -> BTreeSet<String> {
+        let mut ancestors = BTreeSet::new();
+        let mut pending = vec![worker_id.to_string()];
+        while let Some(id) = pending.pop() {
+            if !ancestors.insert(id.clone()) {
+                continue;
+            }
+            if let Some(record) = self.worker_records.get(&id) {
+                pending.extend(record.spec.parent_run_id.iter().cloned());
+                pending.extend(
+                    record
+                        .spec
+                        .launch_manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.resume_from_agent_id.as_ref())
+                        .cloned(),
+                );
+            }
+        }
+        ancestors
+    }
+
+    /// Budget accounting must outlive completed siblings while any member of
+    /// the family/pool remains active. Retention cannot refund measured spend.
+    fn budget_records_in_use(&self) -> BTreeSet<String> {
+        let live_ancestors = self
+            .worker_records
+            .values()
+            .filter(|record| !record.status.is_terminal())
+            .flat_map(|record| self.budget_ancestors(&record.spec.worker_id))
+            .collect::<BTreeSet<_>>();
+        let live_scopes = live_ancestors
+            .iter()
+            .filter_map(|id| {
+                self.worker_records
+                    .get(id)
+                    .and_then(|record| record.usage.budget_scope.as_deref())
+            })
+            .collect::<BTreeSet<_>>();
+        self.worker_records
+            .values()
+            .filter(|record| {
+                self.budget_ancestors(&record.spec.worker_id)
+                    .iter()
+                    .any(|id| live_ancestors.contains(id))
+                    || record
+                        .usage
+                        .budget_scope
+                        .as_deref()
+                        .is_some_and(|scope| live_scopes.contains(scope))
+            })
+            .map(|record| record.spec.worker_id.clone())
+            .collect()
+    }
+
+    fn subtree_budget_spent(&self, owner: &str) -> u64 {
+        self.worker_records
+            .values()
+            .filter(|record| {
+                self.budget_ancestors(&record.spec.worker_id)
+                    .contains(owner)
+            })
+            .fold(0_u64, |spent, record| {
+                spent.saturating_add(record.usage.total_tokens.unwrap_or(0))
+            })
+    }
+
+    /// The tightest measured allowance across the shared pool and every local
+    /// ancestor cap. Accounting is provider-reported input + output tokens;
+    /// an in-flight response may overshoot, and is reported in full.
+    fn remaining_worker_tokens(&self, worker_id: &str) -> Option<u64> {
+        self.budget_ancestors(worker_id)
+            .iter()
+            .fold(None, |remaining, id| {
+                let shared = self
+                    .budget_scope_state(id)
+                    .map(|(spent, limit)| limit.saturating_sub(spent));
+                let cap = self
+                    .worker_records
+                    .get(id)
+                    .and_then(|record| record.spec.runtime_profile.token_budget)
+                    .map(|limit| limit.saturating_sub(self.subtree_budget_spent(id)));
+                narrow_optional_limit(remaining, narrow_optional_limit(shared, cap))
+            })
+    }
+
+    fn token_budget_exhausted_detail(&self, worker_id: &str) -> Option<String> {
+        for id in self.budget_ancestors(worker_id) {
+            if let Some((spent, limit)) = self.budget_scope_state(&id)
+                && spent >= limit
+            {
+                return Some(format!(
+                    "shared token budget exhausted ({spent}/{limit} measured input + output tokens across the run)"
+                ));
+            }
+            if let Some(limit) = self
+                .worker_records
+                .get(&id)
+                .and_then(|record| record.spec.runtime_profile.token_budget)
+            {
+                let spent = self.subtree_budget_spent(&id);
+                if spent >= limit {
+                    return Some(format!(
+                        "token budget exhausted for {id} ({spent}/{limit} measured input + output tokens including descendants)"
+                    ));
+                }
+            }
+        }
+        None
     }
 
     fn attach_budget_scope(&mut self, worker_id: &str, scope: AgentUsageBudgetScope) {
@@ -6712,6 +6856,109 @@ impl SubAgentManager {
         self.cleanup(COMPLETED_AGENT_RETENTION);
 
         self.check_admission_capacity()?;
+        runtime.max_spawn_depth = runtime
+            .max_spawn_depth
+            .min(runtime.worker_profile.max_spawn_depth);
+        if runtime.spawn_depth > runtime.max_spawn_depth {
+            return Err(anyhow!(
+                "Sub-agent depth limit reached (child depth {}, absolute max {})",
+                runtime.spawn_depth,
+                runtime.max_spawn_depth
+            ));
+        }
+        // A continuation/fork keeps the source's allowance as well as its
+        // current parent's allowance. The manifest edge preserves this after
+        // reload and for descendant accounting.
+        if let Some(preserved) = options.preserve_runtime_profile.as_ref() {
+            runtime.max_spawn_depth = runtime.max_spawn_depth.min(preserved.max_spawn_depth);
+            runtime.worker_profile.token_budget =
+                narrow_optional_limit(runtime.worker_profile.token_budget, preserved.token_budget);
+            runtime.worker_profile.max_steps =
+                narrow_model_steps(runtime.worker_profile.max_steps, preserved.max_steps);
+            runtime.worker_profile.wall_time_secs = narrow_optional_limit(
+                runtime.worker_profile.wall_time_secs,
+                preserved.wall_time_secs,
+            );
+            runtime.worker_profile.wall_deadline_ms = narrow_optional_limit(
+                runtime.worker_profile.wall_deadline_ms,
+                preserved.wall_deadline_ms,
+            );
+        }
+        let budget_parent = options
+            .resume_from_agent_id
+            .as_deref()
+            .or(runtime.parent_agent_id.as_deref());
+        let inherited_remaining = budget_parent.and_then(|id| self.remaining_worker_tokens(id));
+        if inherited_remaining == Some(0) {
+            return Err(anyhow!(
+                "Sub-agent token budget exhausted; continuation cannot reset its inherited allowance"
+            ));
+        }
+        let effective_token_budget = narrow_optional_limit(
+            narrow_optional_limit(runtime.worker_profile.token_budget, inherited_remaining),
+            narrow_optional_limit(
+                self.default_token_budget,
+                positive_token_budget(options.token_budget),
+            ),
+        );
+        let mut max_steps = narrow_model_steps(
+            runtime.worker_profile.max_steps,
+            resolve_max_steps(agent_type.clone(), options.max_steps, self.max_steps),
+        );
+        if let Some(source) = options
+            .resume_from_agent_id
+            .as_deref()
+            .and_then(|id| self.worker_records.get(id))
+        {
+            if source.spec.max_steps > 0 {
+                let remaining = source.spec.max_steps.saturating_sub(source.steps_taken);
+                if remaining == 0 {
+                    return Err(anyhow!(
+                        "child step budget exhausted; continuation cannot reset its model-turn allowance"
+                    ));
+                }
+                max_steps = narrow_model_steps(max_steps, remaining);
+            }
+            runtime.max_spawn_depth = runtime.max_spawn_depth.min(source.spec.max_spawn_depth);
+        }
+        if runtime.spawn_depth > runtime.max_spawn_depth {
+            return Err(anyhow!(
+                "Sub-agent depth limit reached (child depth {}, absolute inherited max {})",
+                runtime.spawn_depth,
+                runtime.max_spawn_depth
+            ));
+        }
+        let wall_time = options
+            .wall_time
+            .unwrap_or(MAX_CHILD_WALL_TIME)
+            .min(self.wall_time.unwrap_or(DEFAULT_CHILD_WALL_TIME))
+            .min(
+                runtime
+                    .worker_profile
+                    .wall_time_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or(MAX_CHILD_WALL_TIME),
+            )
+            .min(MAX_CHILD_WALL_TIME);
+        let now_ms = epoch_millis_now();
+        let requested_deadline =
+            now_ms.saturating_add(u64::try_from(wall_time.as_millis()).unwrap_or(u64::MAX));
+        let source_deadline = options
+            .resume_from_agent_id
+            .as_deref()
+            .and_then(|id| self.worker_records.get(id))
+            .and_then(|record| record.spec.runtime_profile.wall_deadline_ms);
+        let deadline_ms =
+            narrow_optional_limit(runtime.worker_profile.wall_deadline_ms, source_deadline)
+                .map_or(requested_deadline, |deadline| {
+                    deadline.min(requested_deadline)
+                });
+        if deadline_ms <= now_ms {
+            return Err(anyhow!(
+                "child wall-time budget exhausted; continuation cannot reset its deadline"
+            ));
+        }
+        let wall_time = Duration::from_millis(deadline_ms - now_ms);
 
         if let Some(model) = options.model.as_deref() {
             runtime.model = model.to_string();
@@ -6723,11 +6970,8 @@ impl SubAgentManager {
         // registry, a racing descendant is refused rather than escaping the
         // one-shot join and publishing after TurnComplete.
         let foreground_child_registration = runtime.foreground_child_registration(&agent_id)?;
-        let budget_scope = self.resolve_spawn_budget_scope(
-            &agent_id,
-            runtime.parent_agent_id.as_deref(),
-            options.token_budget,
-        )?;
+        let budget_scope =
+            self.resolve_spawn_budget_scope(&agent_id, budget_parent, effective_token_budget)?;
         let active_names: std::collections::HashSet<String> = self
             .agents
             .values()
@@ -6792,15 +7036,11 @@ impl SubAgentManager {
             Some(tools) => AgentWorkerToolProfile::Explicit(tools),
             None => AgentWorkerToolProfile::Inherited,
         };
-        let runtime_profile = match options.preserve_runtime_profile.clone() {
-            Some(mut preserved) => {
-                // A saved worker keeps its prior restrictions, and resuming it
-                // cannot discard restrictions of the current delegating parent.
-                for rule in &runtime.worker_profile.denied_tools {
-                    if !preserved.denied_tools.contains(rule) {
-                        preserved.denied_tools.push(rule.clone());
-                    }
-                }
+        let mut runtime_profile = match options.preserve_runtime_profile.clone() {
+            Some(preserved) => {
+                // Resuming retains the saved posture only within the current
+                // caller's typed permission, shell, tool and denial ceiling.
+                let mut preserved = runtime.worker_profile.derive_child(&preserved);
                 // Resume the recorded child tier rather than the caller's
                 // current tier. Older manifests omitted it; the child receipt
                 // already records the actual resolved value, including None.
@@ -6929,13 +7169,18 @@ impl SubAgentManager {
             ));
             agent.prompt = prompt.clone();
         }
-        let max_steps = resolve_max_steps(agent_type.clone(), options.max_steps, self.max_steps);
-        runtime.worker_profile.max_steps = max_steps;
-        let wall_time = options
-            .wall_time
-            .or(self.wall_time)
-            .unwrap_or(DEFAULT_CHILD_WALL_TIME)
-            .min(MAX_CHILD_WALL_TIME);
+        runtime.max_spawn_depth = runtime.max_spawn_depth.min(runtime_profile.max_spawn_depth);
+        runtime_profile.max_spawn_depth = runtime.max_spawn_depth;
+        runtime_profile.spawn_depth = runtime.spawn_depth;
+        runtime_profile.max_steps = max_steps;
+        runtime_profile.token_budget = effective_token_budget;
+        runtime_profile.wall_time_secs = Some(
+            wall_time
+                .as_secs()
+                .saturating_add(u64::from(wall_time.subsec_nanos() > 0)),
+        );
+        runtime_profile.wall_deadline_ms = Some(deadline_ms);
+        runtime.worker_profile = runtime_profile.clone();
         let worker_spec = AgentWorkerSpec {
             worker_id: agent_id.clone(),
             run_id: agent_id.clone(),
@@ -6984,7 +7229,7 @@ impl SubAgentManager {
                     .unwrap_or_default(),
                 expected_artifact: options.expected_artifact.clone(),
                 deliverables: delivery_paths.clone(),
-                token_budget: options.token_budget,
+                token_budget: effective_token_budget,
                 resume_identity: Some(agent.session_name.clone()),
                 generation: 1,
                 resume_from_agent_id: options.resume_from_agent_id.clone(),
@@ -7072,7 +7317,7 @@ impl SubAgentManager {
             fork_context: options.fork_context,
             started_at,
             max_steps,
-            token_budget: options.token_budget,
+            token_budget: effective_token_budget,
             wall_time,
             input_rx,
             launch_gate,
@@ -7570,7 +7815,11 @@ impl SubAgentManager {
         // Running / starting / waiting records are always preserved.
         let now_ms = epoch_millis_now();
         let max_age_ms = max_age.as_millis() as u64;
+        let budget_records = self.budget_records_in_use();
         self.worker_records.retain(|worker_id, record| {
+            if budget_records.contains(worker_id) {
+                return true;
+            }
             if active_session_id.is_some() && !scoped_worker_ids.contains(worker_id) {
                 return true;
             }
@@ -8733,16 +8982,16 @@ fn start_requests_read_only_role(input: &Value) -> bool {
 /// pins this. Field descriptions own lifecycle and scope details; do not
 /// repeat them here on every request.
 const AGENT_TOOL_DESCRIPTION: &str = concat!(
-    "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
+    "Start with action=start and prompt; returns an agent_id immediately. Read-only roles need no extra fields. Healthy children continue after an ordinary parent response; detached=true also opts out of parent-turn cancellation. ",
     "Use multiple starts for independent parallel tasks. ",
     "type selects the Fleet role: general (full tool access for multi-step tasks), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
     "profile selects a saved member or built-in role. Saved profile and manual role pins are exact; model/strength choose unpinned routes; thinking overrides the tier. ",
     "Use action=roster for resolved roles, models, reasoning, context and cost evidence; it makes no provider request. ",
-    "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
+    "token_budget, max_steps and wall_time_secs narrow inherited and operator limits. At a limit, recorded partial work and usage return without an extra model request. ",
     "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
     "Coordinate through this same tool; action and until describe message, followup, interrupt and wait behavior. ",
     "action=claim widens your own enforced write scope: pass write_roots (and optionally exact_files, coordination_contracts) before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
-    "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; claim requires at least one scope entry; roster, status, and wait are unscoped. ",
+    "Action contract: start requires prompt; message/followup require targets and a message; followup accepts one id, agent_ids or all_parked=true and returns continuation mappings. peek/interrupt/cancel require a target; claim requires scope entries; status is compact and paginated unless an addressed detail is requested. ",
     "This is the whole model-facing sub-agent surface; there is no second transport. ",
     "In Operate, arbitrary shell remains gated. ",
     "Legacy action=status|peek|cancel remain for compatibility."
@@ -8758,8 +9007,8 @@ impl ToolSpec for AgentTool {
         AGENT_TOOL_DESCRIPTION
     }
 
-    /// Routing choices are advertised alongside lifecycle and scope fields.
-    /// Budgets and legacy execution knobs remain parse-accepted for replay.
+    /// One schema advertises the runtime's routing, scope, lifecycle and
+    /// narrowing-budget contract. Legacy aliases remain accepted for replay.
     fn input_schema(&self) -> Value {
         let target_required = json!([
             {
@@ -8771,13 +9020,18 @@ impl ToolSpec for AgentTool {
                 "required": ["name"]
             }
         ]);
+        let followup_targets = json!([
+            {"anyOf": target_required.clone(), "not": {"anyOf": [{"required": ["agent_ids"]}, {"required": ["all_parked"]}]}},
+            {"required": ["agent_ids"], "not": {"anyOf": [{"required": ["agent_id"]}, {"required": ["name"]}, {"required": ["all_parked"]}]}},
+            {"required": ["all_parked"], "not": {"anyOf": [{"required": ["agent_id"]}, {"required": ["name"]}, {"required": ["agent_ids"]}]}}
+        ]);
         json!({
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
                     "enum": ["start", "roster", "status", "peek", "message", "followup", "interrupt", "wait", "claim", "release", "cancel"],
-                    "description": "start launches a turn-owned worker and returns immediately. roster lists roles with their resolved routes and capability/cost evidence. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers notes to a running child or continues an interrupted child from its checkpoint; use the returned agent_id for subsequent waits/messages. Retrying followup on the original interrupted id reuses its successor in this runtime. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). release clears write claims whose owner is no longer running — the remediation a write-scope contention refusal names; pass agent_id to clear one, omit it to sweep. cancel permanently cancels a running child."
+                    "description": "start launches a worker and returns immediately. Healthy workers continue after an ordinary parent response. roster lists roles with their resolved routes and capability/cost evidence. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers notes to a running child or continues an interrupted child from its checkpoint; use the returned agent_id for subsequent waits/messages. Retrying followup on the original interrupted id reuses its successor. Bulk targets return individual continuation mappings and errors. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). release clears write claims whose owner is no longer running — the remediation a write-scope contention refusal names; pass agent_id to clear one, omit it to sweep. cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
@@ -8788,8 +9042,23 @@ impl ToolSpec for AgentTool {
                     "type": "string",
                     "description": "Agent id or session name for any action except start and unscoped status/wait."
                 },
+                "agent_ids": {
+                    "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "For followup, a bounded batch of ids. Choose exactly one target form: agent_id/name, agent_ids, or all_parked=true."
+                },
+                "all_parked": {
+                    "type": "boolean", "const": true,
+                    "description": "For followup, continue all parked children you control, with individual mappings and errors. Mutually exclusive with ids."
+                },
+                "detail": {
+                    "type": "boolean",
+                    "description": "For addressed status/peek with agent_id, include a bounded page of detailed messages/events. Unscoped status always stays compact."
+                },
+                "offset": {"type": "integer", "minimum": 0, "description": "Status/detail page offset; use the returned next_offset."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum rows per status/detail page, default 20."},
                 "message": {
-                    "type": "string",
+                    "type": "string", "minLength": 1,
                     "description": "Parent note for action=message or action=followup. message queues only; followup wakes a running child or continues a parked child from its checkpoint."
                 },
                 "name": {
@@ -8802,7 +9071,7 @@ impl ToolSpec for AgentTool {
                 },
                 "detached": {
                     "type": "boolean",
-                    "description": "False (default): the turn owns this child's non-detached subtree; the parent gets one chance to join before resumable parking. true: detached work outlives the turn; inspect or cancel it with agent(action=cancel)."
+                    "description": "Default children continue after ordinary parent turn completion and remain explicitly cancellable. true additionally opts this subtree out of parent-turn cancellation; its own budgets still apply."
                 },
                 "type": {
                     "type": "string",
@@ -8835,6 +9104,39 @@ impl ToolSpec for AgentTool {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Repo-relative directory trees a write-capable agent may mutate. On action=start: the scope this child claims, defaulting to the parent workspace ('.') when omitted. On action=claim: the trees to add to your own enforced scope, which you must do before mutating anything outside it. Paths outside the parent workspace are refused."
+                },
+                "token_budget": {
+                    "type": "integer", "minimum": 1,
+                    "description": "Measured provider input + output token allowance for this child and descendants. Only narrows inherited/operator pools. Request output is capped to remaining allowance; unknown prompt tokens or responses already in flight may overshoot and are reported in full. No extra model request for partial handback."
+                },
+                "max_steps": {
+                    "type": "integer", "minimum": 1, "maximum": MAX_SUBAGENT_STEPS,
+                    "description": "Maximum model turns for this run, only narrowing role/operator/parent limits. Continuation retains its remaining allowance."
+                },
+                "wall_time_secs": {
+                    "type": "integer", "minimum": 1, "maximum": MAX_CHILD_WALL_TIME.as_secs(),
+                    "description": "Whole-run wall time including queue, model and tools. Only narrows inherited/operator deadlines; continuation does not restart the clock."
+                },
+                "deliverables": {
+                    "type": "array", "maxItems": 16,
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Repo-relative files expected at completion, checked for scope, regular-file existence and nonempty contents."
+                },
+                "expected_artifact": {
+                    "type": "string",
+                    "description": "Human-readable expected outcome; declare file paths separately in deliverables for runtime checks."
+                },
+                "write_authority": {
+                    "type": "string", "enum": ["read_only", "workspace_write", "worktree_write"],
+                    "description": "Optional typed narrowing of the child's write permissions. read_only admits no write scope; worktree_write requires worktree isolation."
+                },
+                "exact_files": {
+                    "type": "array", "items": {"type": "string", "minLength": 1},
+                    "description": "Repo-relative files the write-capable child claims, or files added by action=claim. Prefer disjoint files when peers own neighboring paths."
+                },
+                "coordination_contracts": {
+                    "type": "array", "items": {"type": "string", "minLength": 1},
+                    "description": "Named coordination contracts claimed by the child or added by action=claim. Peer contention is refused."
                 },
                 "resume_from": {
                     "type": "string",
@@ -8875,7 +9177,7 @@ impl ToolSpec for AgentTool {
                                 "message": {}
                             },
                             "required": ["message"],
-                            "anyOf": target_required.clone()
+                            "oneOf": followup_targets
                         },
                         {
                             "properties": {"action": {"const": "interrupt"}},
@@ -10525,6 +10827,54 @@ async fn supervise_subagent_task_body(
     std::panic::resume_unwind(panic);
 }
 
+/// Budget handback consumes no additional model turns or tokens. Preserve
+/// recorded work and its checkpoint, without claiming that it is complete.
+fn budget_partial_result(mut result: SubAgentResult, cause: &str) -> SubAgentResult {
+    let text = result
+        .result
+        .take()
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| {
+            result.checkpoint.as_ref().and_then(|checkpoint| {
+                checkpoint
+                    .messages
+                    .iter()
+                    .rev()
+                    .filter(|message| message.role == Role::Assistant)
+                    .flat_map(|message| message.content.iter().rev())
+                    .find_map(|block| match block {
+                        ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+            })
+        });
+    let measured = result
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.total_tokens)
+        .map(|tokens| format!("Measured worker usage: {tokens} input + output tokens."))
+        .unwrap_or_else(|| "Worker token usage has not been reported.".to_string());
+    let partial = text
+        .map(|text| text.chars().take(4_000).collect::<String>())
+        .unwrap_or_else(|| {
+            "No assistant text was recorded; inspect the checkpoint for completed tool work."
+                .to_string()
+        });
+    result.status = SubAgentStatus::BudgetExhausted;
+    result.result = Some(format!(
+        "{cause}. {measured} No extra model request was made for this handback.\nPartial output:\n{partial}"
+    ));
+    let checkpoint = result.checkpoint.get_or_insert_with(|| {
+        build_subagent_checkpoint(&result.agent_id, cause, &[], result.steps_taken, false)
+    });
+    checkpoint.reason = cause.to_string();
+    checkpoint.continuable = false;
+    result.needs_input = None;
+    result
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_subagent_task_inner(task: SubAgentTask) {
     // `spawn_background_with_assignment_options` installs this before the task
@@ -10543,7 +10893,14 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
         }
     }
 
-    let deadline = task.started_at + task.wall_time;
+    let deadline = (task.started_at + task.wall_time).min(
+        task.runtime.worker_profile.wall_deadline_ms.map_or(
+            task.started_at + task.wall_time,
+            |deadline| {
+                Instant::now() + Duration::from_millis(deadline.saturating_sub(epoch_millis_now()))
+            },
+        ),
+    );
 
     // Interactive launch gate (#3095): direct children acquire a permit
     // before their first model step so a fanout burst beyond the limit
@@ -10582,6 +10939,7 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
         .as_ref()
         .map(ForegroundChildRegistration::parking_signal);
     let result = if launch_wait_timed_out {
+        task.runtime.cancel_token.cancel();
         Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time)))
     } else {
         tokio::time::timeout_at(
@@ -10602,7 +10960,10 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
             ),
         )
         .await
-        .unwrap_or_else(|_| Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time))))
+        .unwrap_or_else(|_| {
+            task.runtime.cancel_token.cancel();
+            Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time)))
+        })
     };
 
     let agent_id = task.agent_id.clone();
@@ -10640,14 +11001,17 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
                         return;
                     }
                 };
-                result.status = SubAgentStatus::Failed(
-                    failure_error
-                        .clone()
-                        .expect("failed task should carry annotated error"),
-                );
-                result.result = None;
-                result.needs_input = None;
-                result
+                let error = failure_error
+                    .clone()
+                    .expect("failed task should carry annotated error");
+                if error.contains("wall-time budget exhausted") {
+                    budget_partial_result(result, &error)
+                } else {
+                    result.status = SubAgentStatus::Failed(error);
+                    result.result = None;
+                    result.needs_input = None;
+                    result
+                }
             }
         };
         manager.finish_terminal_result(&agent_id, terminal, false, true)
@@ -10917,9 +11281,6 @@ fn subagent_done_sentinel(agent_id: &str, res: &SubAgentResult, truncated: bool)
 }
 
 fn subagent_failure_class(status: &SubAgentStatus, error: &str) -> &'static str {
-    if matches!(status, SubAgentStatus::BudgetExhausted) {
-        return "token_budget";
-    }
     let error = error.to_ascii_lowercase();
     if error.contains("no assistant text") || error.contains("without returning a final summary") {
         "empty_turn"
@@ -10927,6 +11288,8 @@ fn subagent_failure_class(status: &SubAgentStatus, error: &str) -> &'static str 
         "step_budget"
     } else if error.contains("wall-time budget exhausted") {
         "wall_time_budget"
+    } else if matches!(status, SubAgentStatus::BudgetExhausted) {
+        "token_budget"
     } else if error.contains("authorization failed")
         || error.contains("usage limit")
         || error.contains("quota")
@@ -11848,6 +12211,7 @@ async fn run_subagent(
     let mut latest_checkpoint: Option<SubAgentCheckpoint> = None;
     let mut tokens_used: u64 = 0;
     let mut terminal_failure_reason: Option<String> = None;
+    let mut budget_failure_reason: Option<String> = None;
     // Distinguish a real "the model chose to stop" exit from an explicitly
     // configured step-cap exit. The normal loop is unbounded (max_steps == 0).
     let mut stopped_naturally = false;
@@ -11927,8 +12291,35 @@ async fn run_subagent(
                 )
                 .await);
             }
-            SubAgentLoopBoundary::StepLimit => break,
+            SubAgentLoopBoundary::StepLimit => {
+                budget_failure_reason = Some(format!(
+                    "child step budget exhausted (limit: {max_steps}; used: {steps})"
+                ));
+                break;
+            }
             SubAgentLoopBoundary::Continue => {}
+        }
+        let remaining_tokens = {
+            let manager = runtime.manager.read().await;
+            narrow_optional_limit(
+                manager.remaining_worker_tokens(&agent_id),
+                token_budget.map(|limit| limit.saturating_sub(tokens_used)),
+            )
+        };
+        if remaining_tokens == Some(0) {
+            budget_failure_reason = Some(
+                runtime
+                    .manager
+                    .read()
+                    .await
+                    .token_budget_exhausted_detail(&agent_id)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "token budget exhausted ({tokens_used} measured input + output tokens)"
+                        )
+                    }),
+            );
+            break;
         }
 
         steps = steps.saturating_add(1);
@@ -12007,9 +12398,17 @@ async fn run_subagent(
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: request_messages,
-            max_tokens: runtime
-                .client
-                .effective_max_output_tokens(&request_route.model),
+            // This is an output ceiling, while the budget includes input too.
+            // Unknown provider tokenization and parallel in-flight responses
+            // can overshoot; settle their real usage and stop before more work.
+            max_tokens: u32::try_from(
+                remaining_tokens.unwrap_or(u64::MAX).min(u64::from(
+                    runtime
+                        .client
+                        .effective_max_output_tokens(&request_route.model),
+                )),
+            )
+            .expect("bounded to the route output ceiling"),
             system: Some(request_system.clone()),
             tools: has_tools.then(|| tools.clone()),
             tool_choice: has_tools.then(|| json!({ "type": "auto" })),
@@ -12212,38 +12611,11 @@ async fn run_subagent(
         )
         .await;
 
-        // Per-worker token-budget enforcement (#3321): stop a single runaway
-        // worker once its accumulated model tokens exceed its own cap. This
-        // complements — and does not double-count — the scope-level admission
-        // gate (#3319), which bounds aggregate fan-out across siblings. The
-        // local accumulator mirrors the manager's `record.usage.total_tokens`
-        // (both derive from `response.usage`), so the scope accounting stays
-        // consistent and is never inflated by this check.
-        //
-        // The shared scope is also enforced HERE, mid-run: admission alone
-        // only refuses *future* spawns, so a parallel fan-out whose children
-        // all attached while the scope was nearly full could collectively
-        // burn many times the configured budget and still report Completed.
-        // Checking the live aggregate after each turn caps the overshoot at
-        // the turns already in flight.
-        // Compute the budget state now, after accounting, but terminalize on
-        // it only after the provider stop reason has been classified below.
         tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
-        let scope_budget_state = {
-            let manager = runtime.manager.read().await;
-            manager.budget_scope_state(&agent_id)
-        };
-        let budget_exhausted_detail = if let Some(budget) =
-            token_budget.filter(|&budget| tokens_used > budget)
-        {
-            Some(format!("token budget exhausted ({tokens_used}/{budget})"))
-        } else {
-            scope_budget_state
-                .filter(|(spent, limit)| spent > limit)
-                .map(|(spent, limit)| {
-                    format!("shared token budget exhausted ({spent}/{limit} spent across the run)")
-                })
-        };
+        let budget_exhausted_detail = runtime.manager.read().await
+            .token_budget_exhausted_detail(&agent_id)
+            .or_else(|| token_budget.filter(|&limit| tokens_used >= limit)
+                .map(|limit| format!("token budget exhausted ({tokens_used}/{limit} measured input + output tokens)")));
 
         let mut current_response_text = None;
         for block in &response.content {
@@ -12291,6 +12663,21 @@ async fn run_subagent(
         )
         .await;
 
+        if let Some(mut detail) = budget_exhausted_detail {
+            if is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+                detail.push_str("; ");
+                detail.push_str(&incomplete_subagent_response_failure(&response));
+            }
+            record_agent_progress(
+                runtime,
+                &agent_id,
+                AgentProgressEventMeta::new(AgentWorkerStatus::Failed).with_step(steps),
+                format!("{}: {detail}", format_step_counter(steps, max_steps)),
+            );
+            budget_failure_reason = Some(detail);
+            break;
+        }
+
         if is_incomplete_stop_reason(response.stop_reason.as_deref()) {
             final_result = current_response_text;
             let failure = incomplete_subagent_response_failure(&response);
@@ -12304,73 +12691,6 @@ async fn run_subagent(
             break;
         }
 
-        if let Some(detail) = budget_exhausted_detail {
-            record_agent_progress(
-                runtime,
-                &agent_id,
-                AgentProgressEventMeta::new(AgentWorkerStatus::Failed).with_step(steps),
-                format!("{}: {detail}", format_step_counter(steps, max_steps)),
-            );
-            let status = SubAgentStatus::BudgetExhausted;
-            let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-            latest_checkpoint = Some(
-                checkpoint_subagent_progress(
-                    runtime,
-                    &agent_id,
-                    "token_budget_exhausted",
-                    &messages,
-                    steps,
-                    true,
-                )
-                .await,
-            );
-            insert_subagent_full_transcript_handle(
-                runtime,
-                &agent_id,
-                &agent_type,
-                &assignment,
-                &status,
-                final_result.as_ref(),
-                latest_checkpoint.as_ref(),
-                transcript_artifact.as_mut(),
-                &messages,
-                steps,
-                duration_ms,
-                fork_context_enabled,
-            )
-            .await;
-            return Ok(SubAgentResult {
-                usage: None,
-                name: agent_id.clone(),
-                agent_id: agent_id.clone(),
-                context_mode: if fork_context_enabled {
-                    "forked"
-                } else {
-                    "fresh"
-                }
-                .to_string(),
-                fork_context: fork_context_enabled,
-                workspace: Some(runtime.context.workspace.clone()),
-                git_branch: current_git_branch(&runtime.context.workspace),
-                agent_type: agent_type.clone(),
-                assignment: assignment.clone(),
-                model: runtime.model.clone(),
-                nickname: None,
-                status,
-                worker_status: None,
-                runtime_permissions: None,
-                parent_run_id: runtime.parent_agent_id.clone(),
-                spawn_depth: runtime.spawn_depth,
-                child_route: None,
-                result: final_result.clone(),
-                steps_taken: steps,
-                checkpoint: latest_checkpoint.clone(),
-                needs_input: None,
-                duration_ms,
-                started_at: Some(started_at),
-                from_prior_session: false,
-            });
-        }
         if tool_uses.is_empty() {
             let child_completions = drain_child_completion_events(&mut child_completion_rx);
             if !child_completions.is_empty() {
@@ -12444,6 +12764,15 @@ async fn run_subagent(
         );
         let mut tool_results: Vec<ContentBlock> = Vec::new();
         for (tool_id, tool_name, tool_input) in tool_uses {
+            if let Some(detail) = runtime
+                .manager
+                .read()
+                .await
+                .token_budget_exhausted_detail(&agent_id)
+            {
+                budget_failure_reason = Some(detail);
+                break;
+            }
             let activity_tool_name = canonical_action_alias(&tool_name, &tool_input).to_string();
             let tool_display_name = subagent_progress_tool_display_name(&activity_tool_name);
             record_agent_progress(
@@ -12580,6 +12909,9 @@ async fn run_subagent(
             )
             .await;
         }
+        if budget_failure_reason.is_some() {
+            break;
+        }
     }
 
     release_resident_leases_for(&agent_id);
@@ -12588,7 +12920,9 @@ async fn run_subagent(
         .map(|text| !text.trim().is_empty())
         .unwrap_or(false);
     // #4050: only a natural stop with a final summary is a real success.
-    let status = if let Some(reason) = terminal_failure_reason {
+    let status = if budget_failure_reason.is_some() {
+        SubAgentStatus::BudgetExhausted
+    } else if let Some(reason) = terminal_failure_reason {
         SubAgentStatus::Failed(reason)
     } else if stopped_naturally {
         if has_final_summary {
@@ -12607,7 +12941,9 @@ async fn run_subagent(
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     latest_checkpoint = Some(build_subagent_checkpoint(
         &agent_id,
-        subagent_status_name(&status),
+        budget_failure_reason
+            .as_deref()
+            .unwrap_or_else(|| subagent_status_name(&status)),
         &messages,
         steps,
         false,
@@ -12628,8 +12964,14 @@ async fn run_subagent(
     )
     .await;
 
-    Ok(SubAgentResult {
-        usage: None,
+    let result = SubAgentResult {
+        usage: runtime
+            .manager
+            .read()
+            .await
+            .worker_records
+            .get(&agent_id)
+            .map(|record| record.usage.clone()),
         name: agent_id.clone(),
         agent_id,
         context_mode: if fork_context_enabled {
@@ -12658,6 +13000,10 @@ async fn run_subagent(
         duration_ms,
         started_at: Some(started_at),
         from_prior_session: false,
+    };
+    Ok(match budget_failure_reason {
+        Some(cause) => budget_partial_result(result, &cause),
+        None => result,
     })
 }
 
@@ -12966,12 +13312,18 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .transpose()?;
     let token_budget =
         parse_optional_positive_u64(input, &["token_budget", "tokenBudget", "max_tokens"])?;
-    let max_steps = parse_optional_u64(input, &["max_steps", "maxSteps"])?.map(|steps| {
-        u32::try_from(steps.min(u64::from(MAX_SUBAGENT_STEPS)))
-            .expect("max_steps is clamped before conversion")
-    });
-    let wall_time = parse_optional_u64(input, &["wall_time_secs", "wallTimeSecs"])?
-        .map(|seconds| Duration::from_secs(seconds.clamp(1, MAX_CHILD_WALL_TIME.as_secs())));
+    let max_steps = parse_optional_bounded_limit(
+        input,
+        &["max_steps", "maxSteps"],
+        u64::from(MAX_SUBAGENT_STEPS),
+    )?
+    .map(|steps| u32::try_from(steps).expect("validated model-turn range"));
+    let wall_time = parse_optional_bounded_limit(
+        input,
+        &["wall_time_secs", "wallTimeSecs"],
+        MAX_CHILD_WALL_TIME.as_secs(),
+    )?
+    .map(Duration::from_secs);
 
     // #4042: optional caller-supplied tool deny-list (unioned with the parent's
     // inherited deny-list) and the legacy inheritance flag (cannot relax policy).
@@ -13703,7 +14055,10 @@ pub(crate) fn session_permission_ceiling(
             runtime.worker_profile.shell,
             runtime.allow_shell,
         ),
-        delegation_depth: runtime.worker_profile.max_spawn_depth,
+        delegation_depth: runtime
+            .max_spawn_depth
+            .min(runtime.worker_profile.max_spawn_depth)
+            .saturating_sub(runtime.spawn_depth),
         // The parent side never withholds the coarse tool bit: fine-grained
         // inherited ToolScope/deny rules are intersected again by the spawn
         // runtime. This value only captures the dimensions represented here.
@@ -14304,24 +14659,30 @@ fn parse_disallowed_tools(input: &Value) -> Result<Option<Vec<String>>, ToolErro
     Ok(parse_tool_name_list(input, "disallowed_tools")?.filter(|tools| !tools.is_empty()))
 }
 
-fn parse_optional_positive_u64(input: &Value, names: &[&str]) -> Result<Option<u64>, ToolError> {
+fn parse_optional_bounded_limit(
+    input: &Value,
+    names: &[&str],
+    maximum: u64,
+) -> Result<Option<u64>, ToolError> {
+    let mut limit = None;
     for name in names {
-        let Some(value) = input.get(*name) else {
-            continue;
-        };
-        let Some(parsed) = value.as_u64() else {
-            return Err(ToolError::invalid_input(format!(
-                "{name} must be a positive integer token count"
-            )));
-        };
-        if parsed == 0 {
-            return Err(ToolError::invalid_input(format!(
-                "{name} must be greater than zero; omit it to inherit or disable the budget"
-            )));
+        if let Some(value) = input.get(*name) {
+            let parsed = value
+                .as_u64()
+                .filter(|value| *value > 0 && *value <= maximum)
+                .ok_or_else(|| {
+                    ToolError::invalid_input(format!(
+                        "{name} must be between 1 and {maximum}; omit it to inherit"
+                    ))
+                })?;
+            limit = narrow_optional_limit(limit, Some(parsed));
         }
-        return Ok(Some(parsed));
     }
-    Ok(None)
+    Ok(limit)
+}
+
+fn parse_optional_positive_u64(input: &Value, names: &[&str]) -> Result<Option<u64>, ToolError> {
+    parse_optional_bounded_limit(input, names, u64::MAX)
 }
 
 #[cfg(test)]
@@ -17100,10 +17461,10 @@ fn summarize_subagent_result(result: &SubAgentResult) -> String {
         (SubAgentStatus::Interrupted(error), _) => format!("Interrupted: {error}"),
         (SubAgentStatus::Cancelled, _) => "Cancelled".to_string(),
         (SubAgentStatus::BudgetExhausted, Some(text)) => format!(
-            "Child token budget exhausted before finishing; partial output preserved below.\n{text}"
+            "Child budget exhausted before finishing; partial output preserved below.\n{text}"
         ),
         (SubAgentStatus::BudgetExhausted, None) => {
-            "Child token budget exhausted before returning a final summary; retry with a smaller scoped task or split the work.".to_string()
+            "Child budget exhausted before returning a final summary; inspect the checkpoint and split the work.".to_string()
         }
         (SubAgentStatus::Failed(error), _) => format!("Failed: {error}"),
         (SubAgentStatus::Running, _) => "Running".to_string(),
@@ -17210,7 +17571,11 @@ const VERIFIER_AGENT_INTRO: &str = concat!(
 // === Tests ===
 
 #[cfg(test)]
+mod delivery_tests;
+#[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod limits_tests;
 #[cfg(test)]
 mod tests;
 

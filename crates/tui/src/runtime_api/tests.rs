@@ -2635,8 +2635,8 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
                 let mut profile = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
                 profile.tools = ToolScope::Explicit(vec!["read_file".to_string()]);
                 profile.model = ModelRoute::Fixed("deepseek-v4-flash".to_string());
-                profile.max_spawn_depth =
-                    crate::tools::subagent::DEFAULT_MAX_SPAWN_DEPTH.saturating_sub(1);
+                profile.max_spawn_depth = crate::tools::subagent::DEFAULT_MAX_SPAWN_DEPTH;
+                profile.spawn_depth = 1;
                 profile
             },
             max_steps: 4,

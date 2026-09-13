@@ -467,7 +467,9 @@ async fn saved_profile_cannot_widen_parent_posture_or_depth_and_missing_provider
     let worker = guard.worker_records.get(id).unwrap();
     assert!(!worker.spec.runtime_profile.permissions.write);
     assert_eq!(worker.spec.runtime_profile.shell, ShellPolicy::None);
-    assert_eq!(worker.spec.runtime_profile.max_spawn_depth, 0);
+    assert_eq!(worker.spec.runtime_profile.max_spawn_depth, 1);
+    assert_eq!(worker.spec.runtime_profile.spawn_depth, 1);
+    assert!(!worker.spec.runtime_profile.can_spawn_child());
     guard.cancel_agent(id).unwrap();
 }
 

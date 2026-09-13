@@ -499,7 +499,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         tool_profile,
         runtime_profile: runtime_profile.clone(),
         max_steps,
-        spawn_depth: 0,
+        spawn_depth: runtime_profile.spawn_depth,
         max_spawn_depth: runtime_profile.max_spawn_depth,
         child_route: None,
         launch_manifest: Some(launch_manifest),
@@ -1366,7 +1366,8 @@ fn fleet_worker_runtime_profile(
     } else {
         ModelRoute::Fixed(model.to_string())
     };
-    profile.max_spawn_depth = max_spawn_depth.saturating_sub(spawn_depth);
+    profile.max_spawn_depth = max_spawn_depth;
+    profile.spawn_depth = spawn_depth;
     profile.background = true;
     profile
 }
@@ -1444,10 +1445,13 @@ pub fn apply_exec_hardening(
             spec.max_steps.min(exec.max_turns)
         };
     }
-    spec.max_spawn_depth = exec
+    spec.max_spawn_depth = spec
         .max_spawn_depth
+        .min(spec.runtime_profile.max_spawn_depth)
+        .min(exec.max_spawn_depth)
         .min(codewhale_config::MAX_SPAWN_DEPTH_CEILING);
-    spec.runtime_profile.max_spawn_depth = spec.max_spawn_depth.saturating_sub(spec.spawn_depth);
+    spec.runtime_profile.max_spawn_depth = spec.max_spawn_depth;
+    spec.runtime_profile.spawn_depth = spec.spawn_depth;
 
     // Apply tool filtering
     if !exec.allowed_tools.is_empty() || !exec.disallowed_tools.is_empty() {
@@ -4295,7 +4299,8 @@ mod tests {
             spec.runtime_profile.reasoning_effort.as_deref(),
             Some("max")
         );
-        assert_eq!(spec.runtime_profile.max_spawn_depth, 2);
+        assert_eq!(spec.runtime_profile.max_spawn_depth, 3);
+        assert_eq!(spec.runtime_profile.spawn_depth, 1);
     }
 
     #[test]
@@ -4468,7 +4473,8 @@ mod tests {
             ToolScope::Explicit(vec!["read_file".to_string()])
         );
         assert_eq!(spec.runtime_profile.model, ModelRoute::Inherit);
-        assert_eq!(spec.max_spawn_depth, 1);
+        assert_eq!(spec.max_spawn_depth, 2);
+        assert_eq!(spec.spawn_depth, 1);
 
         let permissions = crate::fleet::role::fleet_effective_permissions(
             &spec.agent_type,
@@ -4485,7 +4491,7 @@ mod tests {
         assert_eq!(permissions.tool_scope, "explicit");
         assert_eq!(permissions.tools, vec!["read_file".to_string()]);
         assert!(permissions.background);
-        assert_eq!(permissions.max_spawn_depth, 1);
+        assert_eq!(permissions.max_spawn_depth, 2);
         assert_eq!(permissions.source, "worker_runtime_profile");
     }
 
@@ -4815,10 +4821,13 @@ mod tests {
             context_mode: "fresh".to_string(),
             fork_context: false,
             tool_profile: AgentWorkerToolProfile::Inherited,
-            runtime_profile: WorkerRuntimeProfile::for_role(FleetRole::Worker),
+            runtime_profile: WorkerRuntimeProfile {
+                max_spawn_depth: codewhale_config::MAX_SPAWN_DEPTH_CEILING,
+                ..WorkerRuntimeProfile::for_role(FleetRole::Worker)
+            },
             max_steps: 1000,
             spawn_depth: 0,
-            max_spawn_depth: 0,
+            max_spawn_depth: codewhale_config::MAX_SPAWN_DEPTH_CEILING,
             child_route: None,
             launch_manifest: None,
         };
