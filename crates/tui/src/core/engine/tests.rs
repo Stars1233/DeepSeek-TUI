@@ -4197,11 +4197,7 @@ async fn cancellation_during_blocked_idle_handoff_survives_turn_admission() {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         engine.tx_event = tx;
         handle.rx_event = Arc::new(RwLock::new(rx));
-        engine
-            .tx_event
-            .send(Event::status("full".into()))
-            .await
-            .unwrap();
+        engine.tx_event.send(Event::status("full")).await.unwrap();
         let completion = SubAgentCompletion {
             owner_session_id: engine.session.id.clone(),
             agent_id: "cancel-race-child".into(),
